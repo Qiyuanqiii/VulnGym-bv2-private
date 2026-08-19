@@ -1,6 +1,6 @@
 # VulnGym T1 × T2 自动化闭环：B-v2 首版设计
 
-> 状态：确定性基础与 FakeT2 闭环骨架，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“目标设计”不表示真实 T2 或语义 Judge 已经完成。
+> 状态：确定性 T1 基础、受控闭环编排与本地结构化 T2 Producer 纵切，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示语义 T1、批量回放或最终数据验收已经完成。
 
 ## 1. 目标与总体架构
 
@@ -20,7 +20,7 @@ flowchart TD
     R -->|预算耗尽或无进展| M
 ```
 
-T1 只接收原始资料包和待审 Entry，不读取 T2 的推理或自报置信度。目标 Prompt 约束为：Planner 输出结构化步骤与停止条件；Semantic Judge 只能依据已展示证据并列出反证；Reviewer/Reflection 先看硬事实，再检查 fix/vuln commit、修复后代码、内部 helper 和普通中间节点等高频误判。该 Agent/Prompt 层尚未实现。
+T1 只接收原始资料包和待审 Entry，不读取 T2 的推理或自报置信度。T2 的 Planner、Semantic Judge 与 Reflection 已有严格 JSON 模型调用边界，并只能引用受控工具签发的候选和证据；这仍不等于语义正确性已经得到证明。独立 T1 的完整语义正判、反证审查与全字段裁决仍待实现。
 
 ## 2. 核心契约
 
@@ -43,6 +43,8 @@ Entry Point 需由路由、RPC/CLI、消息回调或反向调用关系证明“�
 | `outputs/validation.jsonl` | T1 正式报告 | 核心字段三态、置信度、可读证据，可附修正建议。 |
 | `outputs/self_assessment.md` | 人工分流说明 | 汇总低置信、冲突和未收敛条目。 |
 | `artifacts/*.jsonl` | 内部 sidecar | `evidence`、`candidates`、`tool_calls`、`repair_history`、`run_manifest`；不得回流污染 Entry。 |
+
+以上是目标落盘边界；确定性 T1 CLI 已写出验证、证据和运行清单，闭环批处理 CLI 及 candidate/tool-call/repair-history 的统一 artifact writer 尚未完成。
 
 统一证据模型如下；`line_start`/`line_end` 如出现必须成对且有序：
 
@@ -68,7 +70,7 @@ Entry Point 需由路由、RPC/CLI、消息回调或反向调用关系证明“�
 
 Git 工具用固定参数数组读取 `cat-file/ls-tree/show`，无任意 shell，不 checkout、不运行 hook/diff driver/textconv；校验 SHA 和相对路径，拒绝绝对路径、`..` 与选项/pathspec 注入，并限制超时和 blob 大小。确定性门禁只接受对象库位于授权根目录内的普通 clone/bare repo，拒绝 gitfile、`commondir`、alternate object database 和 `info/grafts` 历史覆盖；固定 `core.commitGraph=false` 使祖先关系回到原始 commit 对象，并以 `GIT_NO_REPLACE_OBJECTS=1` / `GIT_NO_LAZY_FETCH=1` 阻止 replace refs 与 partial clone 隐式联网/写对象。AST 如需展开源码，只能由后续受控工具创建每任务独立临时目录，不能把该目录绕回只读事实门禁。
 
-确定性输入门禁已接入资源上限：默认单行 JSONL 1 MiB、每批 10,000 条、每条 trace 64 节点、每包 64 个文件；对应硬上限为 32 MiB、100,000 条、256 节点和 256 文件。超限在仓库/Git 扇出前形成结构化单条错误，超长行以固定大小缓冲排空。闭环预算默认每任务 `max_llm_calls=16`、`max_tool_calls=80`、`max_repair_iterations=2`；调用开始前计费，失败不退款，事件账本不含时间或随机值，因而可确定性重放。全字段正确、只剩 `uncertain`、两轮耗尽、无变化/错误重复、预算耗尽、改坏锁定字段、原正确字段回归或证据冲突时立即停止。`uncertain` 不会被自动改写，直接进入人工分流。
+确定性输入门禁已接入资源上限：默认单行 JSONL 1 MiB、每批 10,000 条、每条 trace 64 节点、每包 64 个文件；对应硬上限为 32 MiB、100,000 条、256 节点和 256 文件。超限在仓库/Git 扇出前形成结构化单条错误，超长行以固定大小缓冲排空。闭环预算默认每任务 `max_llm_calls=16`、`max_tool_calls=80`、`max_repair_iterations=2`；调用开始前计费，失败不退款，事件账本可用于确定性的内部一致性对账。全字段正确、只剩 `uncertain`、两轮耗尽、无变化/错误重复、预算耗尽、改坏锁定字段、原正确字段回归或证据冲突时立即停止。`uncertain` 不会被自动改写，直接进入人工分流。
 
 ## 3. 交付边界与实施状态
 
@@ -78,7 +80,7 @@ B-v2 的 Standard 包含：T1 全核心字段三态、可读证据、多源与�
 
 Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归因、复杂 merge/backport、完整 taint 与自动发布。Standard 不建设第三个 Repair Agent、通用平台或远程 Artifact Store。
 
-### 当前已实现：第四阶段闭环契约与 FakeT2 状态机骨架
+### 当前已实现：受控编排与本地结构化 T2 Producer 纵切
 
 - 三份严格机器契约：Entry、Validation、Evidence Schema；`additionalProperties=false`，并有 `EvidenceItem`、`FieldValidation`、`ValidationReport` 可序列化模型。
 - `SchemaAdapter` 覆盖 15 个正式字段、额外/缺失字段、行范围、GHSA URL 与 `report_id` 一致性、ID 大写/去重/CVE-before-GHSA 排序及正式 T2 的 `verify=0`；它不会补造内容字段。
@@ -89,12 +91,19 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - `PatchAnalyzer` 有界解析 Git 或本地 unified diff，输出 changed files/hunks、added/removed 坐标、Guard/early-return/removed-dangerous-call 词法候选、冲突与未决项；本地 patch 可与同一路径的不可变 Git diff 交叉核对。解析事实与漏洞语义分开，`semantic_status` 固定为 `uncertain`。
 - `CriticalOperationResolver` 以 Sink/Guard 双模式核对候选是否位于漏洞 commit 的真实源码及 fix diff 的 removed/replaced side。fix 新增 Guard 只作为旧版控制流缺口线索，不会被转换为漏洞版本位置；即使事实完全吻合，最终角色仍为 `uncertain`。
 - `EntryPointSearcher` 只读取调用者显式提供的不可变 Git blob，支持 Python、JS/TS、Java、Go、Ruby、PHP 的 route/RPC/CLI/handler/export 结构线索，并执行文件数、总字节和候选数预算。它不枚举仓库，也不声称运行时可达性或到达 Critical 的调用图已经证明。
-- `T1DeterministicValidator` 已组合以上三层：Patch 解析失败被隔离到单条记录，字段仍保留可读证据与完整 evidence refs；结构事实绝不把 Entry/Critical 字段提升为语义 `correct`。以上仍是确定性基础设施，不是完整 T1/T2 Agent。
-- `RunTask`、`ProductionOutcome`、`ToolCallRecord`、`RepairPlan`、`Budget` 与 sanitized `RunState` 已形成严格契约。T2 正式候选强制只有 15 字段且 `verify=0`，producer 的 evidence/tool calls/assumptions 与候选物理分离；`RepairPlan` 对 repair/dependent/locked 字段做完整分区，并以 canonical SHA-256 锁定不可改字段。
-- `ClosedLoopOrchestrator` 已可由确定性 FakeT2 驱动：每轮创建全新 T1，仅传原始任务与正式候选；初始候选后最多修复两轮、最多验证三次。它拒绝越权改锁字段、无变化、错误重复、原正确字段回归、未计费工具调用及跨轮 sidecar ID 冲突，所有停止原因进入 Schema-valid 状态快照。快照以 canonical digest 和轮次拓扑保证内部重放闭包，但不是数字签名；若要证明持久化记录未被拥有写权限的一方整体重写，仍须外部签名或可信事件根。真实 T2 尚未接入，因此这是可测试的控制面闭环，不是数据生产能力本身。
+- `T1DeterministicValidator` 已组合以上三层：Patch 解析失败被隔离到单条记录，字段仍保留可读证据与完整 evidence refs；结构事实绝不把 Entry/Critical 字段提升为语义 `correct`。以上仍是确定性 T1 基础设施，不是完整的语义 T1。
+- `T2TaskInputV1` 是严格、版本化、无本机路径的任务契约。公告/patch 相对路径、规范化 GitHub URL 和有界 hints 都视为不受信任务数据；本地资料根、仓库映射、模型后端和凭据只存在于受信进程配置中。
+- `ProducerExecutionContext` 由 Orchestrator 持有的 attempt controller 签发，`LocalT2ContextFactory` 才能把无路径任务绑定到受信本地根、固定工具注册表和模型后端。Producer 不能自行扩大工具 allowlist、伪造调用记录或绕过工具/模型预算；调用记录与预算事件按 task、attempt、policy scope 和事件序号闭合。
+- `RunTask`、`ProductionOutcome` / `ProductionDeferred`、`ToolCallRecord` / `ModelCallRecord`、`RepairPlan`、`Budget` 与 sanitized `RunState` 已形成严格契约。无法建立唯一证据、模型拒绝、预算不足或契约/工具失败时产生显式 defer，而不是拼出部分 Entry。
+- `RepairPlan` 对 repair/dependent/locked 字段做完整分区，并以 canonical SHA-256 锁定不可改字段。版本化 repair tool policy 对各字段给出固定 `required_checks` 与 `allowed_tools`：工具权限只能收窄，必需检查不能删减；空 allowlist 明确表示 deny-all。任何缺少受信验证器或权限的必需检查都 fail closed 为 defer。
+- `LocalStructuredT2Producer` 已支持离线读取真实本地 Git 对象的 generate 流程：严格任务 → plan → 公告/仓库/fix-parent/diff 事实 → 有界候选 → semantic judge → 15 字段 Schema → reflection。模型只能在工具签发的候选 ID 中选择位置，`verify` 固定为 `0`；歧义 fix、非唯一父提交、缺失 source diff、Guard 无法落到漏洞版本等情况都会 defer。
+- 受限 repair 已支持标题、分类等有界字段，并实际执行当前可用的任务、公告与 Schema 检查；其中 semantic check 仍是受限模型判断，不是最终 T1 正判。repair 只能采用 RepairPlan 中 T1 已给出的 `suggested_fix`，只能修改获批字段，且必须保持任务身份与 locked 字段；源码位置、patch 区域、祖先和 trace 连续性等尚无专用全字段 verifier 的检查不会被当作 prompt 文本“默认通过”。
+- `ClosedLoopOrchestrator` 同时支持 FakeT2 回归测试和上述真实 Producer 接口：每轮创建全新 T1，仅传原始任务与正式候选；初始候选后最多修复两轮、最多验证三次。它拒绝越权改锁字段、无变化、错误重复、原正确字段回归、调用/预算对账不闭合及跨轮 sidecar 冲突，所有停止原因进入 Schema-valid 状态快照。
 
-尚未实现：受影响版本范围裁决、merge/backport/squash 的唯一漏洞 commit 解析、AST/调用图/数据流支撑的分类/标题/Entry/Critical 最终语义判断、完整 T1 Prompt/反思循环、真实 T2 Producer/Repair Mode，以及批量闭环 CLI 与完整工具回放。当前批处理覆盖 T1 的资料、Schema、ID、Git 历史、源码位置、Patch 结构与入口线索事实门禁；闭环成功路径暂由 FakeT2/FakeValidator 测试，不会放宽真实 T1 来伪造 `correct`。
+代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立，模型提出的标题、分类和语义选择仍受严格输出契约约束，并等待独立 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
+
+尚未完成：closed-loop 批量 CLI、统一 replay artifact writer 与跨进程重放入口；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义；独立 T1 的语义正判；以及题目要求的最终训练集与公开测试集验收。数据集由独立数据生产流程构建并接入本项目，本仓库当前实现不声称已完成最终 50+20 数据验收。
 
 ### 下一阶段
 
-下一阶段实现真实 T2 Producer 与受限 Repair Mode，并把状态机接入逐任务隔离的批量 CLI、candidate/tool-call/repair-history sidecar。随后增加受影响版本、合并/回移修复边界和语义 Judge；只有这些 Standard 能力在训练/公开集上稳定后，才投入完整 trace、AST/数据流与更多语言增强。
+下一阶段先把现有 Producer/Orchestrator 接入逐任务隔离的 closed-loop 批量 CLI，落盘可校验、可重放的 candidate/tool-call/model-call/repair-history artifacts；再逐项补齐全字段 `required_check` verifier 与独立语义 T1。随后接入独立流程提供的数据集，完成训练集与公开测试集的端到端 50+20 验收，再决定完整 trace、AST/数据流与更多语言增强。

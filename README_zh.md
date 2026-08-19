@@ -242,7 +242,7 @@ ds = load_dataset("json", data_files={
 })
 ```
 
-### 实验性 B-v2 T1 确定性事实门禁
+### 实验性 B-v2 T1 确定性门禁与受控 T2 Producer
 
 B-v2 工具要求 Python 3.10 或更高版本。可按以下命令安装测试依赖并运行完整
 标准库测试套件：
@@ -252,17 +252,38 @@ python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
 ```
 
-仓库现已包含 T1 × T2 自动化方案的第三个可运行纵切：逐行隔离并校验
+仓库现已包含 T1 × T2 自动化方案中可运行的确定性 T1 纵切：逐行隔离并校验
 JSONL，安全读取有界的本地公告/引用/patch 资料包，以不 checkout 的方式读取
 不可变 Git 对象，核对 GHSA/CVE、父提交、祖先关系、精确路径和 ±5 行容差内
 的代码；同时有界解析 unified diff，生成保守的 Sink/Guard 审查候选，并且只在
 显式给出的源码文件集合中搜索 route/RPC/CLI/handler/export 入口线索。
 
-下一层控制面也已提供 Python API（`vulngym_agent.orchestrator`）：严格的
-`ProductionOutcome` / `RepairPlan` / `Budget` / `RunState` 契约，以及可由
-FakeT2 测试的 `ClosedLoopOrchestrator`。每轮都会新建隔离的 T1，最多允许两轮
-字段受限修复；不确定、字段回归、预算耗尽、无进展和 sidecar 冲突都会进入明确
-终态。真实 T2 Producer 与闭环批处理 CLI 仍未实现。
+受控生产纵切也已通过 `vulngym_agent.agents` 与
+`vulngym_agent.orchestrator` Python API 提供。`T2TaskInputV1` 是严格、版本化且
+不携带本机路径的任务契约；由 Orchestrator 持有的 `ProducerExecutionContext`
+经 `LocalT2ContextFactory` 绑定受信本地资料/仓库根、固定工具注册表、模型后端与
+逐 attempt 预算。`LocalStructuredT2Producer` 已能离线读取真实本地 Git 对象生成
+候选，并执行当前确定性检查所支持的受限 repair。证据有歧义、能力缺失或预算/
+契约检查失败时，它会显式 defer，不会拼出不完整 Entry。
+
+`RepairPlan` 采用 fail-closed 策略：字段工具权限只能收窄，`required_checks` 不能
+删减，空工具 allowlist 明确表示 deny-all。repair 只能把 T1 已给出的
+`suggested_fix` 写入获批字段，同时保持 locked 字段和任务身份。目前的 repair 路径
+支持受限的标题和分类修复，并执行已有的任务、公告与 Schema 检查；其中语义选择仍是
+不受信模型输出，不代表最终 T1 正判。若计划要求源码位置、patch 区域、祖先关系或
+trace 连续性等尚无专用验证器的检查，则直接 defer。全字段 `required_check` verifier
+仍未补齐。
+
+`ClosedLoopOrchestrator` 同时支持确定性 FakeT2 回归和真实 Producer 接口。每轮都会
+新建隔离的 T1，最多允许两轮字段受限修复，并将工具/模型调用记录与预算事件闭合；
+不确定、字段回归、预算耗尽、无进展和 sidecar 冲突都会进入明确终态。代码、固定策略
+和本地运行配置属于受信计算基；模型输出与所有任务/资料数据均不受信。canonical
+digest、哈希链和 unsigned JSON transcript 只证明记录内部的 closure 与绑定关系，
+不是数字签名，也不能证明仓库、公告或模型结论的外部真实性。
+
+尚未完成的是 closed-loop 批量 CLI 与 replay artifact writer、全字段必需检查验证器、
+能够给出语义正判的独立 T1，以及训练集/公开测试集的最终验收。数据集由独立数据生产
+流程构建后接入；当前实现不声称已经通过最终 50+20 数据验收。
 
 确定性 T1 CLI 的验证报告、证据和运行清单继续严格分开落盘：
 

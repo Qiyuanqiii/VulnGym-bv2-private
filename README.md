@@ -252,7 +252,7 @@ ds = load_dataset("json", data_files={
 })
 ```
 
-### Experimental B-v2 deterministic T1 fact gate
+### Experimental B-v2 deterministic T1 gate and controlled T2 producer
 
 The B-v2 tools require Python 3.10 or newer. For a reproducible test
 environment, install `requirements-dev.txt` and run the standard-library test
@@ -263,7 +263,7 @@ python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
 ```
 
-The repository now includes the third executable slice of the T1 × T2
+The repository includes an executable deterministic T1 slice of the T1 × T2
 automation design. It validates JSONL rows independently, safely reads bounded
 local advisory/reference/patch packages, reads immutable Git objects without
 checkout, checks GHSA/CVE IDs, parent/ancestry facts, exact paths, and code
@@ -271,13 +271,44 @@ within the ±5-line tolerance, parses bounded unified diffs, derives conservativ
 Sink/Guard review candidates, and searches an explicit source-file allow-list
 for route/RPC/CLI/handler/export entry clues.
 
-The next control-plane slice is also available as a Python API under
-`vulngym_agent.orchestrator`: strict `ProductionOutcome` / `RepairPlan` /
-`Budget` / `RunState` contracts and a FakeT2-testable
-`ClosedLoopOrchestrator`. It creates a fresh T1 validator per round, permits at
-most two narrowly authorized repairs, and routes uncertainty, regressions,
-budget exhaustion, no-progress, and sidecar conflicts to explicit terminal
-states. A real T2 producer and closed-loop batch CLI are not implemented yet.
+The controlled production slice is available as Python APIs under
+`vulngym_agent.agents` and `vulngym_agent.orchestrator`. `T2TaskInputV1` is a
+strict, versioned, path-free task contract. An orchestrator-owned
+`ProducerExecutionContext`, composed by `LocalT2ContextFactory`, binds it to
+trusted local package/repository roots, a fixed tool registry, model backend,
+and per-attempt budget. `LocalStructuredT2Producer` can generate a candidate
+offline from real local Git objects and can perform supported, narrowly scoped
+repairs. It emits an explicit defer instead of a partial Entry when evidence is
+ambiguous, a required capability is unavailable, or a budget/contract check
+fails.
+
+`RepairPlan` is fail-closed: field-specific tool permissions may be narrowed,
+but required checks cannot be removed, and an empty tool allow-list means
+deny-all. Repair may only apply a T1-provided `suggested_fix` to an authorized
+field while preserving locked fields and task identity. The current repair
+path supports narrowly constrained title/category changes while executing its
+available task, advisory, and Schema checks; its semantic choice remains
+untrusted and is not a final T1 judgment. Plans that require dedicated
+source-location, patch-region, ancestry, or trace-continuity verifiers defer;
+those full-field verifiers are not complete yet.
+
+The `ClosedLoopOrchestrator` works with both deterministic fakes and the real
+producer interface. It creates a fresh T1 validator per round, permits at most
+two narrowly authorized repairs, closes tool/model records against budget
+events, and routes uncertainty, regressions, budget exhaustion, no-progress,
+and sidecar conflicts to explicit terminal states. Code, fixed policies, and
+local runtime configuration are trusted; model output and all task/evidence
+data are untrusted. Canonical digests, hash chains, and unsigned JSON
+transcripts establish internal closure and binding only—they are not digital
+signatures and do not establish the external truth of a repository, advisory,
+or model conclusion.
+
+Still pending are the closed-loop batch CLI and replay artifact writer,
+full-field required-check verifiers, an independent semantic T1 capable of
+positive judgments, and final acceptance on the required training/public-test
+datasets. Dataset construction is handled by a separate data-production flow
+and will be integrated here; this implementation does not claim that the final
+50+20 data acceptance has passed.
 
 The deterministic T1 CLI writes separate validation, evidence, and
 run-manifest files:
