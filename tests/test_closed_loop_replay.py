@@ -227,12 +227,13 @@ class ClosedLoopReplayTests(unittest.TestCase):
             base = Path(temporary)
             protected = base / "repo-root"
             protected.mkdir()
+            protected_spelling = base / "path-alias" / ".." / "repo-root"
             leaked = EvidenceItem(
                 evidence_id="EV-REPLAY-LEAK",
                 report_id=self.entry["report_id"],
                 entry_id=self.entry["entry_id"],
                 source_type="advisory",
-                snippet=f"loaded from {protected}",
+                snippet=f"loaded from {protected_spelling}",
             )
             with self.assertRaisesRegex(ReplayArtifactError, "configured local path"):
                 write_closed_loop_artifacts(
@@ -242,7 +243,7 @@ class ClosedLoopReplayTests(unittest.TestCase):
                             7, self.task, self._finalized(evidence=(leaked,))
                         )
                     ],
-                    protected_paths=(protected,),
+                    protected_paths=(protected_spelling,),
                 )
             self.assertFalse((base / "leak-output").exists())
 

@@ -401,13 +401,20 @@ def _is_relative_repo_file(value: str) -> bool:
 def _protected_tokens(paths: Sequence[str | os.PathLike[str]]) -> tuple[str, ...]:
     tokens: set[str] = set()
     for raw in paths:
-        path = Path(raw).expanduser().resolve(strict=False)
-        value = str(path)
-        if not value:
-            continue
-        tokens.add(value.casefold())
-        tokens.add(value.replace("\\", "/").casefold())
-        tokens.add(value.replace("/", "\\").casefold())
+        supplied = Path(raw).expanduser()
+        lexical = supplied if supplied.is_absolute() else Path.cwd() / supplied
+        resolved = supplied.resolve(strict=False)
+        # Keep both spellings.  CI runners and managed Windows hosts commonly
+        # expose their temporary directories through junctions/aliases, so a
+        # configured path can differ textually from its resolved target.  Both
+        # are sensitive and neither may appear in an artifact payload.
+        for path in (lexical, resolved):
+            value = str(path)
+            if not value:
+                continue
+            tokens.add(value.casefold())
+            tokens.add(value.replace("\\", "/").casefold())
+            tokens.add(value.replace("/", "\\").casefold())
     return tuple(sorted(tokens, key=lambda item: (-len(item), item)))
 
 
