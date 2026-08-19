@@ -32,18 +32,27 @@ BOTH of the following hold:
 
   1. Paths are equal after normalization (strip leading './', unify '\\' to
      '/', collapse repeated slashes, case-sensitive).
-  2. |line_F - line_E| <= tolerance, default 5.
+  2. The distance between the two line spans is <= tolerance, default 5.
+  3. A reported span is no wider than the ground-truth span plus the line
+     tolerance on each side. This prevents a whole-file range from matching
+     every location while preserving bounded, partially overlapping ranges.
+
+Line locations may be positive integers or inclusive ranges such as
+``"348-352"``. Two overlapping spans have distance 0; otherwise their
+distance is the gap between the nearest endpoints. For two integer lines,
+this reduces to ``|line_F - line_E|``.
 
 Direction is strict: F.entry_point is compared to E.entry_point,
 F.critical_operation to E.critical_operation.
 If the tool reports the roles swapped, it counts as a miss. Use your tool's
 configuration to align semantics before evaluating.
 
-`line == 0` in ground truth means "unknown" (see SCHEMA.md); any entry
-whose entry_point or critical_operation has line == 0 is dropped from both
-numerator AND denominator (neither "usable" nor "covered"). Findings are NOT compared
-across repo/commit — only entries sharing the same (repo_url, commit) as
-the finding are candidates.
+Current ground truth follows SCHEMA.md and uses only positive line locations.
+For compatibility with older or custom data, an entry whose entry_point or
+critical_operation line is invalid (including the retired ``line == 0``
+sentinel) is dropped from both numerator and denominator. Findings are NOT
+compared across repo/commit — only entries sharing the same (repo_url, commit)
+as the finding are candidates.
 
 Input format (tool findings, JSONL)
 -----------------------------------
@@ -53,7 +62,7 @@ Each line is a self-contained JSON object:
       "repo_url": "https://github.com/org/repo",
       "commit":   "<40-hex sha>",
       "entry_point":          {"file": "...", "line": 123},
-      "critical_operation":   {"file": "...", "line": 456},
+      "critical_operation":   {"file": "...", "line": "456-459"},
       "trace":    [ ... ]        // optional; ignored by the matcher
     }
 
@@ -75,6 +84,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENTRIES = REPO_ROOT / "data" / "entries.jsonl"
@@ -86,6 +96,7 @@ DEFAULT_TOLERANCE = 5
 # ---------------------------------------------------------------------------
 _LEADING_DOT_SLASH = re.compile(r"^(?:\./)+")
 _MULTI_SLASH = re.compile(r"/+")
+_LINE_RANGE = re.compile(r"^([1-9]\d*)-([1-9]\d*)$")
 
 
 def normalize_path(p: str) -> str:
@@ -119,11 +130,64 @@ def normalize_repo(r: str) -> str:
     if not isinstance(r, str):
         return ""
     r = r.strip()
+    parsed = urlsplit(r)
+    if parsed.scheme and parsed.netloc:
+        path = parsed.path.rstrip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        return urlunsplit(
+            (
+                parsed.scheme.lower(),
+                parsed.netloc.lower(),
+                path,
+                parsed.query,
+                parsed.fragment,
+            )
+        )
     if r.endswith(".git"):
         r = r[:-4]
-    if r.endswith("/"):
-        r = r[:-1]
-    return r
+    return r.rstrip("/")
+
+
+def normalize_line_span(value: Any) -> tuple[int, int] | None:
+    """Return a positive inclusive line span or ``None`` when invalid."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return (value, value) if value > 0 else None
+    if not isinstance(value, str):
+        return None
+
+    value = value.strip()
+    if value.isdigit():
+        try:
+            line = int(value)
+        except ValueError:
+            return None
+        return (line, line) if line > 0 else None
+
+    match = _LINE_RANGE.fullmatch(value)
+    if not match:
+        return None
+    try:
+        start, end = (int(part) for part in match.groups())
+    except ValueError:
+        return None
+    return (start, end) if start <= end else None
+
+
+def line_span_distance(left: tuple[int, int], right: tuple[int, int]) -> int:
+    """Return the gap between two inclusive spans, or zero when they overlap."""
+    if left[1] < right[0]:
+        return right[0] - left[1]
+    if right[1] < left[0]:
+        return left[0] - right[1]
+    return 0
+
+
+def line_span_width(span: tuple[int, int]) -> int:
+    """Return the number of lines in an inclusive span."""
+    return span[1] - span[0] + 1
 
 
 # ---------------------------------------------------------------------------
@@ -137,9 +201,14 @@ def load_jsonl(path: Path) -> list[dict]:
             if not line:
                 continue
             try:
-                rows.append(json.loads(line))
-            except json.JSONDecodeError as e:
+                value = json.loads(line)
+            except (json.JSONDecodeError, ValueError) as e:
                 raise SystemExit(f"{path}:{i}: invalid JSON: {e}") from None
+            if not isinstance(value, dict):
+                raise SystemExit(
+                    f"{path}:{i}: each JSONL line must contain one object"
+                )
+            rows.append(value)
     return rows
 
 
@@ -151,22 +220,22 @@ def _endpoint_match(
 ) -> bool:
     """Match a single endpoint (entry_point-vs-entry_point or
     critical_operation-vs-critical_operation)."""
+    if not isinstance(f_ep, dict) or not isinstance(e_ep, dict):
+        return False
     if not f_ep or not e_ep:
         return False
     f_file = normalize_path(f_ep.get("file", ""))
     e_file = normalize_path(e_ep.get("file", ""))
     if not f_file or f_file != e_file:
         return False
-    try:
-        f_line = int(f_ep.get("line", 0))
-        e_line = int(e_ep.get("line", 0))
-    except (TypeError, ValueError):
+    f_span = normalize_line_span(f_ep.get("line"))
+    e_span = normalize_line_span(e_ep.get("line"))
+    if f_span is None or e_span is None:
         return False
-    # line == 0 on the ground-truth side is handled upstream (that entry is
-    # excluded). Defense-in-depth: reject a zero line here too.
-    if e_line == 0:
+    max_finding_width = line_span_width(e_span) + (2 * tolerance)
+    if line_span_width(f_span) > max_finding_width:
         return False
-    return abs(f_line - e_line) <= tolerance
+    return line_span_distance(f_span, e_span) <= tolerance
 
 
 def finding_matches_entry(
@@ -191,11 +260,22 @@ def evaluate(
     # 1. Split ground-truth entries into usable / skipped.
     usable_entries: list[dict] = []
     skipped_entries: list[dict] = []
+    skipped_entries_line_zero = 0
     for e in entries:
-        src_line = e.get("entry_point", {}).get("line", 0)
-        sink_line = e.get("critical_operation", {}).get("line", 0)
-        if src_line == 0 or sink_line == 0:
+        if not isinstance(e, dict):
             skipped_entries.append(e)
+            continue
+        source = e.get("entry_point")
+        sink = e.get("critical_operation")
+        src_line = source.get("line") if isinstance(source, dict) else None
+        sink_line = sink.get("line") if isinstance(sink, dict) else None
+        if (
+            normalize_line_span(src_line) is None
+            or normalize_line_span(sink_line) is None
+        ):
+            skipped_entries.append(e)
+            if src_line == 0 or sink_line == 0:
+                skipped_entries_line_zero += 1
         else:
             usable_entries.append(e)
 
@@ -214,7 +294,11 @@ def evaluate(
     matched_entry_ids: set[str] = set()
     finding_details: list[dict] = []  # per-finding record for the JSON report
 
-    for i, f in enumerate(findings):
+    for i, raw_finding in enumerate(findings):
+        f = raw_finding if isinstance(raw_finding, dict) else {}
+        invalid_reason = (
+            None if isinstance(raw_finding, dict) else "finding is not a JSON object"
+        )
         rk = (normalize_repo(f.get("repo_url", "")), normalize_commit(f.get("commit", "")))
         matches: list[str] = []
         if rk[0] and rk[1]:
@@ -230,6 +314,7 @@ def evaluate(
                 "commit": f.get("commit"),
                 "entry_point": f.get("entry_point"),
                 "critical_operation": f.get("critical_operation"),
+                "invalid_reason": invalid_reason,
                 "matched_entry_ids": matches,
                 "matched_report_ids": sorted(
                     {e["report_id"] for e in by_repo_commit.get(rk, ()) if e["entry_id"] in matches}
@@ -270,11 +355,14 @@ def evaluate(
             "line_tolerance": tolerance,
             "match_path": "normalized_exact",
             "direction": "strict",
+            "line_match": "inclusive_span_distance",
+            "invalid_ground_truth_line_policy": "skip",
             "line_zero_policy": "skip",
         },
         "totals": {
             "ground_truth_entries": len(entries),
-            "skipped_entries_line_zero": len(skipped_entries),
+            "skipped_entries_invalid_line": len(skipped_entries),
+            "skipped_entries_line_zero": skipped_entries_line_zero,
             "usable_entries": total_usable_entries,
             "usable_advisories": total_usable_reports,
             "findings": len(findings),
@@ -310,13 +398,14 @@ def print_summary(report: dict, verbose: bool) -> None:
     print(
         f"policy: line_tolerance=±{cfg['line_tolerance']} | "
         f"path={cfg['match_path']} | direction={cfg['direction']} | "
-        f"line=0 policy={cfg['line_zero_policy']}"
+        f"line={cfg['line_match']} | "
+        f"invalid-line policy={cfg['invalid_ground_truth_line_policy']}"
     )
     print()
     print(
         f"ground truth:  {tot['usable_advisories']} advisories / "
         f"{tot['usable_entries']} entries (skipped "
-        f"{tot['skipped_entries_line_zero']} entries with line=0)"
+        f"{tot['skipped_entries_invalid_line']} entries with invalid lines)"
     )
     print(f"findings:      {tot['findings']} reported by the tool")
     print()
@@ -378,7 +467,11 @@ def main(argv: list[str] | None = None) -> int:
         "--line-tolerance",
         type=int,
         default=DEFAULT_TOLERANCE,
-        help="Max |Δline| allowed on entry_point or critical_operation (default: %(default)s).",
+        help=(
+            "Max inclusive-span distance allowed on entry_point or "
+            "critical_operation (default: %(default)s); reported spans are "
+            "also width-bounded relative to ground truth."
+        ),
     )
     p.add_argument(
         "--json-out",
