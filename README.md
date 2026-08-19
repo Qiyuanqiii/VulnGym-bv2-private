@@ -269,8 +269,18 @@ local advisory/reference/patch packages, reads immutable Git objects without
 checkout, checks GHSA/CVE IDs, parent/ancestry facts, exact paths, and code
 within the ±5-line tolerance, parses bounded unified diffs, derives conservative
 Sink/Guard review candidates, and searches an explicit source-file allow-list
-for route/RPC/CLI/handler/export entry clues. It writes separate validation,
-evidence, and run-manifest files:
+for route/RPC/CLI/handler/export entry clues.
+
+The next control-plane slice is also available as a Python API under
+`vulngym_agent.orchestrator`: strict `ProductionOutcome` / `RepairPlan` /
+`Budget` / `RunState` contracts and a FakeT2-testable
+`ClosedLoopOrchestrator`. It creates a fresh T1 validator per round, permits at
+most two narrowly authorized repairs, and routes uncertainty, regressions,
+budget exhaustion, no-progress, and sidecar conflicts to explicit terminal
+states. A real T2 producer and closed-loop batch CLI are not implemented yet.
+
+The deterministic T1 CLI writes separate validation, evidence, and
+run-manifest files:
 
 ```bash
 python -m vulngym_agent data/entries.jsonl

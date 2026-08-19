@@ -256,8 +256,15 @@ python -m unittest discover -s tests -v
 JSONL，安全读取有界的本地公告/引用/patch 资料包，以不 checkout 的方式读取
 不可变 Git 对象，核对 GHSA/CVE、父提交、祖先关系、精确路径和 ±5 行容差内
 的代码；同时有界解析 unified diff，生成保守的 Sink/Guard 审查候选，并且只在
-显式给出的源码文件集合中搜索 route/RPC/CLI/handler/export 入口线索。验证报告、
-证据和运行清单继续严格分开落盘：
+显式给出的源码文件集合中搜索 route/RPC/CLI/handler/export 入口线索。
+
+下一层控制面也已提供 Python API（`vulngym_agent.orchestrator`）：严格的
+`ProductionOutcome` / `RepairPlan` / `Budget` / `RunState` 契约，以及可由
+FakeT2 测试的 `ClosedLoopOrchestrator`。每轮都会新建隔离的 T1，最多允许两轮
+字段受限修复；不确定、字段回归、预算耗尽、无进展和 sidecar 冲突都会进入明确
+终态。真实 T2 Producer 与闭环批处理 CLI 仍未实现。
+
+确定性 T1 CLI 的验证报告、证据和运行清单继续严格分开落盘：
 
 ```bash
 python -m vulngym_agent data/entries.jsonl
