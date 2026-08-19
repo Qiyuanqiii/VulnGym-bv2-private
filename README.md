@@ -194,10 +194,11 @@ VulnGym/
 ├── data/
 │   ├── reports.jsonl            # 184 rows — one GitHub Advisory per row
 │   └── entries.jsonl            # 408 rows — one entry point per row, with human-audit flag (verify)
-└── examples/
-    ├── load_dataset.py          # stdlib / pandas / HuggingFace datasets loader
-    ├── example_result.jsonl     # illustrative tool-findings submission
-    └── evaluate.py              # coverage / recall evaluator
+├── schemas/                      # strict Entry / T1 validation / evidence contracts
+├── vulngym_agent/               # experimental B-v2 automation foundation
+├── docs/                         # field dictionary, taxonomy, and B-v2 design
+├── tests/                        # standard-library regression tests
+└── examples/                     # loaders and evaluation utilities
 ```
 
 ---
@@ -251,6 +252,70 @@ ds = load_dataset("json", data_files={
 })
 ```
 
+### Experimental B-v2 deterministic T1 fact gate
+
+The B-v2 tools require Python 3.10 or newer. For a reproducible test
+environment, install `requirements-dev.txt` and run the standard-library test
+suite:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+```
+
+The repository now includes the third executable slice of the T1 × T2
+automation design. It validates JSONL rows independently, safely reads bounded
+local advisory/reference/patch packages, reads immutable Git objects without
+checkout, checks GHSA/CVE IDs, parent/ancestry facts, exact paths, and code
+within the ±5-line tolerance, parses bounded unified diffs, derives conservative
+Sink/Guard review candidates, and searches an explicit source-file allow-list
+for route/RPC/CLI/handler/export entry clues. It writes separate validation,
+evidence, and run-manifest files:
+
+```bash
+python -m vulngym_agent data/entries.jsonl
+
+# Inspect every row against one locally cloned target repository:
+python -m vulngym_agent candidates.jsonl --repo-root /path/to/target-repo
+
+# Rows may use {"package": {...}, "entry": {...}}; paths are relative to this root:
+python -m vulngym_agent packaged-candidates.jsonl \
+  --package-root /path/to/local-evidence \
+  --repo-map repos.json
+```
+
+For multi-repository batches, pass `--repo-map` with a JSON object whose keys
+are exact `repo_url` values and whose values are local repository roots
+(relative paths are resolved from the map file). The
+default outputs are `outputs/validation.jsonl`, `artifacts/evidence.jsonl`, and
+`artifacts/run_manifest.jsonl`. A wrapper package requires `advisory` and may
+declare `references` / `patches` as relative POSIX paths. It cannot declare a
+repository path: the Entry's exact `repo_url` remains the sole repository-map
+key. Per-file/per-package/declared-file limits default to 8 MiB/32 MiB/64 and
+are configurable. JSONL lines, records, and trace nodes default to 1 MiB,
+10,000, and 64; hard limits prevent CLI overrides from making these inputs
+unbounded.
+This slice can reject advisory-ID mismatches and a known fix commit submitted as
+the vulnerable commit; ancestry or source existence alone deliberately remains
+`uncertain` rather than being presented as vulnerability-semantic proof. Patch
+guards and removed dangerous calls are lexical review clues only, and entry
+search never claims runtime reachability. See the
+[B-v2 architecture](docs/b_v2_architecture.md),
+[field dictionary](docs/field_dictionary.md), and
+[error taxonomy](docs/error_taxonomy.md).
+
+Repository mappings must point to a normal clone or bare repository root.
+Linked-worktree/submodule gitfiles, common directories, alternate object
+databases, and `info/grafts` history overrides are rejected so evidence reads
+cannot escape the authorized root or forge ancestry.
+Commit-graph and replace-object acceleration are disabled for topology facts.
+All three output paths must stay outside mapped target repositories.
+Evidence-package paths also reject absolute/drive/UNC paths, `..`, backslashes,
+symlinks, junctions/reparse points, and duplicate declarations. Output paths
+must remain outside the package root as well. Every path component is checked
+before and after opening; supported POSIX systems use directory handles with
+no-follow traversal, while Windows verifies the opened handle's final path.
+
 
 ## 📊 Evaluating your tool
 
@@ -277,9 +342,9 @@ The script reports two metrics:
 | Aspect | Default |
 |---|---|
 | Path match | normalized, exact |
-| Line tolerance | `\|Δline\| ≤ 5` on entry_point **and** critical_operation |
+| Line tolerance | inclusive span distance `≤ 5` on entry_point **and** critical_operation; reported ranges are width-bounded to the ground-truth span plus tolerance on both sides |
 | Direction | strict (entry_point-to-entry_point, critical_operation-to-critical_operation) |
-| `line == 0` in ground truth | excluded from numerator and denominator |
+| Invalid ground-truth line | excluded from numerator and denominator; includes the retired `line == 0` sentinel in older/custom data |
 
 All policies are documented and configurable via CLI arguments
 (`--line-tolerance`, etc.).
