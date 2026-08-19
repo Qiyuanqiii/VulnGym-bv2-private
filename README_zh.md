@@ -281,9 +281,87 @@ trace 连续性等尚无专用验证器的检查，则直接 defer。全字段 `
 digest、哈希链和 unsigned JSON transcript 只证明记录内部的 closure 与绑定关系，
 不是数字签名，也不能证明仓库、公告或模型结论的外部真实性。
 
-尚未完成的是 closed-loop 批量 CLI 与 replay artifact writer、全字段必需检查验证器、
-能够给出语义正判的独立 T1，以及训练集/公开测试集的最终验收。数据集由独立数据生产
-流程构建后接入；当前实现不声称已经通过最终 50+20 数据验收。
+离线 closed-loop 批处理入口与原子 replay artifact writer 现已实现。它严格要求
+每个物理 JSONL 行恰好包含一个 `RunTask`，每轮验证都以新建 T1 承接 T2 候选，且
+`entries.jsonl` 只接收由 `correct` T1 报告闭合的 finalized Entry。
+
+下面是一行 `tasks.jsonl` 的完整结构。资料包路径是相对受信 package root 的 POSIX
+路径；任务数据中不得出现本机根目录：
+
+```json
+{"task_id":"task:ghsa-w7xj","report_id":"GHSA-W7XJ-8FX7-WFCH","entry_id":"entry-00057","inputs":{"contract_version":1,"input_line":1,"repo_url":"https://github.com/open-webui/open-webui","package":{"advisory":"advisories/GHSA-W7XJ-8FX7-WFCH.json","references":[],"patches":["patches/GHSA-W7XJ-8FX7-WFCH.diff"]},"hints":{"project":"open-webui","fix_commits":[],"source_paths":["src/lib/components/common/RichTextInput.svelte"],"entry_symbols":[],"critical_mode":"auto"}}}
+```
+
+`inputs.input_line` 必须等于所在物理行号。受信仓库映射另存为严格 JSON 文档，使用
+规范 GitHub URL 和绝对本地根目录：
+
+```json
+{"contract_version":1,"repositories":[{"repo_url":"https://github.com/open-webui/open-webui","path":"/srv/vulngym/repos/open-webui"}]}
+```
+
+当前 CLI 刻意不内置在线模型适配器，而以有界、request-free 的精确 request fixture
+作为离线后端：
+
+```json
+{"contract_version":2,"backend_id":"exact-replay","model_id":"offline-v1","responses":[{"task_id":"task:ghsa-w7xj","attempt":0,"policy_scope":"t2.initial","stage":"plan","model_call_id":"MODEL-example-plan","backend_id":"exact-replay","model_id":"offline-v1","request_sha256":"<64-lower-case-hex>","status":"success","response":{"stage-specific":"structured result"},"error_code":null}]}
+```
+
+上面的尖括号是文档占位符。真实 response 记录会离散绑定不可变 `ModelRequest` 的每个
+身份字段：task、attempt、policy scope、stage、call ID、backend ID、model ID，以及
+64 位小写 request digest；查找直接使用这组无碰撞字段 tuple，不能用调用方给出的单个
+或经分隔符拼接的 operation 字符串替代逐字段核对。每组身份只能注册并消费一次，缺失、复用
+或剩余响应都会中止发布。fixture 不保存 prompt 或 request payload，它只是测试/复现
+输入，**不是** benchmark gold，也不是独立 T1 裁决。隐藏验收 gold 必须在物理上位于
+task、fixture、package 与 repository root 之外，也绝不能用于准备模型响应。
+
+准备好以上输入后的最小批处理命令为：
+
+```bash
+python -m vulngym_agent.closed_loop_cli \
+  --tasks tasks.jsonl \
+  --replay-responses replay-responses.json \
+  --repo-map repo-map.json \
+  --package-root /srv/vulngym/packages \
+  --output-dir /srv/vulngym/runs/run-001
+```
+
+输出父目录必须已存在，而 `--output-dir` 本身必须不存在，也不得与 task、fixture、map、
+资料包或仓库输入重叠。退出码 `0` 表示批次干净（默认允许 `manual_review`）；出现输入行/
+任务失败时为 `1`，启用 `--require-all-finalized` 后任何人工审核结果也返回 `1`；配置/
+I/O、任务总字节超限或 exact-replay 闭合失败等致命错误返回 `2`。输入默认限制为 JSONL
+单行 1 MiB、完整 task 文件 64 MiB、10,000 条记录，分别由
+`--max-input-line-bytes`、`--max-task-bytes`、`--max-records` 调整；硬上限依次为
+32 MiB、1 GiB、100,000。replay fixture 另有默认 16 MiB、50,000 响应限制。若
+`--max-records` 截断批次后仍留下属于后续记录的 unused fixture，精确闭合会失败，整个
+输出目录都不会发布。
+
+同一个 staging 事务会发布 `entries.jsonl`、`validation.jsonl`，以及
+`states.jsonl`、`candidates.jsonl`、`validations.jsonl`、`evidence.jsonl`、
+`tool_calls.jsonl`、`model_calls.jsonl`、`repair_history.jsonl`、`deferred.jsonl`、
+`errors.jsonl` sidecar，最后以 `run_manifest.jsonl` 闭合。`validation.jsonl` 是正式
+报告流，`validations.jsonl` 是关联各 attempt 的 replay sidecar。可通过 Python API
+在不执行 T1、T2、Git 或模型的情况下读取/校验：
+
+```python
+from vulngym_agent.orchestrator import (
+    read_closed_loop_artifacts,
+    verify_closed_loop_artifacts,
+)
+
+bundle = read_closed_loop_artifacts("/srv/vulngym/runs/run-001")
+manifest = verify_closed_loop_artifacts("/srv/vulngym/runs/run-001")
+print(bundle.manifest.dataset_sha256, manifest.entry_count)
+```
+
+artifact 会有意保留有界且公开或已获许可的 Evidence snippet，以及 Entry Schema
+必需的代码片段，因此必须保存在私有仓库或其他受控目录。它不会落盘 raw model
+prompt/response、Producer assumptions、异常文本或配置的本机根目录；model-call sidecar
+只含绑定后的元数据/digest，T1 也不会读取它。canonical digest 可发现损坏并闭合引用，
+但没有签名能力，不能认证外部事实。
+
+尚未完成的是独立 verify CLI、显式配置的在线模型 backend、全字段必需检查验证器、
+能够给出语义正判的独立 T1，以及 50 条训练集加 20 条公开测试集的最终验收。数据集由
+独立数据生产流程构建后接入；当前实现不声称已经通过 50+20 验收。
 
 确定性 T1 CLI 的验证报告、证据和运行清单继续严格分开落盘：
 
