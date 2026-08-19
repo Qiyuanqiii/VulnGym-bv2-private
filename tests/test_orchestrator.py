@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -13,6 +14,7 @@ from vulngym_agent.agents.t1_validator import T1ValidationOutcome
 from vulngym_agent.models import EvidenceItem, FieldValidation, ValidationReport
 from vulngym_agent.orchestrator.budget import Budget, Limits
 from vulngym_agent.orchestrator.contracts import (
+    ModelCallRecord,
     ProductionOutcome,
     RunTask,
     ToolCallRecord,
@@ -38,6 +40,31 @@ from vulngym_agent.orchestrator.state_machine import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _model_call(index: int, *, sequence: int) -> ModelCallRecord:
+    task_id = "task:closed-loop-001"
+    scope = "t2.initial" if index == 0 else f"t2.repair-{index}"
+    stage = "plan" if index == 0 else "repair"
+    call_id = f"MODEL-fake-{index}"
+    request_sha256 = canonical_sha256({"round": index, "kind": "request"})
+    return ModelCallRecord(
+        task_id=task_id,
+        attempt=index,
+        policy_scope=scope,
+        model_call_id=call_id,
+        stage=stage,
+        backend_id="test.fake",
+        model_id="test-model",
+        request_sha256=request_sha256,
+        operation=(
+            f"model:{task_id}:{index}:{scope}:{stage}:{call_id}:"
+            f"test.fake:test-model:{request_sha256}"
+        ),
+        budget_event_sequence=sequence,
+        status="success",
+        response_sha256=canonical_sha256({"round": index, "kind": "response"}),
+    )
 
 
 def _entry() -> dict[str, Any]:
@@ -152,16 +179,18 @@ class _FakeProducer:
 
     def generate(self, task: RunTask, budget: Budget) -> ProductionOutcome:
         self.generate_calls += 1
-        budget.charge_llm_call(operation="fake.generate")
+        model_call = _model_call(0, sequence=len(budget.events) + 1)
+        budget.charge_llm_call(operation=model_call.operation)
         if self.fail_generate:
             raise RuntimeError("generation failed")
         if self.charge_tools:
             for call in self.tool_calls:
-                budget.charge_tool_call(operation=f"fake.{call.tool_name}")
+                budget.charge_tool_call(operation=call.operation)
         return ProductionOutcome(
             self.generated,
             evidence=self._sidecar_evidence(0),
             tool_calls=self.tool_calls,
+            model_calls=(model_call,),
             assumptions=self.assumptions,
         )
 
@@ -175,12 +204,17 @@ class _FakeProducer:
         self.repair_calls += 1
         self.plans.append(plan)
         self.previous_entries.append(deepcopy(dict(previous_entry)))
-        budget.charge_llm_call(operation=f"fake.repair:{self.repair_calls}")
+        model_call = _model_call(
+            self.repair_calls,
+            sequence=len(budget.events) + 1,
+        )
+        budget.charge_llm_call(operation=model_call.operation)
         if self.fail_repair == self.repair_calls:
             raise RuntimeError("repair failed")
         return ProductionOutcome(
             self.repairs[self.repair_calls - 1],
             evidence=self._sidecar_evidence(self.repair_calls),
+            model_calls=(model_call,),
         )
 
 
@@ -265,6 +299,69 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
         self.assertEqual(producer.repair_calls, 2)
         self.assertEqual(len(factory.created), 3)
         self.assertEqual(result.state.validation_count, 3)
+
+        wrong_operation_budget = result.state.to_dict()["budget"]
+        repair_event = next(
+            event
+            for event in wrong_operation_budget["events"]
+            if event["resource"] == "repair_iterations"
+        )
+        repair_event["operation"] = "repair:forged"
+        with self.assertRaisesRegex(ValueError, "canonical repair operation"):
+            replace(result.state, budget=wrong_operation_budget)
+
+        combined_budget = {
+            "limits": dict(result.state.budget["limits"]),
+            "usage": dict(result.state.budget["usage"]),
+            "events": [
+                {
+                    "sequence": 1,
+                    "resource": "llm_calls",
+                    "amount": 1,
+                    "usage_after": {
+                        "llm_calls": 1,
+                        "tool_calls": 0,
+                        "repair_iterations": 0,
+                    },
+                    "operation": result.state.budget["events"][0]["operation"],
+                },
+                {
+                    "sequence": 2,
+                    "resource": "repair_iterations",
+                    "amount": 2,
+                    "usage_after": {
+                        "llm_calls": 1,
+                        "tool_calls": 0,
+                        "repair_iterations": 2,
+                    },
+                    "operation": "repair:1",
+                },
+                {
+                    "sequence": 3,
+                    "resource": "llm_calls",
+                    "amount": 1,
+                    "usage_after": {
+                        "llm_calls": 2,
+                        "tool_calls": 0,
+                        "repair_iterations": 2,
+                    },
+                    "operation": result.state.budget["events"][2]["operation"],
+                },
+                {
+                    "sequence": 4,
+                    "resource": "llm_calls",
+                    "amount": 1,
+                    "usage_after": {
+                        "llm_calls": 3,
+                        "tool_calls": 0,
+                        "repair_iterations": 2,
+                    },
+                    "operation": result.state.budget["events"][4]["operation"],
+                },
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "every repair round"):
+            replace(result.state, budget=combined_budget)
         self.assertEqual(result.state.budget["usage"]["repair_iterations"], 2)
         self.assertEqual(len(result.repair_plans), 2)
         self.assertEqual(len(result.state.validation_history), 3)
@@ -494,9 +591,16 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
 
     def test_unaccounted_tool_call_is_rejected(self) -> None:
         tool_call = ToolCallRecord(
+            task_id=self.task.task_id,
+            attempt=0,
+            policy_scope="t2.initial",
             tool_call_id="TOOL-one",
             tool_name="local.read",
             arguments_sha256="1" * 64,
+            operation=(
+                f"tool:{self.task.task_id}:0:t2.initial:TOOL-one:local.read"
+            ),
+            budget_event_sequence=2,
             status="success",
             result_sha256="2" * 64,
         )

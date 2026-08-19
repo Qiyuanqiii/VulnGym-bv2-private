@@ -17,6 +17,7 @@
     "production_history",
     "production_attempts",
     "validation_history",
+    "deferred_sha256",
     "stop_reason",
     "termination"
   ],
@@ -93,6 +94,12 @@
       "items": {
         "$ref": "#/$defs/validationSummary"
       }
+    },
+    "deferred_sha256": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sha256" }
+      ]
     },
     "stop_reason": {
       "type": ["string", "null"],
@@ -274,7 +281,9 @@
             "invalid_candidate",
             "no_repairable_fields",
             "producer_sidecar_conflict",
-            "unaccounted_tool_call"
+            "unaccounted_tool_call",
+            "unaccounted_model_call",
+            "producer_deferred"
           ]
         },
         "phase": {
@@ -287,7 +296,8 @@
             "validator",
             "initial_candidate",
             "sidecar",
-            "tool_accounting"
+            "tool_accounting",
+            "model_accounting"
           ]
         },
         "attempt": {
@@ -377,5 +387,5 @@
       }
     }
   },
-  "$comment": "Sanitized persistence contract: raw task inputs and ProductionOutcome evidence/tool_calls/assumptions are intentionally excluded. Python state-machine invariants additionally keep candidate/candidate_sha256 and terminal status/stop_reason consistent."
+  "$comment": "Sanitized persistence contract: raw task inputs and producer evidence/tool/model calls/assumptions are intentionally excluded. A deferred result is retained only by deferred_sha256; Python state-machine invariants bind that digest to the replay sidecar and keep terminal topology consistent."
 }

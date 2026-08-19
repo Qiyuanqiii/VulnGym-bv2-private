@@ -11,6 +11,7 @@
     "repair_iteration",
     "previous_candidate_sha256",
     "validation_sha256",
+    "tool_policy_version",
     "repair_fields",
     "dependent_fields",
     "locked_fields",
@@ -40,6 +41,9 @@
     },
     "validation_sha256": {
       "$ref": "#/$defs/sha256"
+    },
+    "tool_policy_version": {
+      "$ref": "#/$defs/toolPolicyVersion"
     },
     "repair_fields": {
       "$ref": "#/$defs/nonEmptyFieldArray"
@@ -88,6 +92,36 @@
     "sha256": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
+    },
+    "toolPolicyVersion": {
+      "type": "string",
+      "enum": ["repair-tools-v1"]
+    },
+    "toolName": {
+      "type": "string",
+      "enum": [
+        "caller_search",
+        "condition_extraction",
+        "dataflow_candidate_search",
+        "extract_advisory_fields",
+        "function_index",
+        "git_cat_file",
+        "git_diff",
+        "git_log",
+        "git_ls_tree",
+        "git_parents",
+        "git_show",
+        "normalized_code_compare",
+        "read_local_advisory",
+        "read_local_patch",
+        "read_local_reference",
+        "resolve_local_repo",
+        "ripgrep",
+        "route_recognition",
+        "tree_sitter",
+        "validate_schema",
+        "version_ancestry"
+      ]
     },
     "fieldName": {
       "type": "string",
@@ -173,10 +207,10 @@
         },
         "allowed_tools": {
           "type": "array",
+          "description": "Maximum tools authorized for this repair field. An empty array explicitly denies every tool.",
           "uniqueItems": true,
           "items": {
-            "type": "string",
-            "minLength": 1
+            "$ref": "#/$defs/toolName"
           }
         }
       }
@@ -198,5 +232,5 @@
       ]
     }
   },
-  "$comment": "RepairPlan enforces disjoint field partitions, exact dependency closure, instruction/repair key equality, and locked hash equality in the Python model because Draft 2020-12 cannot express those dynamic cross-property invariants portably."
+  "$comment": "RepairPlan enforces disjoint field partitions, exact dependency closure, instruction/repair key equality, the complete versioned required-check baseline, per-field tool subsets, and locked hash equality in the Python model because Draft 2020-12 cannot express those dynamic cross-property invariants portably."
 }

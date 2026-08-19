@@ -12,6 +12,7 @@ from vulngym_agent.agents.t1_validator import T1ValidationOutcome
 from vulngym_agent.models import EvidenceItem, FieldValidation, ValidationReport
 from vulngym_agent.orchestrator.budget import Budget, Limits
 from vulngym_agent.orchestrator.contracts import (
+    ModelCallRecord,
     ProductionOutcome,
     RunTask,
     ToolCallRecord,
@@ -108,13 +109,50 @@ def _tool_call(
     *,
     tool_call_id: str = "TOOL-shared",
     result_digest: str = "2" * 64,
+    tool_name: str = "sentinel.tool",
+    attempt: int = 0,
+    sequence: int = 2,
 ) -> ToolCallRecord:
+    task_id = "task:adversarial-001"
+    scope = "t2.initial" if attempt == 0 else f"t2.repair-{attempt}"
     return ToolCallRecord(
+        task_id=task_id,
+        attempt=attempt,
+        policy_scope=scope,
         tool_call_id=tool_call_id,
-        tool_name="sentinel.tool",
+        tool_name=tool_name,
         arguments_sha256="1" * 64,
+        operation=(
+            f"tool:{task_id}:{attempt}:{scope}:{tool_call_id}:{tool_name}"
+        ),
+        budget_event_sequence=sequence,
         status="success",
         result_sha256=result_digest,
+    )
+
+
+def _model_call(index: int, *, sequence: int) -> ModelCallRecord:
+    task_id = "task:adversarial-001"
+    scope = "t2.initial" if index == 0 else f"t2.repair-{index}"
+    stage = "plan" if index == 0 else "repair"
+    call_id = f"MODEL-adversarial-{index}"
+    request_sha256 = canonical_sha256({"round": index, "kind": "request"})
+    return ModelCallRecord(
+        task_id=task_id,
+        attempt=index,
+        policy_scope=scope,
+        model_call_id=call_id,
+        stage=stage,
+        backend_id="test.adversarial",
+        model_id="test-model",
+        request_sha256=request_sha256,
+        operation=(
+            f"model:{task_id}:{index}:{scope}:{stage}:{call_id}:"
+            f"test.adversarial:test-model:{request_sha256}"
+        ),
+        budget_event_sequence=sequence,
+        status="success",
+        response_sha256=canonical_sha256({"round": index, "kind": "response"}),
     )
 
 
@@ -179,7 +217,8 @@ class _ScriptedProducer:
         return values[index] if index < len(values) else ()
 
     def _charge_tools(self, index: int, budget: Budget) -> None:
-        returned_count = len(self._round_values(self.tool_rounds, index))
+        returned = self._round_values(self.tool_rounds, index)
+        returned_count = len(returned)
         charge_count = (
             self.tool_charge_counts[index]
             if self.tool_charge_counts is not None
@@ -187,22 +226,30 @@ class _ScriptedProducer:
         )
         for position in range(charge_count):
             budget.charge_tool_call(
-                operation=f"adversarial.tool:{index}:{position}"
+                operation=(
+                    returned[position].operation
+                    if position < returned_count
+                    else f"adversarial.tool:{index}:{position}"
+                )
             )
 
-    def _outcome(self, index: int) -> ProductionOutcome:
+    def _outcome(
+        self, index: int, model_call: ModelCallRecord
+    ) -> ProductionOutcome:
         return ProductionOutcome(
             candidate=self.candidates[index],
             evidence=self._round_values(self.evidence_rounds, index),
             tool_calls=self._round_values(self.tool_rounds, index),
+            model_calls=(model_call,),
             assumptions=self._round_values(self.assumptions_rounds, index),
         )
 
     def generate(self, task: RunTask, budget: Budget) -> ProductionOutcome:
         self.generate_calls += 1
-        budget.charge_llm_call(operation="adversarial.generate")
+        model_call = _model_call(0, sequence=len(budget.events) + 1)
+        budget.charge_llm_call(operation=model_call.operation)
         self._charge_tools(0, budget)
-        return self._outcome(0)
+        return self._outcome(0, model_call)
 
     def repair(
         self,
@@ -216,12 +263,16 @@ class _ScriptedProducer:
         self.plans.append(plan)
         if self.fail_repair == "before_llm":
             raise RuntimeError("repair failed before producer LLM call")
-        budget.charge_llm_call(operation=f"adversarial.repair:{self.repair_calls}")
+        model_call = _model_call(
+            self.repair_calls,
+            sequence=len(budget.events) + 1,
+        )
+        budget.charge_llm_call(operation=model_call.operation)
         if self.fail_repair == "after_llm":
             raise RuntimeError("repair failed after producer LLM call")
         index = self.repair_calls
         self._charge_tools(index, budget)
-        return self._outcome(index)
+        return self._outcome(index, model_call)
 
 
 class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
@@ -555,7 +606,9 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
         repaired["vuln_title"] = "Repaired with replayed sidecars"
         shared_evidence = _evidence(self.entry, snippet="identical payload")
         first_tool = _tool_call(tool_call_id="TOOL-first")
-        second_tool = _tool_call(tool_call_id="TOOL-second")
+        second_tool = _tool_call(
+            tool_call_id="TOOL-second", attempt=1, sequence=5
+        )
         producer = _ScriptedProducer(
             [self.entry, repaired],
             evidence_rounds=[(shared_evidence,), (shared_evidence,)],
@@ -577,6 +630,7 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
             candidate=repaired,
             evidence=(shared_evidence,),
             tool_calls=(first_tool,),
+            model_calls=result.production_outcomes[1].model_calls,
         )
         replayed_attempts = (
             result.state.production_attempts[0],
@@ -619,7 +673,13 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
                 [],
                 [
                     (_tool_call(result_digest="2" * 64),),
-                    (_tool_call(result_digest="3" * 64),),
+                    (
+                        _tool_call(
+                            result_digest="3" * 64,
+                            attempt=1,
+                            sequence=5,
+                        ),
+                    ),
                 ],
             ),
         )
@@ -828,6 +888,25 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
                     result.state.budget["usage"]["tool_calls"], charged
                 )
 
+    def test_equal_count_forged_tool_charge_and_sidecar_are_rejected(self) -> None:
+        tool = _tool_call(tool_call_id="TOOL-forged-ledger")
+        correct = _report(self.entry, {"schema": "correct"}, label="correct")
+
+        class ForgedProducer(_ScriptedProducer):
+            def _charge_tools(self, index: int, budget: Budget) -> None:
+                budget.charge_tool_call(operation="tool:arbitrary-forged-charge")
+
+        producer = ForgedProducer(
+            [self.entry],
+            tool_rounds=[(tool,)],
+        )
+        result, factory = self._run(producer, [correct])
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.state.stop_reason, STOP_UNACCOUNTED_TOOL_CALL)
+        self.assertEqual(result.state.budget["usage"]["tool_calls"], 1)
+        self.assertEqual(factory.instances, [])
+
     def test_provided_outcome_cannot_import_unaccounted_tool_calls(self) -> None:
         tool = _tool_call(tool_call_id="TOOL-imported")
         provided = ProductionOutcome(candidate=self.entry, tool_calls=(tool,))
@@ -1016,12 +1095,12 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
         sentinel_evidence = "SENTINEL-EVIDENCE-NEVER-T1"
         evidence = _evidence(self.entry, snippet=sentinel_evidence)
         first_tool = _tool_call(result_digest="4" * 64)
-        second_tool = ToolCallRecord(
+        second_tool = _tool_call(
             tool_call_id="TOOL-second",
             tool_name="sentinel.second-tool",
-            arguments_sha256="5" * 64,
-            status="success",
-            result_sha256="6" * 64,
+            result_digest="6" * 64,
+            attempt=1,
+            sequence=5,
         )
         producer = _ScriptedProducer(
             [self.entry, repaired],

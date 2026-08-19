@@ -1,6 +1,9 @@
 """Public contracts for the VulnGym B-v2 closed-loop orchestrator."""
 
 from .contracts import (
+    ModelCallRecord,
+    ProducerResult,
+    ProductionDeferred,
     ProductionOutcome,
     RunTask,
     ToolCallRecord,
@@ -32,6 +35,8 @@ from .state_machine import (
     ProductionSummary,
     RUN_STATUSES,
     RunState,
+    STOP_PRODUCER_DEFERRED,
+    STOP_UNACCOUNTED_MODEL_CALL,
     TERMINAL_STATUSES,
     TerminationSummary,
     ValidationSummary,
@@ -47,6 +52,9 @@ __all__ = [
     "ClosedLoopOutcome",
     "LLM_CALLS",
     "Limits",
+    "ModelCallRecord",
+    "ProducerResult",
+    "ProductionDeferred",
     "ProductionOutcome",
     "ProductionAttemptSummary",
     "ProductionSummary",
@@ -56,6 +64,8 @@ __all__ = [
     "RepairPlan",
     "RunTask",
     "RunState",
+    "STOP_PRODUCER_DEFERRED",
+    "STOP_UNACCOUNTED_MODEL_CALL",
     "TERMINAL_STATUSES",
     "TerminationSummary",
     "ToolCallRecord",

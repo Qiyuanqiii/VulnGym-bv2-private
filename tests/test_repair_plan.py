@@ -24,6 +24,12 @@ from vulngym_agent.orchestrator import (
     dependent_field_closure,
 )
 from vulngym_agent.orchestrator.budget import Budget
+from vulngym_agent.orchestrator.repair_plan import (
+    DEFAULT_FIELD_REPAIR_POLICY,
+    FIELD_REPAIR_POLICY_REGISTRY,
+    REPAIR_TOOL_POLICY_VERSION,
+    SAFE_REPAIR_TOOL_REGISTRY,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -135,11 +141,10 @@ class RepairPlanContractTests(unittest.TestCase):
                 "repo_url": ("repo_mismatch",),
                 "report_id": ("advisory_mismatch",),
             },
-            required_checks={
-                "repo_url": ("git:remote",),
-                "report_id": ("advisory:id",),
+            allowed_tools={
+                "repo_url": ("resolve_local_repo",),
+                "report_id": ("read_local_advisory",),
             },
-            allowed_tools={"repo_url": ("git",), "report_id": ("advisory",)},
             global_actions=("Use only local evidence.",),
         )
 
@@ -170,6 +175,141 @@ class RepairPlanContractTests(unittest.TestCase):
         self.assertEqual(
             plan.validation_sha256, canonical_sha256(validation.to_dict())
         )
+        self.assertEqual(plan.tool_policy_version, REPAIR_TOOL_POLICY_VERSION)
+
+    def test_default_policy_covers_every_field_with_registered_tools(self) -> None:
+        self.assertEqual(set(DEFAULT_FIELD_REPAIR_POLICY), set(ENTRY_FIELDS))
+        self.assertEqual(
+            set(FIELD_REPAIR_POLICY_REGISTRY),
+            {REPAIR_TOOL_POLICY_VERSION},
+        )
+        safe_tools = SAFE_REPAIR_TOOL_REGISTRY[REPAIR_TOOL_POLICY_VERSION]
+
+        for field_name in ENTRY_FIELDS:
+            with self.subTest(field_name=field_name):
+                plan = build_repair_plan(
+                    task=self._task(),
+                    previous_candidate=self.entry,
+                    validation=self._validation(field_name),
+                    repair_iteration=1,
+                )
+                instruction = plan.instructions[field_name]
+                policy = DEFAULT_FIELD_REPAIR_POLICY[field_name]
+                self.assertEqual(
+                    instruction.required_checks, policy.required_checks
+                )
+                self.assertEqual(instruction.allowed_tools, policy.allowed_tools)
+                self.assertTrue(set(instruction.allowed_tools) <= safe_tools)
+
+        schema = _load_json(ROOT / "schemas" / "repair_plan.schema.json")
+        self.assertEqual(
+            set(schema["$defs"]["toolName"]["enum"]), safe_tools
+        )
+
+    def test_tool_overrides_narrow_but_required_checks_cannot_be_removed(self) -> None:
+        field_name = "critical_operation"
+        policy = DEFAULT_FIELD_REPAIR_POLICY[field_name]
+        selected_tools = (policy.allowed_tools[-1], policy.allowed_tools[0])
+        plan = build_repair_plan(
+            task=self._task(),
+            previous_candidate=self.entry,
+            validation=self._validation(field_name),
+            repair_iteration=1,
+            required_checks={field_name: tuple(reversed(policy.required_checks))},
+            allowed_tools={field_name: selected_tools},
+        )
+        instruction = plan.instructions[field_name]
+        self.assertEqual(
+            instruction.required_checks,
+            policy.required_checks,
+        )
+        self.assertEqual(
+            instruction.allowed_tools,
+            tuple(
+                item
+                for item in policy.allowed_tools
+                if item in set(selected_tools)
+            ),
+        )
+
+        with self.assertRaisesRegex(ValueError, "exceeds the field policy"):
+            build_repair_plan(
+                task=self._task(),
+                previous_candidate=self.entry,
+                validation=self._validation("report_id"),
+                repair_iteration=1,
+                allowed_tools={"report_id": ("git_diff",)},
+            )
+        with self.assertRaisesRegex(ValueError, "complete field policy"):
+            build_repair_plan(
+                task=self._task(),
+                previous_candidate=self.entry,
+                validation=self._validation("report_id"),
+                repair_iteration=1,
+                required_checks={"report_id": ("semantic:anything",)},
+            )
+        with self.assertRaisesRegex(ValueError, "complete field policy"):
+            build_repair_plan(
+                task=self._task(),
+                previous_candidate=self.entry,
+                validation=self._validation(field_name),
+                repair_iteration=1,
+                required_checks={
+                    field_name: policy.required_checks[:-1]
+                },
+            )
+        for unsafe_tool in ("git.fetch", "http.get", "shell.exec"):
+            with self.subTest(unsafe_tool=unsafe_tool), self.assertRaisesRegex(
+                ValueError, "exceeds the field policy"
+            ):
+                build_repair_plan(
+                    task=self._task(),
+                    previous_candidate=self.entry,
+                    validation=self._validation("commit"),
+                    repair_iteration=1,
+                    allowed_tools={"commit": (unsafe_tool,)},
+                )
+
+        with self.assertRaisesRegex(ValueError, "non-repair fields"):
+            build_repair_plan(
+                task=self._task(),
+                previous_candidate=self.entry,
+                validation=self._validation("commit"),
+                repair_iteration=1,
+                allowed_tools={"trace": ()},
+            )
+
+    def test_empty_allowed_tools_is_explicit_deny_all_and_round_trips(self) -> None:
+        plan = build_repair_plan(
+            task=self._task(),
+            previous_candidate=self.entry,
+            validation=self._validation("commit"),
+            repair_iteration=1,
+            allowed_tools={"commit": ()},
+        )
+        self.assertEqual(plan.instructions["commit"].allowed_tools, ())
+        serialized = plan.to_dict()
+        self.assertEqual(serialized["tool_policy_version"], "repair-tools-v1")
+        self.assertEqual(serialized["instructions"]["commit"]["allowed_tools"], [])
+        restored = RepairPlan.from_dict(serialized)
+        self.assertEqual(restored.to_dict(), serialized)
+
+        tampered = deepcopy(serialized)
+        tampered["instructions"]["commit"]["allowed_tools"] = ["shell.exec"]
+        with self.assertRaisesRegex(ValueError, "exceeds the field policy"):
+            RepairPlan.from_dict(tampered)
+
+        cross_field = deepcopy(serialized)
+        cross_field["instructions"]["commit"]["allowed_tools"] = [
+            "route_recognition"
+        ]
+        with self.assertRaisesRegex(ValueError, "exceeds the field policy"):
+            RepairPlan.from_dict(cross_field)
+
+        unsupported = deepcopy(serialized)
+        unsupported["tool_policy_version"] = "repair-tools-v999"
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            RepairPlan.from_dict(unsupported)
 
     def test_locked_field_check_allows_dependencies_but_detects_other_changes(
         self,
@@ -356,9 +496,16 @@ class RepairPlanContractTests(unittest.TestCase):
             snippet="The producer emitted the formal field set.",
         )
         tool_call = ToolCallRecord(
+            task_id="task:repair-001",
+            attempt=0,
+            policy_scope="t2.initial",
             tool_call_id="TOOL-1",
             tool_name="local.git",
             arguments_sha256="a" * 64,
+            operation=(
+                "tool:task:repair-001:0:t2.initial:TOOL-1:local.git"
+            ),
+            budget_event_sequence=1,
             status="success",
             result_sha256="b" * 64,
         )
@@ -469,6 +616,7 @@ class RepairPlanContractTests(unittest.TestCase):
                     "evidence_sha256": canonical_sha256([]),
                 }
             ],
+            "deferred_sha256": None,
             "stop_reason": None,
             "termination": None,
         }
