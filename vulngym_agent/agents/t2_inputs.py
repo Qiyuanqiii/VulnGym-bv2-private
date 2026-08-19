@@ -26,6 +26,7 @@ _MAX_FIX_COMMITS = 16
 _MAX_SOURCE_PATHS = 64
 _MAX_ENTRY_SYMBOLS = 64
 _MAX_PACKAGE_FILES = 256
+_MAX_PACKAGE_FILES_PER_KIND = 127
 _MAX_PACKAGE_PATH_CHARS = 1024
 _MAX_SOURCE_PATH_CHARS = 4096
 
@@ -187,6 +188,14 @@ class T2TaskInputV1:
             )
         if not isinstance(self.package, PackageSpec):
             raise ValueError("package must be a PackageSpec")
+        if (
+            len(self.package.references) > _MAX_PACKAGE_FILES_PER_KIND
+            or len(self.package.patches) > _MAX_PACKAGE_FILES_PER_KIND
+        ):
+            raise ValueError(
+                "package references and patches must each declare at most "
+                f"{_MAX_PACKAGE_FILES_PER_KIND} files"
+            )
         if (
             1 + len(self.package.references) + len(self.package.patches)
             > _MAX_PACKAGE_FILES

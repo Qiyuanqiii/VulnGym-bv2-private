@@ -34,7 +34,7 @@
         },
         "references": {
           "type": "array",
-          "maxItems": 255,
+          "maxItems": 127,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/packagePath"
@@ -42,7 +42,7 @@
         },
         "patches": {
           "type": "array",
-          "maxItems": 255,
+          "maxItems": 127,
           "uniqueItems": true,
           "items": {
             "$ref": "#/$defs/packagePath"

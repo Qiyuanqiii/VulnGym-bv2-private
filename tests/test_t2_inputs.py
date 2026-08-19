@@ -120,9 +120,9 @@ class T2TaskInputTests(unittest.TestCase):
     def test_package_declaration_has_a_hard_file_count_bound(self) -> None:
         value = _inputs()
         value["package"]["references"] = [  # type: ignore[index]
-            f"references/{index}.txt" for index in range(256)
+            f"references/{index}.txt" for index in range(128)
         ]
-        with self.assertRaisesRegex(ValueError, "at most 256 files"):
+        with self.assertRaisesRegex(ValueError, "each declare at most 127"):
             T2TaskInputV1.from_task(_task(value))
 
         value = _inputs()
@@ -136,6 +136,21 @@ class T2TaskInputTests(unittest.TestCase):
         ]
         with self.assertRaisesRegex(ValueError, "4096 characters"):
             T2TaskInputV1.from_task(_task(value))
+
+    def test_package_kind_limits_match_the_json_schema(self) -> None:
+        value = _inputs()
+        value["package"]["patches"] = [  # type: ignore[index]
+            f"patches/{index}.patch" for index in range(128)
+        ]
+        with self.assertRaisesRegex(ValueError, "each declare at most 127"):
+            T2TaskInputV1.from_task(_task(value))
+
+        schema = json.loads(
+            (ROOT / "schemas" / "t2_task.schema.json").read_text(encoding="utf-8")
+        )
+        validator_type = validator_for(schema)
+        validator_type.check_schema(schema)
+        self.assertTrue(list(validator_type(schema).iter_errors(value)))
 
     def test_json_schema_matches_the_python_contract(self) -> None:
         schema = json.loads(
