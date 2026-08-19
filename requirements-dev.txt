@@ -1,0 +1,2 @@
+# Test-only dependency used to validate the bundled Draft 2020-12 schemas.
+jsonschema>=4.18,<5

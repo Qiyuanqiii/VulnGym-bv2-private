@@ -91,3 +91,12 @@ coverage.xml
 *.tmp
 *.bak
 *.orig
+
+# B-v2 generated outputs may contain local paths and source-code snippets.
+/outputs/
+/artifacts/
+
+# Evaluator-only material must live outside implementation workspaces. These
+# names are ignored only as defense in depth; .gitignore is not access control.
+/.vulngym-eval-vault/
+/eval_private/
