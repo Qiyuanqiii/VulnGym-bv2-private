@@ -250,7 +250,13 @@ class EvidencePackageTests(unittest.TestCase):
 
     def test_read_permission_or_io_failure_is_structured(self) -> None:
         self.write_bytes("advisory.md", b"body")
-        with mock.patch.object(Path, "open", side_effect=PermissionError("denied")):
+        with (
+            mock.patch(
+                "vulngym_agent.evidence.package._supports_atomic_relative_open",
+                return_value=False,
+            ),
+            mock.patch.object(Path, "open", side_effect=PermissionError("denied")),
+        ):
             result = load_evidence_package(
                 self.root, {"advisory": "advisory.md"}
             )
@@ -406,7 +412,9 @@ class EvidencePackageTests(unittest.TestCase):
 
     def test_junction_or_reparse_point_is_rejected(self) -> None:
         self.write_bytes("advisory.md", b"body")
-        with mock.patch.object(os.path, "isjunction", return_value=True):
+        with mock.patch.object(
+            os.path, "isjunction", return_value=True, create=True
+        ):
             result = load_evidence_package(
                 self.root, {"advisory": "advisory.md"}
             )
