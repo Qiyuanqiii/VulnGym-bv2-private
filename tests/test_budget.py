@@ -51,10 +51,10 @@ class LimitsTests(unittest.TestCase):
 
     def test_accepts_equal_legacy_and_new_values(self) -> None:
         limits = Limits.from_dict(
-            {"max_iterations": 3, "max_repair_iterations": 3}
+            {"max_iterations": 2, "max_repair_iterations": 2}
         )
 
-        self.assertEqual(limits.max_repair_iterations, 3)
+        self.assertEqual(limits.max_repair_iterations, 2)
 
     def test_rejects_conflicting_legacy_value_and_unknown_fields(self) -> None:
         with self.assertRaisesRegex(ValueError, "conflicts"):
@@ -86,6 +86,8 @@ class LimitsTests(unittest.TestCase):
                     values[field_name] = invalid
                     with self.assertRaises(ValueError):
                         Limits(**values)  # type: ignore[arg-type]
+        with self.assertRaisesRegex(ValueError, "cannot exceed 2"):
+            Limits(max_repair_iterations=3)
 
 
 class UsageAndEventTests(unittest.TestCase):

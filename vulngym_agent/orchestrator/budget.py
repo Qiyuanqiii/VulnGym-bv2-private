@@ -52,7 +52,11 @@ class Limits:
     def __post_init__(self) -> None:
         _non_negative_int("max_llm_calls", self.max_llm_calls)
         _non_negative_int("max_tool_calls", self.max_tool_calls)
-        _non_negative_int("max_repair_iterations", self.max_repair_iterations)
+        repair_limit = _non_negative_int(
+            "max_repair_iterations", self.max_repair_iterations
+        )
+        if repair_limit > 2:
+            raise ValueError("max_repair_iterations cannot exceed 2")
 
     @property
     def max_iterations(self) -> int:

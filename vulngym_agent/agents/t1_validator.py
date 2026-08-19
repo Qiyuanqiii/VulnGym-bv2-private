@@ -43,6 +43,24 @@ class T1ValidationOutcome:
     report: ValidationReport
     evidence: tuple[EvidenceItem, ...]
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.report, ValidationReport):
+            raise ValueError("report must be a ValidationReport")
+        if isinstance(
+            self.evidence, (str, bytes, set, frozenset, Mapping)
+        ):
+            raise ValueError("evidence must be an ordered array")
+        try:
+            evidence = tuple(self.evidence)
+        except TypeError as error:
+            raise ValueError("evidence must be an ordered array") from error
+        if any(not isinstance(item, EvidenceItem) for item in evidence):
+            raise ValueError("evidence must contain only EvidenceItem values")
+        evidence_ids = [item.evidence_id for item in evidence]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("evidence IDs must be unique within one outcome")
+        object.__setattr__(self, "evidence", evidence)
+
 
 def _issue_field(path: str) -> str:
     if not path.startswith("$."):
