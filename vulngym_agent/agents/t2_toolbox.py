@@ -87,6 +87,29 @@ LOCAL_T2_TOOL_NAMES = (
     "validate_schema",
 )
 
+# These identities are release/build-manifest data.  Bump the relevant value
+# whenever that tool's accepted inputs, emitted outputs, or security semantics
+# change.  AttemptToolRuntime intentionally does not derive identity from the
+# bound Python method, because callable introspection is neither replay-stable
+# nor proof against malicious code already executing in this process.
+LOCAL_T2_TOOL_CONTRACT_IDS = MappingProxyType(
+    {
+        "read_local_advisory": "vulngym.local-t2.read_local_advisory@1",
+        "extract_advisory_fields": "vulngym.local-t2.extract_advisory_fields@1",
+        "read_local_patch": "vulngym.local-t2.read_local_patch@1",
+        "resolve_local_repo": "vulngym.local-t2.resolve_local_repo@1",
+        "git_parents": "vulngym.local-t2.git_parents@1",
+        "git_show": "vulngym.local-t2.git_show@1",
+        "git_diff": "vulngym.local-t2.git_diff@1",
+        "version_ancestry": "vulngym.local-t2.version_ancestry@1",
+        "dataflow_candidate_search": (
+            "vulngym.local-t2.dataflow_candidate_search@1"
+        ),
+        "route_recognition": "vulngym.local-t2.route_recognition@1",
+        "validate_schema": "vulngym.local-t2.validate_schema@1",
+    }
+)
+
 
 def _thaw(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -204,7 +227,14 @@ class LocalT2Toolbox:
         if set(handlers) - safe:
             raise RuntimeError("Local T2 registry contains a non-policy tool")
         self._registry = MappingProxyType(
-            {name: ToolDefinition(name, handlers[name]) for name in LOCAL_T2_TOOL_NAMES}
+            {
+                name: ToolDefinition(
+                    name=name,
+                    contract_id=LOCAL_T2_TOOL_CONTRACT_IDS[name],
+                    handler=handlers[name],
+                )
+                for name in LOCAL_T2_TOOL_NAMES
+            }
         )
 
     @staticmethod
@@ -825,6 +855,7 @@ class LocalT2Toolbox:
 
 
 __all__ = [
+    "LOCAL_T2_TOOL_CONTRACT_IDS",
     "LOCAL_T2_TOOL_NAMES",
     "LocalT2Toolbox",
     "MAX_CRITICAL_CANDIDATES",

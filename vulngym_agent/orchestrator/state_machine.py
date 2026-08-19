@@ -19,12 +19,21 @@ from vulngym_agent.models import FieldValidation, ValidationReport
 
 from .budget import Budget, BudgetEvent, BudgetExceeded, Limits, Usage
 from .contracts import (
+    ProducerDraftResult,
     ProductionDeferred,
+    ProductionDeferredDraft,
+    ProductionDraft,
     ProductionOutcome,
     ProducerResult,
     RunTask,
     canonical_sha256,
     freeze_entry_candidate,
+)
+from .producer_context import (
+    ProducerAttemptController,
+    ProducerContextFactory,
+    ProducerExecutionContext,
+    ProducerTranscriptProjection,
 )
 from .repair_plan import RepairPlan, build_repair_plan
 
@@ -118,6 +127,10 @@ _STOP_REASON_PHASES = {
 
 _MAX_REPAIR_ITERATIONS = 2
 _MAX_VALIDATIONS = _MAX_REPAIR_ITERATIONS + 1
+_COMPLETE_MODEL_STAGES = {
+    "generate": ("plan", "semantic_judge", "reflection"),
+    "repair": ("repair", "reflection"),
+}
 
 
 class CandidateValidator(Protocol):
@@ -231,6 +244,91 @@ def _accounting_error(
     ):
         return STOP_PRODUCER_ERROR, "producer charged an unauthorized budget resource"
     return None
+
+
+def _assert_controller_bound(
+    controller: object,
+    *,
+    task: RunTask,
+    attempt: int,
+    mode: str,
+) -> ProducerAttemptController:
+    """Reject substituted controllers before exposing any context to T2."""
+
+    if type(controller) is not ProducerAttemptController:
+        raise ValueError(
+            "producer_context_factory must return a ProducerAttemptController"
+        )
+    expected_scope = _policy_scope_for_attempt(attempt)
+    if (
+        controller.task_id != task.task_id
+        or controller.attempt != attempt
+        or controller.mode != mode
+        or controller.policy_scope != expected_scope
+    ):
+        raise ValueError("producer attempt controller identity/scope mismatch")
+    context = controller.producer_context
+    if type(context) is not ProducerExecutionContext or (
+        context.task_id != task.task_id
+        or context.attempt != attempt
+        or context.mode != mode
+        or context.policy_scope != expected_scope
+    ):
+        raise ValueError("producer execution context identity/scope mismatch")
+    return controller
+
+
+def _formalize_producer_draft(
+    task: RunTask,
+    draft: ProducerDraftResult,
+    projection: ProducerTranscriptProjection,
+    *,
+    attempt: int,
+    mode: str,
+    parent_candidate_sha256: str | None = None,
+    repair_plan_sha256: str | None = None,
+) -> ProducerResult:
+    """Bind a capability-free draft to one orchestrator-issued projection."""
+
+    expected_scope = _policy_scope_for_attempt(attempt)
+    if (
+        projection.task_id != task.task_id
+        or projection.attempt != attempt
+        or projection.mode != mode
+        or projection.policy_scope != expected_scope
+    ):
+        raise ValueError("producer transcript projection identity/scope mismatch")
+
+    if type(draft) is ProductionDraft:
+        expected_stages = _COMPLETE_MODEL_STAGES[mode]
+        if projection.model_stages != expected_stages:
+            raise ValueError(
+                "completed producer draft requires the full model-stage grammar"
+            )
+        return ProductionOutcome(
+            candidate=draft.candidate,
+            evidence=draft.evidence,
+            tool_calls=projection.tool_calls,
+            model_calls=projection.model_calls,
+            assumptions=draft.assumptions,
+        )
+
+    if type(draft) is ProductionDeferredDraft:
+        return ProductionDeferred.from_task(
+            task,
+            attempt=attempt,
+            mode=mode,
+            parent_candidate_sha256=parent_candidate_sha256,
+            repair_plan_sha256=repair_plan_sha256,
+            stage=draft.stage,
+            reason_code=draft.reason_code,
+            missing_information=draft.missing_information,
+            evidence=draft.evidence,
+            tool_calls=projection.tool_calls,
+            model_calls=projection.model_calls,
+        )
+
+    raise ValueError("producer must return a ProducerDraftResult")
 
 
 def _report_expected_verdict(report: ValidationReport) -> str:
@@ -1539,19 +1637,99 @@ class ClosedLoopOrchestrator:
         self,
         producer: "T2Producer",
         validator_factory: ValidatorFactory,
+        producer_context_factory: ProducerContextFactory,
         *,
         limits: Limits | Mapping[str, Any] | None = None,
     ) -> None:
         if not callable(validator_factory):
             raise ValueError("validator_factory must be callable")
+        if not callable(getattr(producer_context_factory, "create", None)):
+            raise ValueError(
+                "producer_context_factory must provide a callable create method"
+            )
         self._producer = producer
         self._validator_factory = validator_factory
+        self._producer_context_factory = producer_context_factory
         self._limits = (
             limits
             if isinstance(limits, Limits)
             else Limits.from_dict(limits)
             if isinstance(limits, Mapping)
             else Limits()
+        )
+
+    def _produce_attempt(
+        self,
+        task: RunTask,
+        *,
+        attempt: int,
+        mode: str,
+        plan: RepairPlan | None,
+        budget: Budget,
+        previous_entry: Mapping[str, Any] | None = None,
+    ) -> ProducerResult:
+        """Run T2 through a narrow context and authoritatively seal its calls."""
+
+        controller = _assert_controller_bound(
+            self._producer_context_factory.create(
+                task,
+                attempt=attempt,
+                mode=mode,
+                plan=plan,
+                budget=budget,
+            ),
+            task=task,
+            attempt=attempt,
+            mode=mode,
+        )
+        context = controller.producer_context
+        producer_error: Exception | None = None
+        draft: object | None = None
+        try:
+            if mode == "generate":
+                draft = self._producer.generate(task, context)
+            else:
+                if plan is None or previous_entry is None:
+                    raise ValueError("repair attempt requires a parent and RepairPlan")
+                draft = self._producer.repair(
+                    task,
+                    previous_entry,
+                    plan,
+                    context,
+                )
+        except Exception as error:
+            producer_error = error
+
+        # Finalization is deliberately retained by the orchestrator.  It also
+        # runs after a producer exception so a captured producer-facing facade
+        # cannot keep charging or issuing artifacts after the run terminates.
+        try:
+            projection = controller.finalize()
+        except Exception as finalization_error:
+            if producer_error is not None:
+                raise finalization_error from producer_error
+            raise
+        if producer_error is not None:
+            raise producer_error
+        if (
+            type(projection) is not ProducerTranscriptProjection
+            or not controller.issued(projection)
+        ):
+            raise ValueError(
+                "producer attempt controller returned an unissued projection"
+            )
+        return _formalize_producer_draft(
+            task,
+            draft,
+            projection,
+            attempt=attempt,
+            mode=mode,
+            parent_candidate_sha256=(
+                None
+                if previous_entry is None
+                else canonical_sha256(previous_entry)
+            ),
+            repair_plan_sha256=(None if plan is None else canonical_sha256(plan)),
         )
 
     def run(
@@ -1648,13 +1826,13 @@ class ClosedLoopOrchestrator:
         try:
             if initial_candidate is None:
                 before_event_count = len(run_budget.events)
-                produced = self._producer.generate(task, run_budget)
-                if not isinstance(
-                    produced, (ProductionOutcome, ProductionDeferred)
-                ):
-                    raise ValueError(
-                        "producer.generate must return a ProducerResult"
-                    )
+                produced = self._produce_attempt(
+                    task,
+                    attempt=0,
+                    mode="generate",
+                    plan=None,
+                    budget=run_budget,
+                )
                 accounting_error = _accounting_error(
                     produced,
                     task=task,
@@ -1667,13 +1845,6 @@ class ClosedLoopOrchestrator:
                         "failed",
                         accounting_error[0],
                         error=accounting_error[1],
-                    )
-                if (
-                    isinstance(produced, ProductionOutcome)
-                    and not produced.model_calls
-                ):
-                    raise ValueError(
-                        "producer.generate must charge at least one LLM call"
                     )
             elif isinstance(initial_candidate, ProductionOutcome):
                 if initial_candidate.tool_calls or initial_candidate.model_calls:
@@ -1808,16 +1979,14 @@ class ClosedLoopOrchestrator:
                 active_plan = next_plan
                 repair_plans.append(active_plan)
                 before_event_count = len(run_budget.events)
-                repaired = self._producer.repair(
+                repaired = self._produce_attempt(
                     task,
-                    _plain_candidate(parent),
-                    active_plan,
-                    run_budget,
+                    attempt=repair_iteration,
+                    mode="repair",
+                    plan=active_plan,
+                    budget=run_budget,
+                    previous_entry=_plain_candidate(parent),
                 )
-                if not isinstance(
-                    repaired, (ProductionOutcome, ProductionDeferred)
-                ):
-                    raise ValueError("producer.repair must return a ProducerResult")
                 accounting_error = _accounting_error(
                     repaired,
                     task=task,

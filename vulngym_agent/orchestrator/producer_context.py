@@ -22,7 +22,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from threading import RLock
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from vulngym_agent.agents.model_runtime import (
     AttemptModelRuntime,
@@ -45,6 +45,10 @@ from vulngym_agent.tools.runtime import (
     ToolDefinition,
     ToolResult,
 )
+
+if TYPE_CHECKING:
+    from vulngym_agent.orchestrator.contracts import RunTask
+    from vulngym_agent.orchestrator.repair_plan import RepairPlan
 
 
 _RECEIPT_FACTORY_KEY = object()
@@ -243,6 +247,22 @@ class ProducerExecutionContext:
         """Resolve only an exact artifact capability issued in this attempt."""
 
         return self.__resolve_artifact(ref)
+
+
+@runtime_checkable
+class ProducerContextFactory(Protocol):
+    """Create one orchestrator-owned controller for an active T2 attempt."""
+
+    def create(
+        self,
+        task: "RunTask",
+        *,
+        attempt: int,
+        mode: str,
+        plan: "RepairPlan | None",
+        budget: Budget,
+    ) -> "ProducerAttemptController":
+        ...
 
 
 class ProducerAttemptController:
@@ -498,6 +518,7 @@ __all__ = [
     "ProducerContextFinalized",
     "ProducerContextLedgerMismatch",
     "ProducerContextReceipt",
+    "ProducerContextFactory",
     "ProducerAttemptController",
     "ProducerExecutionContext",
     "ProducerTranscriptProjection",

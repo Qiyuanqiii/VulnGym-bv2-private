@@ -612,6 +612,194 @@ def _validate_sidecars(
     return evidence, tool_calls, model_calls
 
 
+def _validate_draft_evidence(
+    evidence_value: Any,
+    *,
+    name: str = "evidence",
+) -> tuple[EvidenceItem, ...]:
+    """Validate evidence before authority-owned call records are projected."""
+
+    evidence = _coerce_contract_array(
+        evidence_value,
+        name=name,
+        limit=_MAX_EVIDENCE_ITEMS,
+    )
+    if any(not isinstance(item, EvidenceItem) for item in evidence):
+        raise ValueError(f"{name} must contain only EvidenceItem values")
+    evidence_ids = [item.evidence_id for item in evidence]
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError(f"{name} IDs must be unique within one draft")
+    return evidence
+
+
+def _validate_assumptions(assumptions_value: Any) -> tuple[str, ...]:
+    assumptions = _coerce_contract_array(
+        assumptions_value,
+        name="assumptions",
+        limit=_MAX_ASSUMPTIONS,
+    )
+    if any(
+        not isinstance(item, str)
+        or not item.strip()
+        or len(item) > _MAX_SIDECAR_TEXT_LENGTH
+        for item in assumptions
+    ) or len(assumptions) != len(set(assumptions)):
+        raise ValueError(
+            "assumptions must contain unique, bounded, non-empty strings"
+        )
+    return assumptions
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionDraft:
+    """Producer-authored candidate data without authority-owned sidecars."""
+
+    candidate: Mapping[str, Any]
+    evidence: tuple[EvidenceItem, ...] = ()
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        shaped = freeze_entry_candidate(self.candidate)
+        formal_candidate = _FORMAL_T2_ADAPTER.adapt(
+            _thaw_json(shaped), formal_t2=True
+        )
+        if (
+            type(formal_candidate["verify"]) is not int
+            or formal_candidate["verify"] != 0
+        ):
+            raise ValueError("formal T2 candidate verify must be integer 0")
+        candidate = freeze_entry_candidate(formal_candidate)
+        evidence = _validate_draft_evidence(self.evidence)
+        for item in evidence:
+            if item.report_id != formal_candidate["report_id"]:
+                raise ValueError(
+                    "producer evidence report_id must match its candidate"
+                )
+            if (
+                item.entry_id is not None
+                and item.entry_id != formal_candidate["entry_id"]
+            ):
+                raise ValueError(
+                    "producer evidence entry_id must match its candidate"
+                )
+        object.__setattr__(self, "candidate", candidate)
+        object.__setattr__(self, "evidence", evidence)
+        object.__setattr__(
+            self, "assumptions", _validate_assumptions(self.assumptions)
+        )
+
+    @property
+    def candidate_sha256(self) -> str:
+        return canonical_sha256(self.candidate)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidate": {
+                name: _thaw_json(self.candidate[name]) for name in ENTRY_FIELDS
+            },
+            "evidence": [item.to_dict() for item in self.evidence],
+            "assumptions": list(self.assumptions),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ProductionDraft":
+        _strict_object(
+            value,
+            required=frozenset({"candidate", "evidence", "assumptions"}),
+            name="ProductionDraft",
+        )
+        evidence_value = value["evidence"]
+        assumptions_value = value["assumptions"]
+        if not isinstance(evidence_value, list):
+            raise ValueError("ProductionDraft.evidence must be an array")
+        if not isinstance(assumptions_value, list):
+            raise ValueError("ProductionDraft.assumptions must be an array")
+        if any(not isinstance(item, Mapping) for item in evidence_value):
+            raise ValueError("ProductionDraft.evidence items must be objects")
+        return cls(
+            candidate=value["candidate"],
+            evidence=tuple(_evidence_from_dict(item) for item in evidence_value),
+            assumptions=tuple(assumptions_value),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionDeferredDraft:
+    """Producer-authored fail-closed result without topology or call sidecars."""
+
+    stage: str
+    reason_code: str
+    missing_information: tuple[str, ...]
+    evidence: tuple[EvidenceItem, ...] = ()
+
+    def __post_init__(self) -> None:
+        stage = _validate_identifier(
+            self.stage,
+            name="stage",
+            pattern=_DEFERRED_STAGE_RE,
+        )
+        if stage not in _GENERATE_DEFERRED_STAGES | _REPAIR_DEFERRED_STAGES:
+            raise ValueError("stage is not an allowed producer defer stage")
+        _validate_identifier(
+            self.reason_code,
+            name="reason_code",
+            pattern=_REASON_CODE_RE,
+        )
+        missing_information = _coerce_contract_array(
+            self.missing_information,
+            name="missing_information",
+            limit=_MAX_MISSING_INFORMATION,
+        )
+        if not missing_information or any(
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > _MAX_SIDECAR_TEXT_LENGTH
+            for item in missing_information
+        ) or len(missing_information) != len(set(missing_information)):
+            raise ValueError(
+                "missing_information must contain unique, bounded, "
+                "non-empty strings"
+            )
+        object.__setattr__(self, "missing_information", missing_information)
+        object.__setattr__(self, "evidence", _validate_draft_evidence(self.evidence))
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "stage": self.stage,
+            "reason_code": self.reason_code,
+            "missing_information": list(self.missing_information),
+            "evidence": [item.to_dict() for item in self.evidence],
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "ProductionDeferredDraft":
+        _strict_object(
+            value,
+            required=frozenset(
+                {"stage", "reason_code", "missing_information", "evidence"}
+            ),
+            name="ProductionDeferredDraft",
+        )
+        missing_value = value["missing_information"]
+        evidence_value = value["evidence"]
+        if not isinstance(missing_value, list):
+            raise ValueError(
+                "ProductionDeferredDraft.missing_information must be an array"
+            )
+        if not isinstance(evidence_value, list):
+            raise ValueError("ProductionDeferredDraft.evidence must be an array")
+        if any(not isinstance(item, Mapping) for item in evidence_value):
+            raise ValueError(
+                "ProductionDeferredDraft.evidence items must be objects"
+            )
+        return cls(
+            stage=value["stage"],
+            reason_code=value["reason_code"],
+            missing_information=tuple(missing_value),
+            evidence=tuple(_evidence_from_dict(item) for item in evidence_value),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ProductionOutcome(JsonSerializable):
     """T2 output with an isolated official candidate and internal sidecars."""
@@ -637,11 +825,7 @@ class ProductionOutcome(JsonSerializable):
             tool_calls_value=self.tool_calls,
             model_calls_value=self.model_calls,
         )
-        assumptions = _coerce_contract_array(
-            self.assumptions,
-            name="assumptions",
-            limit=_MAX_ASSUMPTIONS,
-        )
+        assumptions = _validate_assumptions(self.assumptions)
         for item in evidence:
             if item.report_id != formal_candidate["report_id"]:
                 raise ValueError(
@@ -654,15 +838,6 @@ class ProductionOutcome(JsonSerializable):
                 raise ValueError(
                     "producer evidence entry_id must match its candidate"
                 )
-        if any(
-            not isinstance(item, str)
-            or not item.strip()
-            or len(item) > _MAX_SIDECAR_TEXT_LENGTH
-            for item in assumptions
-        ) or len(assumptions) != len(set(assumptions)):
-            raise ValueError(
-                "assumptions must contain unique, bounded, non-empty strings"
-            )
         object.__setattr__(self, "evidence", evidence)
         object.__setattr__(self, "tool_calls", tool_calls)
         object.__setattr__(self, "model_calls", model_calls)
@@ -972,12 +1147,16 @@ class ProductionDeferred(JsonSerializable):
 
 
 ProducerResult = ProductionOutcome | ProductionDeferred
+ProducerDraftResult = ProductionDraft | ProductionDeferredDraft
 
 
 __all__ = [
     "ModelCallRecord",
+    "ProducerDraftResult",
     "ProducerResult",
+    "ProductionDeferredDraft",
     "ProductionDeferred",
+    "ProductionDraft",
     "ProductionOutcome",
     "RunTask",
     "ToolCallRecord",

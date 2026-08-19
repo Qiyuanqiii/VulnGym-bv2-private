@@ -16,11 +16,14 @@ from vulngym_agent.orchestrator.budget import Budget
 from vulngym_agent.orchestrator.contracts import (
     ModelCallRecord,
     ProductionDeferred,
+    ProductionDeferredDraft,
+    ProductionDraft,
     ProductionOutcome,
     RunTask,
     ToolCallRecord,
     canonical_sha256,
 )
+from vulngym_agent.orchestrator.producer_context import ProducerExecutionContext
 from vulngym_agent.orchestrator.state_machine import (
     ClosedLoopOrchestrator,
     STOP_PRODUCER_DEFERRED,
@@ -28,6 +31,10 @@ from vulngym_agent.orchestrator.state_machine import (
     STOP_SIDECAR_CONFLICT,
     STOP_UNACCOUNTED_MODEL_CALL,
     STOP_UNACCOUNTED_TOOL_CALL,
+)
+from tests.producer_context_support import (
+    FixedProducerContextFactory,
+    complete_model_stages,
 )
 
 
@@ -147,24 +154,27 @@ class OrchestratorDeferredTests(unittest.TestCase):
         )
 
         class Producer:
-            def generate(self, run_task: RunTask, budget: Budget) -> ProductionDeferred:
-                budget.charge_tool_call(operation=tool_call.operation)
-                budget.charge_llm_call(operation=model_call.operation)
-                return ProductionDeferred.from_task(
-                    run_task,
+            def generate(
+                self, run_task: RunTask, context: ProducerExecutionContext
+            ) -> ProductionDeferredDraft:
+                context.call_tool(tool_call.tool_call_id, tool_call.tool_name, {})
+                context.call_model(model_call.model_call_id, "plan", {})
+                return ProductionDeferredDraft(
                     stage="semantic_judge",
                     reason_code="insufficient_source_evidence",
                     missing_information=("SENTINEL-MISSING-SOURCE",),
                     evidence=(evidence,),
-                    tool_calls=(tool_call,),
-                    model_calls=(model_call,),
                 )
 
             def repair(self, *args: Any, **kwargs: Any) -> ProductionOutcome:
                 raise AssertionError("repair must not run")
 
         factory = _NeverValidatorFactory()
-        result = ClosedLoopOrchestrator(Producer(), factory).run(task)
+        result = ClosedLoopOrchestrator(
+            Producer(),
+            factory,
+            FixedProducerContextFactory((tool_call.tool_name,)),
+        ).run(task)
 
         self.assertEqual(result.status, "manual_review")
         self.assertEqual(result.state.stop_reason, STOP_PRODUCER_DEFERRED)
@@ -217,16 +227,19 @@ class OrchestratorDeferredTests(unittest.TestCase):
 
     def test_initial_defer_may_use_zero_tool_and_model_calls(self) -> None:
         class Producer:
-            def generate(self, task: RunTask, budget: Budget) -> ProductionDeferred:
-                return ProductionDeferred.from_task(
-                    task,
+            def generate(
+                self, task: RunTask, context: ProducerExecutionContext
+            ) -> ProductionDeferredDraft:
+                return ProductionDeferredDraft(
                     stage="load_advisory",
                     reason_code="advisory_missing",
                     missing_information=("public advisory",),
                 )
 
         factory = _NeverValidatorFactory()
-        result = ClosedLoopOrchestrator(Producer(), factory).run(self.task)
+        result = ClosedLoopOrchestrator(
+            Producer(), factory, FixedProducerContextFactory()
+        ).run(self.task)
 
         self.assertEqual(result.status, "manual_review")
         self.assertEqual(result.state.stop_reason, STOP_PRODUCER_DEFERRED)
@@ -273,39 +286,37 @@ class OrchestratorDeferredTests(unittest.TestCase):
         )
 
         class Producer:
-            def generate(self, run_task: RunTask, budget: Budget) -> ProductionOutcome:
-                budget.charge_llm_call(operation=initial_call.operation)
-                return ProductionOutcome(
-                    candidate=self_entry,
-                    model_calls=(initial_call,),
-                )
+            def generate(
+                self, run_task: RunTask, context: ProducerExecutionContext
+            ) -> ProductionDraft:
+                complete_model_stages(context)
+                return ProductionDraft(candidate=self_entry)
 
             def repair(
                 self,
                 run_task: RunTask,
                 previous_entry: Mapping[str, Any],
                 plan: Any,
-                budget: Budget,
-            ) -> ProductionDeferred:
-                budget.charge_tool_call(operation=repair_tool.operation)
-                budget.charge_llm_call(operation=repair_call.operation)
-                return ProductionDeferred.from_task(
-                    run_task,
-                    attempt=1,
-                    mode="repair",
-                    parent_candidate_sha256=canonical_sha256(previous_entry),
-                    repair_plan_sha256=canonical_sha256(plan),
+                context: ProducerExecutionContext,
+            ) -> ProductionDeferredDraft:
+                context.call_tool(
+                    repair_tool.tool_call_id, repair_tool.tool_name, {}
+                )
+                context.call_model(repair_call.model_call_id, "repair", {})
+                return ProductionDeferredDraft(
                     stage="repair",
                     reason_code="no_safe_replacement",
                     missing_information=("corroborated replacement title",),
                     evidence=(evidence,),
-                    tool_calls=(repair_tool,),
-                    model_calls=(repair_call,),
                 )
 
         self_entry = deepcopy(self.entry)
         factory = _OneReportFactory(report)
-        result = ClosedLoopOrchestrator(Producer(), factory).run(task)
+        result = ClosedLoopOrchestrator(
+            Producer(),
+            factory,
+            FixedProducerContextFactory((repair_tool.tool_name,)),
+        ).run(task)
 
         self.assertEqual(result.status, "manual_review")
         self.assertEqual(result.state.stop_reason, STOP_PRODUCER_DEFERRED)
@@ -322,7 +333,7 @@ class OrchestratorDeferredTests(unittest.TestCase):
         self.assertEqual(set(factory.seen[0]), set(self.entry))
         self.assertEqual(result.state.budget["usage"]["repair_iterations"], 1)
         self.assertEqual(result.state.budget["usage"]["tool_calls"], 1)
-        self.assertEqual(result.state.budget["usage"]["llm_calls"], 2)
+        self.assertEqual(result.state.budget["usage"]["llm_calls"], 4)
 
         for field_name, expected_error in (
             ("parent_candidate_sha256", "parent digest"),
@@ -345,7 +356,7 @@ class OrchestratorDeferredTests(unittest.TestCase):
                     deferred_outcome=tampered_deferred,
                 )
 
-    def test_model_budget_delta_must_close_exactly(self) -> None:
+    def test_completed_draft_requires_the_full_generate_model_grammar(self) -> None:
         correct = ValidationReport(
             report_id=self.entry["report_id"],
             entry_id=self.entry["entry_id"],
@@ -362,35 +373,37 @@ class OrchestratorDeferredTests(unittest.TestCase):
         )
 
         class Producer:
-            def __init__(self, *, charged: int, recorded: int) -> None:
-                self.charged = charged
-                self.recorded = recorded
+            def __init__(self, stage_count: int) -> None:
+                self.stage_count = stage_count
 
-            def generate(self, task: RunTask, budget: Budget) -> ProductionOutcome:
-                for index in range(self.charged):
-                    budget.charge_llm_call(operation=f"test.model:{index}")
-                return ProductionOutcome(
-                    candidate=entry,
-                    model_calls=tuple(
-                        _model_call(f"MODEL-accounting-{index}")
-                        for index in range(self.recorded)
-                    ),
-                )
+            def generate(
+                self, task: RunTask, context: ProducerExecutionContext
+            ) -> ProductionDraft:
+                stages = ("plan", "semantic_judge", "reflection")
+                for index, stage in enumerate(stages[: self.stage_count]):
+                    context.call_model(
+                        f"MODEL-accounting-{index}", stage, {"index": index}
+                    )
+                return ProductionDraft(candidate=entry)
 
         entry = self.entry
-        for charged, recorded in ((1, 0), (0, 1), (2, 1)):
-            with self.subTest(charged=charged, recorded=recorded):
+        for stage_count in range(4):
+            with self.subTest(stage_count=stage_count):
                 factory = _OneReportFactory(correct)
                 result = ClosedLoopOrchestrator(
-                    Producer(charged=charged, recorded=recorded), factory
+                    Producer(stage_count),
+                    factory,
+                    FixedProducerContextFactory(),
                 ).run(self.task)
-                self.assertEqual(result.status, "failed")
-                self.assertEqual(
-                    result.state.stop_reason, STOP_UNACCOUNTED_MODEL_CALL
-                )
-                self.assertEqual(factory.calls, 0)
+                if stage_count < 3:
+                    self.assertEqual(result.status, "failed")
+                    self.assertEqual(result.state.stop_reason, STOP_PRODUCER_ERROR)
+                    self.assertEqual(factory.calls, 0)
+                else:
+                    self.assertEqual(result.status, "finalized")
+                    self.assertEqual(factory.calls, 1)
 
-    def test_deferred_tool_and_model_call_counts_must_close_exactly(self) -> None:
+    def test_deferred_draft_accepts_empty_or_partial_context_prefixes(self) -> None:
         class Producer:
             def __init__(
                 self,
@@ -405,33 +418,35 @@ class OrchestratorDeferredTests(unittest.TestCase):
                 self.charged_models = charged_models
                 self.recorded_models = recorded_models
 
-            def generate(self, task: RunTask, budget: Budget) -> ProductionDeferred:
+            def generate(
+                self, task: RunTask, context: ProducerExecutionContext
+            ) -> ProductionDeferredDraft:
                 for index in range(self.charged_tools):
-                    budget.charge_tool_call(operation=f"test.defer.tool:{index}")
-                for index in range(self.charged_models):
-                    budget.charge_llm_call(operation=f"test.defer.model:{index}")
-                return ProductionDeferred.from_task(
-                    task,
+                    context.call_tool(
+                        f"TOOL-defer-accounting-{index}",
+                        "local.read_advisory",
+                        {"index": index},
+                    )
+                stages = ("plan", "semantic_judge", "reflection")
+                for index, stage in enumerate(stages[: self.charged_models]):
+                    context.call_model(
+                        f"MODEL-defer-accounting-{index}",
+                        stage,
+                        {"index": index},
+                    )
+                return ProductionDeferredDraft(
                     stage="reflection",
                     reason_code="insufficient_evidence",
                     missing_information=("corroboration",),
-                    tool_calls=tuple(
-                        _tool_call(f"TOOL-defer-accounting-{index}")
-                        for index in range(self.recorded_tools)
-                    ),
-                    model_calls=tuple(
-                        _model_call(f"MODEL-defer-accounting-{index}")
-                        for index in range(self.recorded_models)
-                    ),
                 )
 
         cases = (
-            (0, 1, 0, 0, STOP_UNACCOUNTED_TOOL_CALL),
-            (2, 1, 0, 0, STOP_UNACCOUNTED_TOOL_CALL),
-            (0, 0, 0, 1, STOP_UNACCOUNTED_MODEL_CALL),
-            (0, 0, 2, 1, STOP_UNACCOUNTED_MODEL_CALL),
+            (0, 1, 0, 0),
+            (2, 1, 0, 0),
+            (0, 0, 0, 1),
+            (0, 0, 2, 1),
         )
-        for charged_tools, recorded_tools, charged_models, recorded_models, reason in cases:
+        for charged_tools, recorded_tools, charged_models, recorded_models in cases:
             with self.subTest(
                 charged_tools=charged_tools,
                 recorded_tools=recorded_tools,
@@ -447,13 +462,20 @@ class OrchestratorDeferredTests(unittest.TestCase):
                         recorded_models=recorded_models,
                     ),
                     factory,
+                    FixedProducerContextFactory(("local.read_advisory",)),
                 ).run(self.task)
-                self.assertEqual(result.status, "failed")
-                self.assertEqual(result.state.stop_reason, reason)
-                self.assertIsNone(result.deferred_outcome)
+                self.assertEqual(result.status, "manual_review")
+                self.assertEqual(result.state.stop_reason, STOP_PRODUCER_DEFERRED)
+                self.assertIsNotNone(result.deferred_outcome)
+                self.assertEqual(
+                    len(result.deferred_outcome.tool_calls), charged_tools
+                )
+                self.assertEqual(
+                    len(result.deferred_outcome.model_calls), charged_models
+                )
                 self.assertEqual(factory.calls, 0)
 
-    def test_deferred_identity_mismatch_is_a_producer_failure(self) -> None:
+    def test_formal_deferred_cannot_inject_attempt_topology(self) -> None:
         valid = ProductionDeferred.from_task(
             self.task,
             stage="plan",
@@ -463,15 +485,19 @@ class OrchestratorDeferredTests(unittest.TestCase):
         mismatched = replace(valid, task_id="task:someone-else")
 
         class Producer:
-            def generate(self, task: RunTask, budget: Budget) -> ProductionDeferred:
+            def generate(
+                self, task: RunTask, context: ProducerExecutionContext
+            ) -> ProductionDeferred:
                 return mismatched
 
         factory = _NeverValidatorFactory()
-        result = ClosedLoopOrchestrator(Producer(), factory).run(self.task)
+        result = ClosedLoopOrchestrator(
+            Producer(), factory, FixedProducerContextFactory()
+        ).run(self.task)
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.state.stop_reason, STOP_PRODUCER_ERROR)
-        self.assertIn("task_id", result.error)
+        self.assertIn("ProducerDraftResult", result.error)
         self.assertIsNone(result.deferred_outcome)
 
     def test_model_call_ids_are_globally_unique_across_deferred_attempt(self) -> None:
@@ -497,33 +523,33 @@ class OrchestratorDeferredTests(unittest.TestCase):
         )
 
         class Producer:
-            def generate(self, task: RunTask, budget: Budget) -> ProductionOutcome:
-                budget.charge_llm_call(operation=initial_call.operation)
-                return ProductionOutcome(candidate=entry, model_calls=(initial_call,))
+            def generate(
+                self, task: RunTask, context: ProducerExecutionContext
+            ) -> ProductionDraft:
+                context.call_model(duplicate_id, "plan", {})
+                context.call_model("MODEL-initial-judge", "semantic_judge", {})
+                context.call_model("MODEL-initial-reflect", "reflection", {})
+                return ProductionDraft(candidate=entry)
 
             def repair(
                 self,
                 task: RunTask,
                 previous_entry: Mapping[str, Any],
                 plan: Any,
-                budget: Budget,
-            ) -> ProductionDeferred:
-                budget.charge_llm_call(operation=repair_call.operation)
-                return ProductionDeferred.from_task(
-                    task,
-                    attempt=1,
-                    mode="repair",
-                    parent_candidate_sha256=canonical_sha256(previous_entry),
-                    repair_plan_sha256=canonical_sha256(plan),
+                context: ProducerExecutionContext,
+            ) -> ProductionDeferredDraft:
+                context.call_model(duplicate_id, "repair", {})
+                return ProductionDeferredDraft(
                     stage="repair",
                     reason_code="no_safe_replacement",
                     missing_information=("replacement",),
-                    model_calls=(repair_call,),
                 )
 
         entry = self.entry
         result = ClosedLoopOrchestrator(
-            Producer(), _OneReportFactory(report)
+            Producer(),
+            _OneReportFactory(report),
+            FixedProducerContextFactory(),
         ).run(self.task)
 
         self.assertEqual(result.status, "failed")

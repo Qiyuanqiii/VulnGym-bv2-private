@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
+import hashlib
 import json
 import math
 import unittest
@@ -46,7 +47,13 @@ class AttemptToolRuntimeTests(unittest.TestCase):
         allowlist=("git.read_blob",),
         definitions: tuple[ToolDefinition, ...] | None = None,
     ) -> AttemptToolRuntime:
-        registry = definitions or (ToolDefinition("git.read_blob", handler),)
+        registry = definitions or (
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@1",
+                handler=handler,
+            ),
+        )
         return AttemptToolRuntime(
             task_id=TASK_ID,
             attempt=attempt,
@@ -148,7 +155,13 @@ class AttemptToolRuntimeTests(unittest.TestCase):
             return ToolHandlerOutput()
 
         budget = Budget(Limits(max_tool_calls=4))
-        source = {"git.read_blob": ToolDefinition("git.read_blob", handler)}
+        source = {
+            "git.read_blob": ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@1",
+                handler=handler,
+            )
+        }
         runtime = AttemptToolRuntime(
             task_id=TASK_ID,
             attempt=0,
@@ -157,19 +170,29 @@ class AttemptToolRuntimeTests(unittest.TestCase):
             registry=source,
             allowlist=("git.read_blob",),
         )
-        source["shell"] = ToolDefinition("shell", handler)
+        source["shell"] = ToolDefinition(
+            name="shell", contract_id="test.shell@1", handler=handler
+        )
 
         self.assertNotIn("shell", runtime.registry)
         with self.assertRaises(TypeError):
-            runtime.registry["other"] = ToolDefinition("other", handler)
+            runtime.registry["other"] = ToolDefinition(
+                name="other", contract_id="test.other@1", handler=handler
+            )
         with self.assertRaises(ToolNotAllowed):
             runtime.call("TOOL-00001", "shell", {})
         self.assertEqual(calls, 0)
         self.assertEqual(budget.usage.tool_calls, 0)
 
         definitions = (
-            ToolDefinition("git.read_blob", handler),
-            ToolDefinition("git.diff", handler),
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@1",
+                handler=handler,
+            ),
+            ToolDefinition(
+                name="git.diff", contract_id="test.git.diff@1", handler=handler
+            ),
         )
         restricted = self._runtime(
             handler,
@@ -180,6 +203,141 @@ class AttemptToolRuntimeTests(unittest.TestCase):
         with self.assertRaises(ToolNotAllowed):
             restricted.call("TOOL-00002", "git.diff", {})
         self.assertEqual(budget.usage.tool_calls, 0)
+
+    def test_registry_digest_uses_ordered_manifest_contracts_not_callables(self) -> None:
+        def first_handler(envelope: ToolCallEnvelope) -> ToolHandlerOutput:
+            return ToolHandlerOutput(output={"handler": "first"})
+
+        def second_handler(envelope: ToolCallEnvelope) -> ToolHandlerOutput:
+            return ToolHandlerOutput(output={"handler": "second"})
+
+        def digest(definitions: tuple[ToolDefinition, ...]) -> str:
+            runtime = AttemptToolRuntime(
+                task_id=TASK_ID,
+                attempt=0,
+                policy_scope="t2.initial",
+                budget=Budget(),
+                registry=definitions,
+                allowlist=(),
+            )
+            return runtime.finalize().registry_sha256
+
+        v1 = (
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@1",
+                handler=first_handler,
+            ),
+            ToolDefinition(
+                name="git.diff",
+                contract_id="test.git.diff@1",
+                handler=first_handler,
+            ),
+        )
+        same_contracts_different_callables = (
+            ToolDefinition(
+                name="git.diff",
+                contract_id="test.git.diff@1",
+                handler=second_handler,
+            ),
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@1",
+                handler=second_handler,
+            ),
+        )
+        v2 = (
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@2",
+                handler=first_handler,
+            ),
+            ToolDefinition(
+                name="git.diff",
+                contract_id="test.git.diff@1",
+                handler=first_handler,
+            ),
+        )
+
+        expected = hashlib.sha256(
+            json.dumps(
+                [
+                    ["git.diff", "test.git.diff@1"],
+                    ["git.read_blob", "test.git.read_blob@1"],
+                ],
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self.assertEqual(digest(v1), expected)
+        self.assertEqual(digest(same_contracts_different_callables), expected)
+        self.assertNotEqual(digest(v2), expected)
+
+    def test_invalid_and_duplicate_tool_contracts_are_rejected(self) -> None:
+        def handler(envelope: ToolCallEnvelope) -> ToolHandlerOutput:
+            return ToolHandlerOutput()
+
+        for contract_id in (
+            "",
+            "missing-version",
+            "test.bad contract@1",
+            "test.bad\ncontract@1",
+            f"test.{'x' * 190}@1",
+        ):
+            with self.subTest(contract_id=contract_id), self.assertRaisesRegex(
+                ValueError, "contract_id"
+            ):
+                ToolDefinition(
+                    name="git.read_blob",
+                    contract_id=contract_id,
+                    handler=handler,
+                )
+
+        duplicate_contracts = (
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.shared-contract@1",
+                handler=handler,
+            ),
+            ToolDefinition(
+                name="git.diff",
+                contract_id="test.shared-contract@1",
+                handler=handler,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate tool contract_id"):
+            AttemptToolRuntime(
+                task_id=TASK_ID,
+                attempt=0,
+                policy_scope="t2.initial",
+                budget=Budget(),
+                registry=duplicate_contracts,
+                allowlist=(),
+            )
+
+        duplicate_names = (
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@1",
+                handler=handler,
+            ),
+            ToolDefinition(
+                name="git.read_blob",
+                contract_id="test.git.read_blob@2",
+                handler=handler,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate tool definition"):
+            AttemptToolRuntime(
+                task_id=TASK_ID,
+                attempt=0,
+                policy_scope="t2.initial",
+                budget=Budget(),
+                registry=duplicate_names,
+                allowlist=(),
+            )
 
     def test_blocked_and_error_calls_have_stable_digests_and_records(self) -> None:
         def blocked(envelope: ToolCallEnvelope) -> ToolHandlerOutput:
@@ -195,8 +353,16 @@ class AttemptToolRuntimeTests(unittest.TestCase):
             policy_scope="t2.initial",
             budget=budget,
             registry=(
-                ToolDefinition("git.read_blob", blocked),
-                ToolDefinition("git.diff", failed),
+                ToolDefinition(
+                    name="git.read_blob",
+                    contract_id="test.git.read_blob@1",
+                    handler=blocked,
+                ),
+                ToolDefinition(
+                    name="git.diff",
+                    contract_id="test.git.diff@1",
+                    handler=failed,
+                ),
             ),
             allowlist=("git.read_blob", "git.diff"),
         )
@@ -385,7 +551,9 @@ class AttemptToolRuntimeTests(unittest.TestCase):
 
     def test_constructor_rejects_invalid_scope_registry_and_allowlist(self) -> None:
         definition = ToolDefinition(
-            "git.read_blob", lambda envelope: ToolHandlerOutput()
+            name="git.read_blob",
+            contract_id="test.git.read_blob@1",
+            handler=lambda envelope: ToolHandlerOutput(),
         )
         budget = Budget()
         with self.assertRaises(ValueError):

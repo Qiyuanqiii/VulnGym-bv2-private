@@ -10,8 +10,11 @@ import unittest
 from vulngym_agent.models import EvidenceItem
 from vulngym_agent.orchestrator import (
     ModelCallRecord,
+    ProducerDraftResult,
     ProducerResult,
     ProductionDeferred,
+    ProductionDeferredDraft,
+    ProductionDraft,
     ProductionOutcome,
     RunTask,
     ToolCallRecord,
@@ -235,6 +238,49 @@ class T2ContractTests(unittest.TestCase):
                 candidate=self.entry,
                 model_calls=(self._model_call(), self._model_call()),
             )
+
+    def test_production_drafts_are_immutable_and_have_no_authority_fields(self) -> None:
+        evidence = self._evidence()
+        draft = ProductionDraft(
+            candidate=deepcopy(self.entry),
+            evidence=(evidence,),
+            assumptions=("bounded assumption",),
+        )
+        serialized = draft.to_dict()
+
+        self.assertEqual(ProductionDraft.from_dict(serialized), draft)
+        self.assertFalse(hasattr(draft, "__dict__"))
+        self.assertFalse(hasattr(draft, "budget"))
+        self.assertFalse(hasattr(draft, "tool_calls"))
+        self.assertFalse(hasattr(draft, "model_calls"))
+        self.assertFalse(hasattr(draft, "task_id"))
+        with self.assertRaises(FrozenInstanceError):
+            draft.candidate = {}  # type: ignore[misc]
+
+        contaminated = dict(serialized)
+        contaminated["tool_calls"] = [self._tool_call().to_dict()]
+        with self.assertRaisesRegex(ValueError, "keys differ"):
+            ProductionDraft.from_dict(contaminated)
+
+        deferred = ProductionDeferredDraft(
+            stage="resolve_commit",
+            reason_code="ambiguous_commit",
+            missing_information=("unique fix commit",),
+            evidence=(evidence,),
+        )
+        self.assertEqual(
+            ProductionDeferredDraft.from_dict(deferred.to_dict()), deferred
+        )
+        for forbidden in (
+            "task_id",
+            "attempt",
+            "mode",
+            "parent_candidate_sha256",
+            "repair_plan_sha256",
+            "tool_calls",
+            "model_calls",
+        ):
+            self.assertFalse(hasattr(deferred, forbidden))
         with self.assertRaisesRegex(ValueError, "limit of 256"):
             ProductionOutcome(
                 candidate=self.entry,
@@ -397,6 +443,10 @@ class T2ContractTests(unittest.TestCase):
         self.assertEqual(
             set(get_args(ProducerResult)),
             {ProductionOutcome, ProductionDeferred},
+        )
+        self.assertEqual(
+            set(get_args(ProducerDraftResult)),
+            {ProductionDraft, ProductionDeferredDraft},
         )
 
 

@@ -3,9 +3,14 @@
 The runtime deliberately provides no shell, network, subprocess, or arbitrary
 filesystem primitive.  Callers supply a fixed registry of narrow, trusted
 ``ToolDefinition`` objects and an even narrower allowlist for one production
-attempt.  Every accepted call is charged before its handler starts and can be
-reconciled against the shared :class:`~vulngym_agent.orchestrator.budget.Budget`
-ledger when the attempt is sealed.
+attempt.  Each definition carries a stable, publisher-assigned ``contract_id``
+from a release/build manifest.  Registry replay identity is derived from those
+IDs, never from Python callable metadata: a contract ID identifies the shipped
+tool contract, but cannot prove that arbitrary malicious code in the same
+process has not replaced its handler.  Every accepted call is charged before
+its handler starts and can be reconciled against the shared
+:class:`~vulngym_agent.orchestrator.budget.Budget` ledger when the attempt is
+sealed.
 
 This module is infrastructure only.  Concrete Git/advisory/package tools are
 expected to expose small JSON contracts through handlers added elsewhere.
@@ -35,6 +40,9 @@ _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _TOOL_CALL_ID_RE = re.compile(r"^TOOL-[A-Za-z0-9][A-Za-z0-9._-]{0,122}$")
 _TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_TOOL_CONTRACT_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,158}@[A-Za-z0-9][A-Za-z0-9._-]{0,30}$"
+)
 _ARTIFACT_ID_RE = re.compile(r"^ART-[A-Za-z0-9][A-Za-z0-9._-]{0,123}$")
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9._:-]{0,127}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -369,13 +377,26 @@ class ToolBlocked(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
-    """One named trusted handler; registries are frozen by the runtime."""
+    """One manifest-identified trusted handler in a frozen registry.
+
+    ``contract_id`` is an explicit release/build-manifest identifier, normally
+    versioned (for example ``vulngym.local-t2.git_show@1``).  It deliberately
+    does not hash or introspect ``handler``: callable identity is not stable
+    across builds and cannot establish the integrity of hostile in-process
+    Python code.
+    """
 
     name: str
+    contract_id: str
     handler: Callable[[ToolCallEnvelope], ToolHandlerOutput]
 
     def __post_init__(self) -> None:
         _identifier(self.name, name="tool definition name", pattern=_TOOL_NAME_RE)
+        _identifier(
+            self.contract_id,
+            name="tool definition contract_id",
+            pattern=_TOOL_CONTRACT_ID_RE,
+        )
         if not callable(self.handler):
             raise ValueError("tool definition handler must be callable")
 
@@ -674,10 +695,16 @@ class AttemptToolRuntime:
             if any(not isinstance(item, ToolDefinition) for item in definitions):
                 raise ValueError("registry must contain ToolDefinition values")
         registry_copy: dict[str, ToolDefinition] = {}
+        contract_ids: set[str] = set()
         for definition in definitions:
             if definition.name in registry_copy:
                 raise ValueError(f"duplicate tool definition: {definition.name}")
+            if definition.contract_id in contract_ids:
+                raise ValueError(
+                    f"duplicate tool contract_id: {definition.contract_id}"
+                )
             registry_copy[definition.name] = definition
+            contract_ids.add(definition.contract_id)
 
         if isinstance(allowlist, (str, bytes, Mapping)):
             raise ValueError("allowlist must be a collection of tool names")
@@ -696,7 +723,12 @@ class AttemptToolRuntime:
         self._budget = budget
         self._registry = MappingProxyType(registry_copy)
         self._allowlist = allowed
-        self._registry_sha256 = _sha256(sorted(registry_copy))
+        self._registry_sha256 = _sha256(
+            [
+                [name, registry_copy[name].contract_id]
+                for name in sorted(registry_copy)
+            ]
+        )
         self._allowlist_sha256 = _sha256(sorted(allowed))
         self._initial_budget_event_count = len(budget.events)
         self._initial_tool_usage = budget.usage.tool_calls

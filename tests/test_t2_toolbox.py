@@ -9,7 +9,11 @@ import unittest
 
 from vulngym_agent.adapters.schema_adapter import ORIGIN
 from vulngym_agent.agents.t2_inputs import T2TaskInputV1
-from vulngym_agent.agents.t2_toolbox import LOCAL_T2_TOOL_NAMES, LocalT2Toolbox
+from vulngym_agent.agents.t2_toolbox import (
+    LOCAL_T2_TOOL_CONTRACT_IDS,
+    LOCAL_T2_TOOL_NAMES,
+    LocalT2Toolbox,
+)
 from vulngym_agent.orchestrator import Budget, Limits, RunTask
 from vulngym_agent.orchestrator.repair_plan import (
     REPAIR_TOOL_POLICY_VERSION,
@@ -137,12 +141,46 @@ class LocalT2ToolboxTests(unittest.TestCase):
 
     def test_registry_is_fixed_and_only_contains_policy_tools(self) -> None:
         self.assertEqual(tuple(self.toolbox.registry), LOCAL_T2_TOOL_NAMES)
+        self.assertEqual(tuple(LOCAL_T2_TOOL_CONTRACT_IDS), LOCAL_T2_TOOL_NAMES)
+        self.assertEqual(
+            {
+                name: definition.contract_id
+                for name, definition in self.toolbox.registry.items()
+            },
+            dict(LOCAL_T2_TOOL_CONTRACT_IDS),
+        )
+        self.assertEqual(len(set(LOCAL_T2_TOOL_CONTRACT_IDS.values())), 11)
         self.assertLessEqual(
             self.toolbox.tool_names,
             SAFE_REPAIR_TOOL_REGISTRY[REPAIR_TOOL_POLICY_VERSION],
         )
         with self.assertRaises(TypeError):
             self.toolbox.registry["shell"] = object()  # type: ignore[index]
+
+    def test_registry_replay_identity_survives_new_bound_method_objects(self) -> None:
+        replay_toolbox = LocalT2Toolbox(
+            self.task,
+            self.toolbox.task_input,
+            self.package_root,
+            self.repository,
+        )
+        replay_runtime = AttemptToolRuntime(
+            task_id=self.task.task_id,
+            attempt=0,
+            policy_scope="t2.initial",
+            budget=Budget(),
+            registry=replay_toolbox.registry,
+            allowlist=(),
+        )
+
+        self.assertIsNot(
+            self.toolbox.registry["git_show"].handler,
+            replay_toolbox.registry["git_show"].handler,
+        )
+        self.assertEqual(
+            self.runtime.finalize().registry_sha256,
+            replay_runtime.finalize().registry_sha256,
+        )
 
     def test_true_offline_chain_and_portable_artifacts(self) -> None:
         advisory = self.call(1, "read_local_advisory")

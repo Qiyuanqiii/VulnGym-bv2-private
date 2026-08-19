@@ -25,6 +25,7 @@ from vulngym_agent.tools.runtime import (
 
 
 TASK_ID = "TASK-GHSA-AAAA-BBBB-CCCC"
+SOURCE_READ_CONTRACT_ID = "vulngym.test-producer.source.read@1"
 
 
 class _Backend:
@@ -62,7 +63,13 @@ class ProducerExecutionContextTests(unittest.TestCase):
             mode=mode,
             policy_scope="t2.initial" if attempt == 0 else f"t2.repair-{attempt}",
             budget=budget or Budget(Limits(max_tool_calls=8, max_llm_calls=8)),
-            tool_registry=(ToolDefinition("source.read", _read_source),),
+            tool_registry=(
+                ToolDefinition(
+                    name="source.read",
+                    contract_id=SOURCE_READ_CONTRACT_ID,
+                    handler=_read_source,
+                ),
+            ),
             allowed_tools=("source.read",),
             model_backend=_Backend(),
         )
@@ -177,7 +184,13 @@ class ProducerExecutionContextTests(unittest.TestCase):
             mode="generate",
             policy_scope="t2.initial",
             budget=budget,
-            tool_registry=(ToolDefinition("source.read", _read_source),),
+            tool_registry=(
+                ToolDefinition(
+                    name="source.read",
+                    contract_id=SOURCE_READ_CONTRACT_ID,
+                    handler=_read_source,
+                ),
+            ),
             allowed_tools=(),
             model_backend=_Backend(),
         )
@@ -201,7 +214,13 @@ class ProducerExecutionContextTests(unittest.TestCase):
             mode="generate",
             policy_scope="t2.initial",
             budget=Budget(Limits(max_tool_calls=1)),
-            tool_registry=(ToolDefinition("source.read", handler),),
+            tool_registry=(
+                ToolDefinition(
+                    name="source.read",
+                    contract_id=SOURCE_READ_CONTRACT_ID,
+                    handler=handler,
+                ),
+            ),
             allowed_tools=("source.read",),
             model_backend=_Backend(),
         )
@@ -287,7 +306,13 @@ class ProducerExecutionContextTests(unittest.TestCase):
         common = {
             "task_id": TASK_ID,
             "budget": Budget(),
-            "tool_registry": (ToolDefinition("source.read", _read_source),),
+            "tool_registry": (
+                ToolDefinition(
+                    name="source.read",
+                    contract_id=SOURCE_READ_CONTRACT_ID,
+                    handler=_read_source,
+                ),
+            ),
             "allowed_tools": ("source.read",),
             "model_backend": _Backend(),
         }

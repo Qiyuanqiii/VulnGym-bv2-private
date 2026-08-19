@@ -13,11 +13,13 @@ from vulngym_agent.models import EvidenceItem, FieldValidation, ValidationReport
 from vulngym_agent.orchestrator.budget import Budget, Limits
 from vulngym_agent.orchestrator.contracts import (
     ModelCallRecord,
+    ProductionDraft,
     ProductionOutcome,
     RunTask,
     ToolCallRecord,
     canonical_sha256,
 )
+from vulngym_agent.orchestrator.producer_context import ProducerExecutionContext
 from vulngym_agent.orchestrator.repair_plan import RepairPlan
 from vulngym_agent.orchestrator.state_machine import (
     ClosedLoopOutcome,
@@ -30,6 +32,7 @@ from vulngym_agent.orchestrator.state_machine import (
     STOP_VALIDATED_CORRECT,
     STOP_VALIDATOR_ERROR,
 )
+from tests.producer_context_support import FixedProducerContextFactory
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -216,7 +219,9 @@ class _ScriptedProducer:
     ) -> tuple[Any, ...]:
         return values[index] if index < len(values) else ()
 
-    def _charge_tools(self, index: int, budget: Budget) -> None:
+    def _charge_tools(
+        self, index: int, context: ProducerExecutionContext
+    ) -> None:
         returned = self._round_values(self.tool_rounds, index)
         returned_count = len(returned)
         charge_count = (
@@ -225,54 +230,65 @@ class _ScriptedProducer:
             else returned_count
         )
         for position in range(charge_count):
-            budget.charge_tool_call(
-                operation=(
-                    returned[position].operation
-                    if position < returned_count
-                    else f"adversarial.tool:{index}:{position}"
-                )
+            record = returned[position] if position < returned_count else None
+            context.call_tool(
+                (
+                    record.tool_call_id
+                    if record is not None
+                    else f"TOOL-extra-{index}-{position}"
+                ),
+                record.tool_name if record is not None else "sentinel.tool",
+                {"round": index, "position": position},
             )
 
-    def _outcome(
-        self, index: int, model_call: ModelCallRecord
-    ) -> ProductionOutcome:
-        return ProductionOutcome(
+    def _outcome(self, index: int) -> ProductionDraft:
+        return ProductionDraft(
             candidate=self.candidates[index],
             evidence=self._round_values(self.evidence_rounds, index),
-            tool_calls=self._round_values(self.tool_rounds, index),
-            model_calls=(model_call,),
             assumptions=self._round_values(self.assumptions_rounds, index),
         )
 
-    def generate(self, task: RunTask, budget: Budget) -> ProductionOutcome:
+    def generate(
+        self, task: RunTask, context: ProducerExecutionContext
+    ) -> ProductionDraft:
         self.generate_calls += 1
-        model_call = _model_call(0, sequence=len(budget.events) + 1)
-        budget.charge_llm_call(operation=model_call.operation)
-        self._charge_tools(0, budget)
-        return self._outcome(0, model_call)
+        context.call_model("MODEL-adversarial-0-plan", "plan", {"round": 0})
+        self._charge_tools(0, context)
+        context.call_model(
+            "MODEL-adversarial-0-semantic", "semantic_judge", {"round": 0}
+        )
+        context.call_model(
+            "MODEL-adversarial-0-reflection", "reflection", {"round": 0}
+        )
+        return self._outcome(0)
 
     def repair(
         self,
         task: RunTask,
         previous_entry: Mapping[str, Any],
         plan: RepairPlan,
-        budget: Budget,
-    ) -> ProductionOutcome:
+        context: ProducerExecutionContext,
+    ) -> ProductionDraft:
         self.repair_calls += 1
         self.previous_entries.append(deepcopy(dict(previous_entry)))
         self.plans.append(plan)
         if self.fail_repair == "before_llm":
             raise RuntimeError("repair failed before producer LLM call")
-        model_call = _model_call(
-            self.repair_calls,
-            sequence=len(budget.events) + 1,
+        context.call_model(
+            f"MODEL-adversarial-{context.attempt}-repair",
+            "repair",
+            {"round": context.attempt},
         )
-        budget.charge_llm_call(operation=model_call.operation)
         if self.fail_repair == "after_llm":
             raise RuntimeError("repair failed after producer LLM call")
         index = self.repair_calls
-        self._charge_tools(index, budget)
-        return self._outcome(index, model_call)
+        self._charge_tools(index, context)
+        context.call_model(
+            f"MODEL-adversarial-{context.attempt}-reflection",
+            "reflection",
+            {"round": context.attempt},
+        )
+        return self._outcome(index)
 
 
 class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
@@ -294,9 +310,16 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
         limits: Limits | None = None,
     ) -> tuple[Any, _ValidatorFactory]:
         factory = _ValidatorFactory(responses)
+        tool_names = {
+            record.tool_name
+            for round_records in producer.tool_rounds
+            for record in round_records
+        }
+        tool_names.add("sentinel.tool")
         runner = ClosedLoopOrchestrator(
             producer,
             factory,
+            FixedProducerContextFactory(tool_names),
             limits=limits or Limits(),
         )
         result = runner.run(self.task, initial_candidate=initial_candidate)
@@ -862,7 +885,7 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             result.state.budget["usage"]["llm_calls"] = 999
         self.assertEqual(result.report.to_dict()["verdict"], "correct")
-        self.assertEqual(result.state.to_dict()["budget"]["usage"]["llm_calls"], 1)
+        self.assertEqual(result.state.to_dict()["budget"]["usage"]["llm_calls"], 3)
         self.assertEqual(result.validation_outcomes[0].evidence, ())
 
     def test_tool_call_records_must_exactly_close_the_budget_delta(self) -> None:
@@ -870,8 +893,8 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
         correct = _report(self.entry, {"schema": "correct"}, label="correct")
         cases = (
             ("exact", 1, "finalized", STOP_VALIDATED_CORRECT),
-            ("undercharged", 0, "failed", STOP_UNACCOUNTED_TOOL_CALL),
-            ("overcharged", 2, "failed", STOP_UNACCOUNTED_TOOL_CALL),
+            ("zero-context-calls", 0, "finalized", STOP_VALIDATED_CORRECT),
+            ("two-context-calls", 2, "finalized", STOP_VALIDATED_CORRECT),
         )
         for name, charged, expected_status, expected_reason in cases:
             with self.subTest(name=name):
@@ -888,7 +911,7 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
                     result.state.budget["usage"]["tool_calls"], charged
                 )
 
-    def test_equal_count_forged_tool_charge_and_sidecar_are_rejected(self) -> None:
+    def test_producer_cannot_charge_the_budget_capability_directly(self) -> None:
         tool = _tool_call(tool_call_id="TOOL-forged-ledger")
         correct = _report(self.entry, {"schema": "correct"}, label="correct")
 
@@ -903,8 +926,9 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
         result, factory = self._run(producer, [correct])
 
         self.assertEqual(result.status, "failed")
-        self.assertEqual(result.state.stop_reason, STOP_UNACCOUNTED_TOOL_CALL)
-        self.assertEqual(result.state.budget["usage"]["tool_calls"], 1)
+        self.assertEqual(result.state.stop_reason, STOP_PRODUCER_ERROR)
+        self.assertEqual(result.state.budget["usage"]["tool_calls"], 0)
+        self.assertIn("charge_tool_call", result.error)
         self.assertEqual(factory.instances, [])
 
     def test_provided_outcome_cannot_import_unaccounted_tool_calls(self) -> None:
@@ -929,7 +953,9 @@ class ClosedLoopOrchestratorAdversarialTests(unittest.TestCase):
         budget.charge_tool_call(operation="prior-task.tool")
         producer = _ScriptedProducer([self.entry])
         factory = _ValidatorFactory([])
-        runner = ClosedLoopOrchestrator(producer, factory)
+        runner = ClosedLoopOrchestrator(
+            producer, factory, FixedProducerContextFactory()
+        )
 
         with self.assertRaisesRegex(ValueError, "budget must be fresh"):
             runner.run(
