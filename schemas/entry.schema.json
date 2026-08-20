@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulngym.example/schemas/entry.schema.json",
+  "title": "VulnGym entries.jsonl row",
+  "description": "Machine-readable projection of the official SCHEMA.md v0.1.4 entry contract.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "commit",
+    "critical_operation",
+    "entry_id",
+    "entry_point",
+    "origin",
+    "project",
+    "repo_url",
+    "report_id",
+    "source_link",
+    "trace",
+    "verify",
+    "vuln_category_l1",
+    "vuln_category_l2",
+    "vuln_ids",
+    "vuln_title"
+  ],
+  "properties": {
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "critical_operation": {
+      "$ref": "#/$defs/location"
+    },
+    "entry_id": {
+      "type": "string",
+      "pattern": "^entry-[0-9]{5}$"
+    },
+    "entry_point": {
+      "$ref": "#/$defs/location"
+    },
+    "origin": {
+      "const": "GitHub Advisory Database (reviewed)"
+    },
+    "project": {
+      "type": "string"
+    },
+    "repo_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/"
+    },
+    "report_id": {
+      "type": "string",
+      "pattern": "^GHSA-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$"
+    },
+    "source_link": {
+      "type": "string",
+      "pattern": "^https://github\\.com/advisories/GHSA-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}/?$"
+    },
+    "trace": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/location"
+      }
+    },
+    "verify": {
+      "type": "integer",
+      "enum": [0, 1]
+    },
+    "vuln_category_l1": {
+      "type": "string"
+    },
+    "vuln_category_l2": {
+      "type": "string"
+    },
+    "vuln_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "$comment": "SCHEMA.md additionally requires stable CVE-before-GHSA order; SchemaAdapter enforces and normalizes that ordering.",
+      "items": {
+        "type": "string",
+        "$comment": "All known identifier families are allowed; current data includes identifiers beyond CVE and GHSA. SchemaAdapter validates CVE/GHSA syntax when those prefixes are used."
+      }
+    },
+    "vuln_title": {
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "line": {
+      "$comment": "JSON Schema validates range syntax; SchemaAdapter additionally enforces start <= end and normalizes positive numeric strings to integers before formal output.",
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*-[1-9][0-9]*$"
+        }
+      ]
+    },
+    "location": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "file", "line"],
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "desc": {
+          "type": "string"
+        },
+        "file": {
+          "type": "string"
+        },
+        "line": {
+          "$ref": "#/$defs/line"
+        }
+      }
+    }
+  }
+}

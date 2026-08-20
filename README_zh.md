@@ -184,10 +184,11 @@ VulnGym/
 ├── data/
 │   ├── reports.jsonl            # 184 行 —— 每行一条 GitHub Advisory
 │   └── entries.jsonl            # 408 行 —— 每行一个入口点，含人工审计标记 verify
-└── examples/
-    ├── load_dataset.py          # stdlib / pandas / HuggingFace datasets 加载器
-    ├── example_result.jsonl     # 工具提交结果的示例
-    └── evaluate.py              # 覆盖率 / 召回率 评测脚本
+├── schemas/                      # Entry / T1 验证 / Evidence 严格契约
+├── vulngym_agent/               # 实验性 B-v2 自动化基础
+├── docs/                         # 字段字典、错误分类与 B-v2 设计
+├── tests/                        # 标准库回归测试
+└── examples/                     # 加载与评测工具
 ```
 
 ---
@@ -241,6 +242,59 @@ ds = load_dataset("json", data_files={
 })
 ```
 
+### 实验性 B-v2 T1 确定性事实门禁
+
+B-v2 工具要求 Python 3.10 或更高版本。可按以下命令安装测试依赖并运行完整
+标准库测试套件：
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m unittest discover -s tests -v
+```
+
+仓库现已包含 T1 × T2 自动化方案的第三个可运行纵切：逐行隔离并校验
+JSONL，安全读取有界的本地公告/引用/patch 资料包，以不 checkout 的方式读取
+不可变 Git 对象，核对 GHSA/CVE、父提交、祖先关系、精确路径和 ±5 行容差内
+的代码；同时有界解析 unified diff，生成保守的 Sink/Guard 审查候选，并且只在
+显式给出的源码文件集合中搜索 route/RPC/CLI/handler/export 入口线索。验证报告、
+证据和运行清单继续严格分开落盘：
+
+```bash
+python -m vulngym_agent data/entries.jsonl
+
+# 使用一个本地目标仓库检查所有候选行
+python -m vulngym_agent candidates.jsonl --repo-root /path/to/target-repo
+
+# 每行可改用 {"package": {...}, "entry": {...}} wrapper；资料路径均相对该只读根
+python -m vulngym_agent packaged-candidates.jsonl \
+  --package-root /path/to/local-evidence \
+  --repo-map repos.json
+```
+
+多仓库批处理可通过 `--repo-map` 传入 JSON 对象：键是精确的 `repo_url`，
+值是本地仓库根目录（相对路径以映射文件所在目录为基准）。默认输出为
+`outputs/validation.jsonl`、
+`artifacts/evidence.jsonl` 和 `artifacts/run_manifest.jsonl`。wrapper 的
+`package` 只接受必填 `advisory`，以及可选 `references` / `patches` 相对
+POSIX 路径；不接受 `repo_path`，仓库仍只能由 Entry 的精确 `repo_url` 映射。
+默认单文件/单包/声明文件数限制为 8 MiB、32 MiB、64，可通过 CLI 调整；
+JSONL 单行、记录数和每条 trace 节点数默认限制为 1 MiB、10,000、64，并有
+不可绕过的 CLI 硬上限。当前阶段能够明确识别
+公告 ID 错配及“把已知 fix commit 填成漏洞 commit”，但仅有祖先关系或代码
+客观存在时仍保守输出 `uncertain`，不会冒充漏洞语义证明；补丁新增 Guard、移除
+危险调用及入口模式都只作为结构线索，绝不声称运行时可达性已证明。详见 [B-v2 架构](docs/b_v2_architecture.md)、
+[字段字典](docs/field_dictionary.md) 与 [错误分类](docs/error_taxonomy.md)。
+
+仓库映射必须指向普通 clone 或 bare repository 根目录。为防止证据读取越出授权
+根目录，门禁会拒绝 linked-worktree/submodule gitfile、common directory、
+alternate object database 与 `info/grafts` 历史覆盖；三份输出路径也必须位于
+所有目标仓库之外。
+拓扑事实读取同时禁用 commit-graph 与 replace-object 覆盖。
+资料路径拒绝绝对路径、盘符/UNC、`..`、反斜杠、符号链接、junction/reparse
+point 和重复声明；打开前后核对每级路径 identity，POSIX 支持时使用目录句柄
+no-follow 遍历，Windows 核对已打开句柄的最终路径。三份输出同样不得写入
+资料包根目录。
+
 
 ## 📊 评测你的工具
 
@@ -265,9 +319,9 @@ python3 examples/evaluate.py path/to/your_findings.jsonl -v
 | 维度 | 默认值 |
 |---|---|
 | 路径匹配 | 归一化后严格相等 |
-| 行号容差 | entry_point 与 critical_operation 均满足 `|Δline| ≤ 5` |
+| 行号容差 | entry_point 与 critical_operation 的闭区间距离均 `≤ 5`；提交范围宽度不得超过真实范围向两侧各扩展容差后的宽度 |
 | 方向 | 严格（entry_point 对 entry_point，critical_operation 对 critical_operation） |
-| ground truth 中 `line == 0` | 同时从分子分母中剔除 |
+| ground truth 行号无效 | 同时从分子分母中剔除；兼容旧版/自定义数据中已废弃的 `line == 0` |
 
 所有策略均有文档说明，并可通过 CLI 参数调整（`--line-tolerance` 等）。
 
