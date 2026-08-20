@@ -100,3 +100,4 @@ coverage.xml
 # names are ignored only as defense in depth; .gitignore is not access control.
 /.vulngym-eval-vault/
 /eval_private/
+/benchmarks/*/private/

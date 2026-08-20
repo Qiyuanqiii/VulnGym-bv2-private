@@ -44,7 +44,7 @@ from .contracts import (
     canonical_sha256,
 )
 from .repair_plan import RepairPlan
-from .state_machine import ClosedLoopOutcome
+from .state_machine import ClosedLoopOutcome, TERMINAL_STATUSES
 
 
 REPLAY_SCHEMA_VERSION = 1
@@ -221,6 +221,69 @@ class ReplayManifest:
         }
 
 
+def _freeze_formal_entries(
+    entries: Iterable[Mapping[str, Any]],
+) -> tuple[Mapping[str, Any], ...]:
+    """Validate and recursively freeze a sequence of formal T2 Entries."""
+
+    frozen: list[Mapping[str, Any]] = []
+    seen_entry_ids: set[str] = set()
+    for value in entries:
+        formal = ProductionOutcome(candidate=value).candidate
+        entry_id = formal["entry_id"]
+        if entry_id in seen_entry_ids:
+            raise ValueError("formal Entry entry_id values must be unique")
+        seen_entry_ids.add(entry_id)
+        frozen.append(formal)
+    return tuple(frozen)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedTaskEntries:
+    """Formal Entries explicitly bound to one verified terminal state root."""
+
+    task_id: str
+    status: str
+    entries: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, str) or not _TASK_ID_RE.fullmatch(
+            self.task_id
+        ):
+            raise ValueError("task_id must be a valid task identifier")
+        if not isinstance(self.status, str) or self.status not in TERMINAL_STATUSES:
+            raise ValueError("status must be a terminal run status")
+        entries = _freeze_formal_entries(self.entries)
+        if self.status == "finalized":
+            if len(entries) != 1:
+                raise ValueError("a finalized task must bind exactly one formal Entry")
+        elif entries:
+            raise ValueError("a non-finalized task cannot bind a formal Entry")
+        object.__setattr__(self, "entries", entries)
+
+
+def _freeze_verified_tasks(
+    tasks: Iterable[VerifiedTaskEntries],
+) -> tuple[VerifiedTaskEntries, ...]:
+    frozen = tuple(tasks)
+    if any(not isinstance(task, VerifiedTaskEntries) for task in frozen):
+        raise ValueError("tasks must contain only VerifiedTaskEntries values")
+    task_ids = [task.task_id for task in frozen]
+    if len(task_ids) != len(set(task_ids)):
+        raise ValueError("verified task IDs must be unique")
+    entry_ids: list[str] = []
+    entry_sha256s: list[str] = []
+    for task in frozen:
+        for entry in task.entries:
+            entry_ids.append(entry["entry_id"])
+            entry_sha256s.append(canonical_sha256(entry))
+    if len(entry_ids) != len(set(entry_ids)):
+        raise ValueError("formal Entry IDs must be unique across verified tasks")
+    if len(entry_sha256s) != len(set(entry_sha256s)):
+        raise ValueError("one formal Entry cannot bind to multiple verified tasks")
+    return frozen
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayBundle:
     """Compact result of an offline artifact read and integrity check."""
@@ -228,6 +291,7 @@ class ReplayBundle:
     manifest: ReplayManifest
     root_records: tuple[Mapping[str, Any], ...]
     record_counts: Mapping[str, int]
+    verified_tasks: tuple[VerifiedTaskEntries, ...] = ()
 
     def __post_init__(self) -> None:
         roots = tuple(MappingProxyType(dict(item)) for item in self.root_records)
@@ -235,6 +299,50 @@ class ReplayBundle:
         object.__setattr__(
             self, "record_counts", MappingProxyType(dict(self.record_counts))
         )
+        object.__setattr__(
+            self, "verified_tasks", _freeze_verified_tasks(self.verified_tasks)
+        )
+
+    @property
+    def formal_entries(self) -> tuple[Mapping[str, Any], ...]:
+        return tuple(
+            entry for task in self.verified_tasks for entry in task.entries
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedFormalEntries:
+    """Narrow trusted projection of a complete replay read.
+
+    Only the dataset digest, explicit terminal-task/Entry bindings, and input
+    failure count are retained.  Full task bindings and inputs, model/tool
+    metadata, evidence, and producer assumptions are omitted.  Every nested
+    Entry value is recursively frozen.
+    """
+
+    dataset_sha256: str
+    tasks: tuple[VerifiedTaskEntries, ...]
+    input_failure_count: int = 0
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.dataset_sha256, "dataset_sha256")
+        object.__setattr__(self, "tasks", _freeze_verified_tasks(self.tasks))
+        if (
+            isinstance(self.input_failure_count, bool)
+            or not isinstance(self.input_failure_count, int)
+            or self.input_failure_count < 0
+        ):
+            raise ValueError("input_failure_count must be a non-negative integer")
+
+    @property
+    def entries(self) -> tuple[Mapping[str, Any], ...]:
+        """Flattened compatibility view; use ``tasks`` for ownership."""
+
+        return tuple(entry for task in self.tasks for entry in task.entries)
+
+    @property
+    def task_ids(self) -> tuple[str, ...]:
+        return tuple(task.task_id for task in self.tasks)
 
 
 @dataclass(slots=True)
@@ -2456,6 +2564,8 @@ def read_closed_loop_artifacts(
     file_summaries: dict[str, dict[str, Any]] = {}
 
     entry_sha256s: list[str] = []
+    formal_entries_by_sha256: dict[str, Mapping[str, Any]] = {}
+    published_entry_ids: set[str] = set()
     entry_summary: dict[str, Any] = {}
     for entry, _ in _iter_canonical_lines(
         root / _ENTRY_FILE,
@@ -2471,6 +2581,17 @@ def read_closed_loop_artifacts(
                 "entries.jsonl contains a non-formal Entry"
             ) from error
         _ensure_replay_safe(entry, protected)
+        entry_id = formal.candidate["entry_id"]
+        if entry_id in published_entry_ids:
+            raise ReplayArtifactError(
+                "entries.jsonl contains a duplicate entry_id"
+            )
+        published_entry_ids.add(entry_id)
+        if formal.candidate_sha256 in formal_entries_by_sha256:
+            raise ReplayArtifactError(
+                "entries.jsonl contains a duplicate Entry digest"
+            )
+        formal_entries_by_sha256[formal.candidate_sha256] = formal.candidate
         entry_sha256s.append(formal.candidate_sha256)
     total_bytes += entry_summary["byte_count"]
     file_summaries[_ENTRY_FILE] = entry_summary
@@ -2582,6 +2703,7 @@ def read_closed_loop_artifacts(
     outcome_records = 0
     failure_records = 0
     finalized_entry_sha256s: list[str] = []
+    state_entry_bindings: list[tuple[str, str, str | None]] = []
     expected_formal_validations: list[dict[str, Any]] = []
     for next_line in manifest_iterator:
         envelope, raw = pending
@@ -2668,6 +2790,11 @@ def read_closed_loop_artifacts(
                 raise ReplayArtifactError(
                     "non-finalized root cannot publish an entry"
                 )
+            if not isinstance(task_id, str):
+                raise ReplayArtifactError("state root must have a task_id")
+            state_entry_bindings.append(
+                (task_id, payload["status"], payload["entry_sha256"])
+            )
             if payload["formal_validation_sha256"] != target.selected[
                 "report_sha256"
             ]:
@@ -2825,6 +2952,40 @@ def read_closed_loop_artifacts(
         or {item.name for item in root.iterdir()} != set(REPLAY_FILES)
     ):
         raise ReplayArtifactError("replay directory changed while being read")
+    verified_tasks: list[VerifiedTaskEntries] = []
+    bound_entry_sha256s: set[str] = set()
+    for task_id, status, entry_sha256 in state_entry_bindings:
+        entries: tuple[Mapping[str, Any], ...]
+        if entry_sha256 is None:
+            entries = ()
+        else:
+            if entry_sha256 in bound_entry_sha256s:
+                raise ReplayArtifactError(
+                    "one formal Entry digest is bound to multiple task roots"
+                )
+            entry = formal_entries_by_sha256.get(entry_sha256)
+            if entry is None:
+                raise ReplayArtifactError(
+                    "state root Entry digest has no published formal Entry"
+                )
+            bound_entry_sha256s.add(entry_sha256)
+            entries = (entry,)
+        try:
+            verified_tasks.append(
+                VerifiedTaskEntries(
+                    task_id=task_id,
+                    status=status,
+                    entries=entries,
+                )
+            )
+        except ValueError as error:
+            raise ReplayArtifactError(
+                "state root has an invalid formal Entry binding"
+            ) from error
+    if bound_entry_sha256s != set(formal_entries_by_sha256):
+        raise ReplayArtifactError(
+            "published formal Entry has no verified state root"
+        )
     counts[_MANIFEST_FILE] = manifest_summary["line_count"]
     manifest = ReplayManifest(
         dataset_sha256=dataset_sha256,
@@ -2841,6 +3002,51 @@ def read_closed_loop_artifacts(
         manifest=manifest,
         root_records=tuple(root_records),
         record_counts=counts,
+        verified_tasks=tuple(verified_tasks),
+    )
+
+
+def read_verified_formal_entries(
+    bundle_dir: str | os.PathLike[str],
+    *,
+    expected_dataset_sha256: str | None = None,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+    limits: ReplayLimits | None = None,
+) -> VerifiedFormalEntries:
+    """Return trusted formal Entries retained by one complete replay read.
+
+    All replay files, digests, references, terminal validation lineage, and
+    dataset counts are verified by :func:`read_closed_loop_artifacts`.  The
+    already parsed ``entries.jsonl`` values from that same safe read are then
+    narrowed to this immutable result; the file is never reopened by path.
+    Callers that need authenticity, rather than internal integrity alone, must
+    pin ``expected_dataset_sha256`` to a digest obtained through a trusted
+    channel.
+    """
+
+    if expected_dataset_sha256 is not None:
+        try:
+            _require_sha256(expected_dataset_sha256, "expected_dataset_sha256")
+        except ValueError as error:
+            raise ReplayArtifactError(
+                "expected_dataset_sha256 must be a lower-case SHA-256 digest"
+            ) from error
+    bundle = read_closed_loop_artifacts(
+        bundle_dir,
+        protected_paths=protected_paths,
+        limits=limits,
+    )
+    if (
+        expected_dataset_sha256 is not None
+        and bundle.manifest.dataset_sha256 != expected_dataset_sha256
+    ):
+        raise ReplayArtifactError(
+            "replay dataset SHA-256 does not match expected digest"
+        )
+    return VerifiedFormalEntries(
+        dataset_sha256=bundle.manifest.dataset_sha256,
+        tasks=bundle.verified_tasks,
+        input_failure_count=bundle.manifest.input_failures,
     )
 
 
@@ -2893,7 +3099,10 @@ __all__ = [
     "ReplayLimits",
     "ReplayManifest",
     "ReplayRecord",
+    "VerifiedFormalEntries",
+    "VerifiedTaskEntries",
     "read_closed_loop_artifacts",
+    "read_verified_formal_entries",
     "verify_closed_loop_artifacts",
     "write_closed_loop_artifacts",
 ]

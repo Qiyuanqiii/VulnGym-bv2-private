@@ -394,12 +394,92 @@ local roots; model-call sidecars contain only bound metadata/digests, and T1
 does not read them. Canonical digests detect corruption and close references,
 but are unsigned and do not authenticate external truth.
 
-Still pending are a standalone verification CLI, an explicitly configured
-online-model backend, full-field required-check verifiers, an independent
-semantic T1 capable of positive judgments, and final acceptance on the required
-50 training plus 20 public-test records. Dataset construction is handled by a
-separate data-production flow and will be integrated here; this implementation
-does not claim that the 50+20 acceptance has passed.
+#### Pinned 50/20 benchmark harness (phases A/B)
+
+The public-data contract and replay-to-finding projection harness are now
+implemented. Keep the benchmark bundle outside this implementation repository,
+mount it read-only on the trusted harness host, and pass that external root via
+`--benchmark-root`. The runtime profile is fixed to `vulngym-50-20-v1`, source
+revision `cd69f7e163e08485ab5496115ae03439cda6e27e`, and public-manifest
+SHA-256
+`d4ef4a663a30a39d2ccd89dc89f70d19a06686ae86179c537cd5139b8ff00a73`.
+The reader does not discover the bundle: it opens only the pinned manifest,
+record schema, manifest schema, and public train/test JSONL files. A modified
+or substituted profile fails closed.
+
+```bash
+# Validate the complete pinned public profile and print a count-only summary.
+python -m vulngym_agent.benchmark_cli validate \
+  --benchmark-root /srv/vulngym/benchmark-public
+
+# Export answer-free snapshot tasks; the new output directory receives
+# tasks.jsonl and manifest.json.
+python -m vulngym_agent.benchmark_cli export-tasks \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --split test \
+  --output-dir /srv/vulngym/exports/test-tasks
+
+# Verify every indexed replay bundle, project formal Entries to findings, and
+# run the aggregate-only public-training oracle.
+python -m vulngym_agent.benchmark_cli project-train \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/replays/train \
+  --bundle-index /srv/vulngym/attestations/train-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/projections/train
+
+# Produce a blind-test submission without loading public training gold or
+# invoking a scoring oracle.
+python -m vulngym_agent.benchmark_cli project-test \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/replays/test \
+  --bundle-index /srv/vulngym/attestations/test-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/projections/test
+```
+
+The angle-bracket digest is documentation notation; a real projection must
+receive the lower-case SHA-256 of the exact index bytes through a trusted
+channel. The index is strict JSON with no additional keys and has this shape:
+
+```json
+{"bundles":[{"dataset_sha256":"<64-lower-case-replay-dataset-sha256>","task_id":"VG-TEST-<20-UPPER-HEX>"}],"contract_version":1,"manifest_sha256":"d4ef4a663a30a39d2ccd89dc89f70d19a06686ae86179c537cd5139b8ff00a73","profile_id":"vulngym-50-20-v1","split":"test"}
+```
+
+It must contain exactly one entry for every task in the selected split, with
+no missing, extra, or repeated task IDs and no repeated dataset digests. Each
+`dataset_sha256` binds the corresponding fully verified closed-loop replay
+directory under `<artifact-root>/<task_id>`. The index-file digest and replay
+dataset digests detect substitution or corruption relative to values supplied
+by the trusted evaluator; they do **not** prove that a source tree, fixture, or
+model conclusion is authentic.
+
+Both projection commands publish `findings.jsonl`, `task_results.jsonl`, and
+`manifest.json` in one no-overwrite transaction. `project-train` additionally
+publishes `aggregate.json`; the training oracle exposes totals and recall only,
+never task/advisory/Entry identities or per-item matches. `project-test` does
+not read the public training file, does not call the oracle, and does not
+publish a score or `aggregate.json`. Projection emits at most 64 findings per
+task by default; `--top-k` has a hard maximum of 256. The fixed public-training
+matcher uses the official inclusive line tolerance of 5.
+
+This completes only phases A/B: strict public contracts, answer-free task
+export, replay verification, bounded multi-finding projection, and the
+train-only aggregate oracle. It does **not** make the current advisory/fix-
+anchored `LocalStructuredT2Producer` capable of solving the source-only 20-task
+split. Phase C (one attested, sealed source tree per task), phase D (a
+source-only multi-finding T2 plus an independent semantic T1), and phase E (the
+isolated 50/20 run) remain pending, as do the standalone verification CLI,
+online-model backend, and full-field required-check verifiers.
+
+For the eventual blind run, scoring truth must remain physically isolated in
+separate evaluator storage and must never be used to prepare tasks, fixtures,
+or model responses. Each producer sandbox must be offline and receive only one
+answer-free task, its sealed source tree, and a bounded output location. Do not
+mount the benchmark repository, the training split, raw data/generator inputs,
+evaluation logs, or scoring material into that sandbox. The trusted evaluator
+may validate and project outputs after the producer exits; this repository does
+not yet claim that the 50/20 acceptance has passed.
 
 The deterministic T1 CLI writes separate validation, evidence, and
 run-manifest files:
