@@ -1144,10 +1144,115 @@ def _canonical_existing_path(
 ) -> Path:
     _reject_device_path(path, status=status)
     absolute = Path(os.path.abspath(os.fspath(path)))
+    if os.name == "nt":
+        # Hosted Windows runners commonly expose trusted roots through a
+        # SUBST drive.  GetFinalPathNameByHandleW returns the underlying drive,
+        # so spelling equality would reject two names for the same object.
+        # Validate both complete chains and their object identity before
+        # accepting that normalization; junctions/reparse points still fail.
+        supplied_parent = absolute if directory else absolute.parent
+        supplied_chain = _checked_directory_chain(supplied_parent, status=status)
+        supplied_state = (
+            _require_safe_directory(absolute, status=status)
+            if directory
+            else _require_safe_regular(absolute, status=status)
+        )
+        try:
+            resolved = _windows_final_path(absolute, directory=directory)
+        except (OSError, RuntimeError) as error:
+            raise SnapshotBatchError(
+                "path_unavailable",
+                "a trusted path cannot be canonicalized",
+                exit_status=status,
+            ) from error
+        supplied_text = os.path.normcase(os.path.normpath(str(absolute)))
+        canonical_text = os.path.normcase(os.path.normpath(str(resolved)))
+        drive_alias = (
+            absolute.is_absolute()
+            and resolved.is_absolute()
+            and re.fullmatch(r"[A-Za-z]:", absolute.drive) is not None
+            and re.fullmatch(r"[A-Za-z]:", resolved.drive) is not None
+            and absolute.drive.casefold() != resolved.drive.casefold()
+        )
+        if supplied_text != canonical_text and not drive_alias:
+            raise SnapshotBatchError(
+                "path_alias_rejected",
+                "trusted paths must use their canonical identity spelling",
+                exit_status=status,
+            )
+        canonical_parent = resolved if directory else resolved.parent
+        canonical_chain = _checked_directory_chain(canonical_parent, status=status)
+        canonical_state = (
+            _require_safe_directory(resolved, status=status)
+            if directory
+            else _require_safe_regular(resolved, status=status)
+        )
+        supplied_identity = (
+            _directory_identity(supplied_state)
+            if directory
+            else _stable_path_identity(supplied_state)
+        )
+        canonical_identity = (
+            _directory_identity(canonical_state)
+            if directory
+            else _stable_path_identity(canonical_state)
+        )
+        if supplied_identity != canonical_identity:
+            raise SnapshotBatchError(
+                "path_alias_rejected",
+                "trusted path aliases must resolve to the same object",
+                exit_status=status,
+            )
+        _assert_directory_chain(supplied_chain, status=status)
+        _assert_directory_chain(canonical_chain, status=status)
+        try:
+            confirmed = _windows_final_path(absolute, directory=directory)
+        except (OSError, RuntimeError) as error:
+            raise SnapshotBatchError(
+                "path_unavailable",
+                "a trusted path cannot be canonicalized",
+                exit_status=status,
+            ) from error
+        if os.path.normcase(os.path.normpath(str(confirmed))) != canonical_text:
+            raise SnapshotBatchError(
+                "path_changed",
+                "trusted path identity changed during canonicalization",
+                exit_status=status,
+            )
+        current_supplied = (
+            _require_safe_directory(absolute, status=status)
+            if directory
+            else _require_safe_regular(absolute, status=status)
+        )
+        current_canonical = (
+            _require_safe_directory(resolved, status=status)
+            if directory
+            else _require_safe_regular(resolved, status=status)
+        )
+        current_supplied_identity = (
+            _directory_identity(current_supplied)
+            if directory
+            else _stable_path_identity(current_supplied)
+        )
+        current_canonical_identity = (
+            _directory_identity(current_canonical)
+            if directory
+            else _stable_path_identity(current_canonical)
+        )
+        if (
+            current_supplied_identity != supplied_identity
+            or current_canonical_identity != canonical_identity
+        ):
+            raise SnapshotBatchError(
+                "path_changed",
+                "trusted path identity changed during canonicalization",
+                exit_status=status,
+            )
+        _assert_directory_chain(supplied_chain, status=status)
+        _assert_directory_chain(canonical_chain, status=status)
+        return resolved
     try:
         resolved = absolute.resolve(strict=True)
-        if os.name == "nt":
-            resolved = _windows_final_path(absolute, directory=directory)
     except (OSError, RuntimeError) as error:
         raise SnapshotBatchError(
             "path_unavailable", "a trusted path cannot be canonicalized", exit_status=status

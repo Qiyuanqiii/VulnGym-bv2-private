@@ -411,6 +411,64 @@ class SnapshotBatchTests(unittest.TestCase):
             self._verify("cross-window-verify", prepared.manifest_sha256)
 
     @unittest.skipUnless(os.name == "nt", "Windows device-path alias contract")
+    def test_windows_subst_drive_is_canonicalized_by_object_identity(self) -> None:
+        drive = next(
+            (
+                f"{letter}:"
+                for letter in reversed("PQRSTUVWXYZ")
+                if not Path(f"{letter}:\\").exists()
+            ),
+            None,
+        )
+        self.assertIsNotNone(drive, "no free drive letter for SUBST regression")
+        assert drive is not None
+        created = subprocess.run(
+            ["subst", drive, str(self.root)],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.assertEqual(0, created.returncode, "SUBST setup failed")
+        try:
+            alias_root = Path(f"{drive}\\")
+            canonical_directory = snapshot_batch._canonical_existing_path(
+                alias_root / self.export_dir.name,
+                directory=True,
+                status=2,
+            )
+            canonical_file = snapshot_batch._canonical_existing_path(
+                alias_root / self.source_map.name,
+                directory=False,
+                status=2,
+            )
+            expected_directory = snapshot_batch._windows_final_path(
+                self.export_dir,
+                directory=True,
+            )
+            expected_file = snapshot_batch._windows_final_path(
+                self.source_map,
+                directory=False,
+            )
+            self.assertEqual(
+                os.path.normcase(os.path.normpath(str(expected_directory))),
+                os.path.normcase(os.path.normpath(str(canonical_directory))),
+            )
+            self.assertEqual(
+                os.path.normcase(os.path.normpath(str(expected_file))),
+                os.path.normcase(os.path.normpath(str(canonical_file))),
+            )
+        finally:
+            removed = subprocess.run(
+                ["subst", drive, "/D"],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(0, removed.returncode, "SUBST cleanup failed")
+
+    @unittest.skipUnless(os.name == "nt", "Windows device-path alias contract")
     def test_windows_device_alias_cannot_bypass_output_overlap(self) -> None:
         aliased = Path("\\\\?\\" + str(self.repo / "aliased-output"))
         with self.assertRaisesRegex(SnapshotBatchError, "device-path"):
