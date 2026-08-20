@@ -418,12 +418,67 @@ SHA-256。index 是不允许额外键的严格 JSON，结构如下：
 `aggregate.json`。每题默认最多投影 Top 64 finding，`--top-k` 硬上限为 256；固定公开
 训练 matcher 的 official inclusive 行号容差为 5。
 
-这只完成阶段 A/B：严格公开契约、无答案任务导出、replay 校验、有界一对多 finding
-投影，以及 train-only aggregate oracle；并不表示当前依赖公告/fix 锚点的
-`LocalStructuredT2Producer` 已能执行 source-only 20 题。阶段 C（每题一个经证明且
-sealed 的源码树）、阶段 D（source-only multi-finding T2 与独立 semantic T1）和阶段 E
-（50/20 隔离运行）仍待完成；独立 verify CLI、显式在线模型 backend 与全字段
-required-check verifier 也尚未完成。
+阶段 A/B 已提供严格公开契约、无答案任务导出、replay 校验、有界一对多 finding 投影，
+以及 train-only aggregate oracle。下文的阶段 C 已补齐源码交付边界，但并不表示当前依赖
+公告/fix 锚点的 `LocalStructuredT2Producer` 已成为 source-only multi-finding Producer。
+阶段 D（该 Producer 与独立 semantic T1）和阶段 E（50/20 隔离运行）仍待完成；显式在线
+模型 backend 与全字段 required-check verifier 也尚未完成。
+
+#### Sealed 源码快照准备（阶段 C）
+
+`python -m vulngym_agent.snapshot_cli` 已能准备并独立校验经过认证的 source-only 快照
+批次。受信 preparer 打开完整本地 Git 仓库，解析每个任务的精确 commit 与根 tree，只把
+该 commit 的普通源码文件物化到 `bundles/<task_id>/tree`。发布树不含 `.git` 目录或其他
+历史读取面；符号链接、Gitlink/submodule、LFS pointer、不安全或碰撞路径、空目录，以及
+不受支持的 Git 存储布局都会 fail closed。
+
+每题 canonical manifest 与 HMAC 会绑定 task ID、精确 repo URL 和 commit、根 tree 对象
+ID、快照策略、文件 mode，以及逐文件 Git blob OID、字节数和 SHA-256。外层批次 manifest
+还绑定公开 task-export manifest digest、精确 `tasks.jsonl` digest、source-map digest、
+所有题目快照的 manifest/content root 和汇总计数；HMAC envelope 另行绑定 key ID。这里的
+HMAC 只是受信评测域内部的完整性机制，不是公开来源签名，不能证明仓库由谁发布，也不能
+认证外部来源事实。
+
+preparer 对所有发现型输入都要求由受信通道提供 digest pin。source-map 是严格 canonical
+JSON；其中排序后的 `sources` 数组必须按 `(repo_url, commit)` 与 task export 精确覆盖，
+不得缺项或多项：
+
+```json
+{"kind":"sealed_snapshot_source_map","profile_id":"vulngym-50-20-v1","public_manifest_sha256":"<public-manifest-sha256>","schema_version":"1.0.0","sources":[{"commit":"<40-lower-case-hex>","repo_root":"/srv/vulngym/repos/project","repo_url":"https://github.com/owner/project"}],"tasks_sha256":"<tasks-jsonl-sha256>"}
+```
+
+```bash
+# 在一个私有 staging 中准备全部任务、逐题校验、绑定批次、再次逐题校验，最后只发布一次。
+python -m vulngym_agent.snapshot_cli prepare \
+  --task-export-dir /srv/vulngym/exports/test-tasks \
+  --expected-tasks-sha256 <tasks-jsonl-sha256> \
+  --expected-public-manifest-sha256 <public-manifest-sha256> \
+  --source-map /srv/vulngym/config/source-map.json \
+  --expected-source-map-sha256 <source-map-file-sha256> \
+  --output-dir /srv/vulngym/sealed/test \
+  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --key-id evaluator-snapshot-v1
+
+# 认证外层 manifest，并深度复验每个任务 bundle。
+python -m vulngym_agent.snapshot_cli verify-batch \
+  --sealed-root /srv/vulngym/sealed/test \
+  --expected-manifest-sha256 <sealed-batch-manifest-sha256> \
+  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --expected-key-id evaluator-snapshot-v1
+```
+
+准备过程是一次禁止覆盖的整批事务：所有题目的源码树及两轮完整校验闭合之前，正式输出
+不会出现。固定批次总量上限为 100 个 task、1,000,000 个文件、1,000,000 个路径节点和
+16 GiB 文件内容。POSIX 的 no-replace `renameat2` 与 Windows 的 handle-anchored 目录
+rename 都是发布提交点。若提交后的 identity 或 durability 检查失败，命令会报告发布状态
+不确定；调用方必须把目标目录视为“可能已经提交”，依据精确预期 manifest 重新校验，
+不能按路径名尝试清理。
+
+HMAC key、source repo、task-export/control 材料和每个 bundle 的 `control/` 都留在受信
+evaluator 一侧。Agent 只能拿到一题的 `tree/`，并以只读方式挂载，同时只提供该题无答案
+task 与有界输出位置；sandbox 不得暴露 key、control、源 Git 仓库、其他题目的 tree、
+benchmark 仓库、评测日志、评分材料或网络。阶段 C 只证明交付字节及其与 preparer 所选
+Git 对象的绑定，不负责 source-only finding 发现或语义裁决。
 
 最终盲测时，评分真值必须物理隔离在独立评测端存储中，绝不能用于准备 task、fixture
 或模型响应。每个 Producer sandbox 必须断网，只接收一条无答案任务、对应 sealed 源码

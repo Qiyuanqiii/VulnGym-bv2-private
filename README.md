@@ -463,14 +463,83 @@ publish a score or `aggregate.json`. Projection emits at most 64 findings per
 task by default; `--top-k` has a hard maximum of 256. The fixed public-training
 matcher uses the official inclusive line tolerance of 5.
 
-This completes only phases A/B: strict public contracts, answer-free task
-export, replay verification, bounded multi-finding projection, and the
-train-only aggregate oracle. It does **not** make the current advisory/fix-
-anchored `LocalStructuredT2Producer` capable of solving the source-only 20-task
-split. Phase C (one attested, sealed source tree per task), phase D (a
-source-only multi-finding T2 plus an independent semantic T1), and phase E (the
-isolated 50/20 run) remain pending, as do the standalone verification CLI,
-online-model backend, and full-field required-check verifiers.
+Phases A/B provide strict public contracts, answer-free task export, replay
+verification, bounded multi-finding projection, and the train-only aggregate
+oracle. Phase C, described below, now closes the source-delivery boundary. It
+does **not** make the current advisory/fix-anchored
+`LocalStructuredT2Producer` a source-only multi-finding producer. Phase D (that
+producer plus an independent semantic T1) and phase E (the isolated 50/20 run)
+remain pending, as do the online-model backend and full-field required-check
+verifiers.
+
+#### Sealed source-snapshot preparation (phase C)
+
+`python -m vulngym_agent.snapshot_cli` now prepares and independently verifies
+authenticated, source-only snapshot batches. A trusted preparer opens the full
+local Git repository, resolves each task's exact commit and root tree, and
+materializes only that commit's regular source files under
+`bundles/<task_id>/tree`. The published tree has no `.git` directory or other
+history surface. Symlinks, Gitlinks/submodules, LFS pointers, unsafe or
+colliding paths, empty directories, and unsupported Git storage arrangements
+fail closed.
+
+Each task's canonical manifest and HMAC bind the task ID, exact repository URL
+and commit, root-tree object ID, snapshot policy, file modes, and every file's
+Git blob object ID, byte length, and SHA-256. The outer batch manifest also
+binds the public task-export manifest digest, exact `tasks.jsonl` digest,
+source-map digest, all task snapshot manifests/content roots, and aggregate
+counts; the HMAC envelope separately binds its key ID. HMAC here is an
+integrity mechanism inside the trusted evaluator domain. It is not a public
+provenance signature and cannot establish who published a repository or
+whether an external source is authentic.
+
+The preparer requires trusted digest pins for all discovery inputs. The
+source-map is strict canonical JSON whose sorted `sources` array must cover the
+task export exactly by `(repo_url, commit)`, with neither missing nor extra
+repositories:
+
+```json
+{"kind":"sealed_snapshot_source_map","profile_id":"vulngym-50-20-v1","public_manifest_sha256":"<public-manifest-sha256>","schema_version":"1.0.0","sources":[{"commit":"<40-lower-case-hex>","repo_root":"/srv/vulngym/repos/project","repo_url":"https://github.com/owner/project"}],"tasks_sha256":"<tasks-jsonl-sha256>"}
+```
+
+```bash
+# Prepare every task in one private staging area, verify every task, bind the
+# batch, verify it again, and publish the complete directory once.
+python -m vulngym_agent.snapshot_cli prepare \
+  --task-export-dir /srv/vulngym/exports/test-tasks \
+  --expected-tasks-sha256 <tasks-jsonl-sha256> \
+  --expected-public-manifest-sha256 <public-manifest-sha256> \
+  --source-map /srv/vulngym/config/source-map.json \
+  --expected-source-map-sha256 <source-map-file-sha256> \
+  --output-dir /srv/vulngym/sealed/test \
+  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --key-id evaluator-snapshot-v1
+
+# Authenticate the outer manifest and deeply re-verify every task bundle.
+python -m vulngym_agent.snapshot_cli verify-batch \
+  --sealed-root /srv/vulngym/sealed/test \
+  --expected-manifest-sha256 <sealed-batch-manifest-sha256> \
+  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --expected-key-id evaluator-snapshot-v1
+```
+
+Preparation is one no-replace batch transaction: no official output appears
+until all task trees and both verification passes close. Fixed aggregate caps
+are 100 tasks, 1,000,000 files, 1,000,000 total path nodes, and 16 GiB of file
+content. The no-replace `renameat2` operation on POSIX and the handle-anchored
+directory rename on Windows are publication commit points. If a post-commit
+identity or durability check fails, the command reports publication as
+uncertain; callers must treat the destination as possibly committed and verify
+the exact expected manifest rather than attempting path-name-based cleanup.
+
+The HMAC key, source repositories, task-export/control material, and each
+bundle's `control/` directory stay on the trusted evaluator side. An agent gets
+only one `tree/`, mounted read-only, plus its one answer-free task and a bounded
+output location. Its sandbox must not expose the key, control data, source Git
+repository, another task tree, benchmark repository, evaluation logs, scoring
+material, or network access. Phase C proves the delivered bytes and their
+binding to the preparer's selected Git objects; it does not perform source-only
+finding discovery or semantic validation.
 
 For the eventual blind run, scoring truth must remain physically isolated in
 separate evaluator storage and must never be used to prepare tasks, fixtures,
