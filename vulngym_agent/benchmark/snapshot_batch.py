@@ -1145,9 +1145,9 @@ def _canonical_existing_path(
     _reject_device_path(path, status=status)
     absolute = Path(os.path.abspath(os.fspath(path)))
     if os.name == "nt":
-        # Hosted Windows runners commonly expose trusted roots through a
-        # SUBST drive.  GetFinalPathNameByHandleW returns the underlying drive,
-        # so spelling equality would reject two names for the same object.
+        # Hosted Windows runners commonly expose trusted roots through SUBST
+        # drives and 8.3 path spellings. GetFinalPathNameByHandleW expands
+        # those aliases, so spelling equality would reject the same object.
         # Validate both complete chains and their object identity before
         # accepting that normalization; junctions/reparse points still fail.
         supplied_parent = absolute if directory else absolute.parent
@@ -1167,14 +1167,13 @@ def _canonical_existing_path(
             ) from error
         supplied_text = os.path.normcase(os.path.normpath(str(absolute)))
         canonical_text = os.path.normcase(os.path.normpath(str(resolved)))
-        drive_alias = (
+        local_drive_alias = (
             absolute.is_absolute()
             and resolved.is_absolute()
             and re.fullmatch(r"[A-Za-z]:", absolute.drive) is not None
             and re.fullmatch(r"[A-Za-z]:", resolved.drive) is not None
-            and absolute.drive.casefold() != resolved.drive.casefold()
         )
-        if supplied_text != canonical_text and not drive_alias:
+        if supplied_text != canonical_text and not local_drive_alias:
             raise SnapshotBatchError(
                 "path_alias_rejected",
                 "trusted paths must use their canonical identity spelling",
