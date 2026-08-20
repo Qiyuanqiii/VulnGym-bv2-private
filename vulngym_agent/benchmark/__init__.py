@@ -50,12 +50,23 @@ from .sealed_snapshot import (
     prepare_sealed_snapshot,
     verify_sealed_snapshot,
 )
+from .snapshot_batch import (
+    BATCH_CONTRACT_VERSION,
+    SOURCE_MAP_KIND,
+    SOURCE_MAP_SCHEMA_VERSION,
+    SnapshotBatchError,
+    SnapshotBatchSummary,
+    SnapshotBatchTask,
+    prepare_snapshot_batch,
+    verify_snapshot_batch,
+)
 
 __all__ = [
     "BenchmarkContractError",
     "BenchmarkHarnessError",
     "BenchmarkReadLimits",
     "BenchmarkTask",
+    "BATCH_CONTRACT_VERSION",
     "EvaluationTaskSpec",
     "PublicBenchmarkRecord",
     "PublicTestRecord",
@@ -74,6 +85,8 @@ __all__ = [
     "PROFILE_SOURCE_REVISION",
     "SNAPSHOT_CONTRACT_VERSION",
     "SNAPSHOT_POLICY_VERSION",
+    "SOURCE_MAP_KIND",
+    "SOURCE_MAP_SCHEMA_VERSION",
     "ProjectedTask",
     "ProjectionStats",
     "PublicBundleSummary",
@@ -82,6 +95,9 @@ __all__ = [
     "SealedSnapshotFile",
     "SealedSnapshotSummary",
     "SnapshotPolicy",
+    "SnapshotBatchError",
+    "SnapshotBatchSummary",
+    "SnapshotBatchTask",
     "TaskExportSummary",
     "TrainingAggregate",
     "VerifiedSealedSnapshot",
@@ -93,7 +109,9 @@ __all__ = [
     "load_public_benchmark_jsonl",
     "parse_public_benchmark_record",
     "prepare_sealed_snapshot",
+    "prepare_snapshot_batch",
     "project_verified_replay_bundles",
     "validate_public_bundle",
     "verify_sealed_snapshot",
+    "verify_snapshot_batch",
 ]
