@@ -1,6 +1,6 @@
 # VulnGym T1 × T2 自动化闭环：B-v2 首版设计
 
-> 状态：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact 纵切，以及 benchmark 阶段 A/B 的公开契约与投影 harness，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示独立语义 T1、在线模型接入或最终数据验收已经完成。
+> 状态：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact 纵切、benchmark 阶段 A/B 的公开契约与投影 harness，以及阶段 C 的 sealed source snapshot 准备/校验边界，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示 source-only multi-finding T2、独立语义 T1、在线模型接入或最终数据验收已经完成。
 
 ## 1. 目标与总体架构
 
@@ -181,16 +181,72 @@ Entry 投影按 task 的 `repo_url + commit` 重新绑定，支持同一源码�
 固定使用 official inclusive 行号容差 5。训练 gold 只在 finding 已跨过 Producer/投影
 边界后由 aggregate oracle 使用，绝不能转换成 `RunTask`、hint、fixture 或候选 Entry。
 
-阶段 A/B 只解决“公开数据契约与结果投影”，没有解决“从纯源码发现漏洞”。现有
-`LocalStructuredT2Producer` 仍依赖公告、fix commit 与显式 source hints，不能直接执行
-source-only 20 题；以下阶段仍是验收前置条件：
+阶段 A/B 只解决“公开数据契约与结果投影”，没有解决“从纯源码发现漏洞”。阶段 C 已按
+下节实现源码交付边界，但现有 `LocalStructuredT2Producer` 仍依赖公告、fix commit 与
+显式 source hints，不能直接执行 source-only 题目。以下阶段仍是验收前置条件：
 
-- **C：sealed snapshot** —— 由受信 preparer 为每题生成并证明一个不可变源码树，排除
-  `.git` 历史、future fix、alternate/promisor、submodule/LFS 外取、符号链接/junction 与
-  TOCTOU；Producer 只看到该题当前树。
 - **D：source-only T2/T1** —— 新增 snapshot 级、一对多 finding T2，并以不共享其推理
   的独立 semantic T1 完成正反证裁决。
 - **E：隔离 50/20 运行** —— 在逐题断网 sandbox 中执行并由独立 evaluator 汇总验收。
+
+### 2.6 Sealed source snapshot（阶段 C）
+
+阶段 C 把“受信 Git 对象库”与“Agent 可读源码”分成两个安全域。受信 preparer 可读取
+完整本地 source repo，但必须按无答案 task export 指定的精确 `repo_url + commit` 解析
+commit 及其 root tree；它只物化该 tree 中允许的普通文件到
+`bundles/<task_id>/tree`。发布树没有 `.git`、父提交、future fix 或 object database。
+符号链接、junction/reparse point、Gitlink/submodule、LFS pointer、空目录、不安全路径、
+大小写/前缀碰撞，以及 shallow、alternate、graft 等不受支持的 Git 存储条件都会拒绝。
+
+每题 `control/manifest.jsonl` 是严格 canonical JSONL。header 绑定 task ID、精确 repo URL、
+commit、root tree OID 与固定 policy；file record 绑定相对路径、Git mode、blob OID、
+字节数与 SHA-256；footer 绑定逐项内容根和汇总量。`control/attestation.json` 使用
+HMAC-SHA256 对 manifest 精确字节及 key ID 做域分离认证。外层批次 manifest 再绑定
+profile/schema/split、公开 manifest digest、`tasks.jsonl` digest、source-map digest、
+全部 task snapshot manifest/content root 和总量，外层 HMAC 同样绑定 key ID。HMAC 只在掌握评测密钥的受信域内提供
+完整性与预期字节绑定；它不是公开可验证的来源签名，也不提供非否认或外部事实真实性。
+
+source-map 是独立、严格、canonical 的受信配置，`sources` 必须按 repo URL 与 commit
+排序，并以精确 `(repo_url, commit)` 集合覆盖 task export，不能缺少、增加或重复；每项
+只把该身份映射到一个 canonical absolute `repo_root`。`prepare` 必须同时取得 task JSONL
+与 source-map 精确文件字节的 SHA-256 pin，以及固定 public profile manifest digest，避免
+目录发现或调用方默默替换输入。`verify-batch` 则必须取得 sealed batch manifest 的精确
+SHA-256、同一 HMAC key 和
+预期 key ID，并深度复验外层布局和每题 tree：
+
+```bash
+python -m vulngym_agent.snapshot_cli prepare \
+  --task-export-dir /srv/vulngym/exports/test-tasks \
+  --expected-tasks-sha256 <tasks-jsonl-sha256> \
+  --expected-public-manifest-sha256 <public-manifest-sha256> \
+  --source-map /srv/vulngym/config/source-map.json \
+  --expected-source-map-sha256 <source-map-file-sha256> \
+  --output-dir /srv/vulngym/sealed/test \
+  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --key-id evaluator-snapshot-v1
+
+python -m vulngym_agent.snapshot_cli verify-batch \
+  --sealed-root /srv/vulngym/sealed/test \
+  --expected-manifest-sha256 <sealed-batch-manifest-sha256> \
+  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --expected-key-id evaluator-snapshot-v1
+```
+
+preparer 在一个 sibling staging 中完成全部任务：每题先生成并完整校验，外层 manifest
+闭合后再逐题完整校验一次，最后以一次 no-replace rename 发布整批；任一题失败都不会
+发布半批结果。固定批次上限为 100 个 task、1,000,000 个文件、1,000,000 个路径节点和
+16 GiB 文件内容。Linux 的 `renameat2(RENAME_NOREPLACE)` 与 Windows 针对 staging
+directory handle 的 rename 分别是提交点，也是当前支持的两个发布平台；其他 POSIX
+系统会明确拒绝而不会降级到非原子发布。提交点成功后若 destination identity、parent
+identity 或 durability 无法确认，会返回 `publication_commit_uncertain`（单题层相应为
+`snapshot_publication_uncertain`）；调用方须把目标视为可能已提交，并用预期 manifest
+重新校验，绝不能依赖可能已被并发替换的路径名做回滚或删除。
+
+运行 Agent 时，evaluator 只把单题 `tree/` 以只读 mount/ACL 交给该任务；同一 sandbox
+只再提供一条无答案 task 和有界输出位置，并关闭网络。`control/`、HMAC key、source repo、
+其他 task tree、benchmark 仓库、训练 split、生成器输入、评测日志与 gold 都不可见。
+因此阶段 C 证明的是“Agent 读取到的 source-only 字节与受信 preparer 所选 Git 对象一致”，
+并不提供发现或语义正确性结论；后者属于阶段 D。
 
 最终盲测的评分真值必须物理隔离在独立评测端存储中。每个 Producer sandbox 只挂载一条
 无答案任务、该题 sealed tree 与有界输出位置；不得挂载 benchmark 仓库、训练 split、
@@ -227,15 +283,15 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - `closed_loop_cli` 已把严格 `RunTask` JSONL、受信 package/repo 配置、离散绑定完整 ModelRequest 身份的离线 fixture、逐行错误隔离与真实 Producer/Orchestrator/T1 串成有界批处理；`--require-all-finalized` 可把人工审核收紧为非零退出。
 - replay writer 已以单次 staging 事务发布正式 Entry/Validation、全套 attempt sidecar 与 manifest；reader 会核对固定文件集合、canonical JSONL、引用拓扑、计数、digest、路径和资源上限，`verify_closed_loop_artifacts` 还可与调用方提供的期望事件流做逐文件精确对比。
 - `benchmark_cli` 已完成阶段 A/B：固定 public manifest/revision 的外部只读 bundle 校验、无答案 snapshot task 导出、严格 attested replay index、正式 Entry 到一对多 finding 的 Top-K 投影、train-only aggregate oracle 与 test 无评分发布。test 投影有独立 read surface，不加载公开训练答案。
+- `snapshot_cli prepare|verify-batch` 已完成阶段 C：按精确 source identity 从受信 Git 对象生成不含历史面的单题 tree，以逐文件 Git OID/SHA-256、canonical manifest 和 HMAC 绑定，再通过两轮逐题复验与一次外层事务发布/复验形成 sealed batch。Agent 消费端的只读单题 mount/ACL 与断网仍由阶段 E 的运行环境强制。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立，模型提出的标题、分类和语义选择仍受严格输出契约约束，并等待独立 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：阶段 C 的 sealed source snapshot 与证明；阶段 D 的 source-only multi-finding T2 和独立 semantic T1；阶段 E 的 50/20 隔离运行；独立 verify CLI；显式配置的在线模型 backend；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B harness 已接入公开数据契约，但本仓库当前仍不声称已完成最终 50+20 数据验收。
+尚未完成：阶段 D 的 source-only multi-finding T2 和独立 semantic T1；阶段 E 的 50/20 隔离运行；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B harness 与阶段 C snapshot 边界已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
 
 ### 下一阶段
 
-下一阶段按 C → D → E 推进：先实现每题 sealed source snapshot 的受信准备、证明和
-消费边界，再实现 source-only multi-finding T2 与独立 semantic T1，最后在逐题断网、
-gold 物理隔离的环境中完成 50/20 端到端运行。同时补独立 verify CLI、可显式选择的在线
-模型 backend 和全字段 `required_check` verifier；完整 trace、AST/数据流与更多语言增强
-继续作为后续能力。
+下一阶段按 D → E 推进：先让 source-only multi-finding T2 在单题 sealed tree 上工作，
+并由独立 semantic T1 完成裁决；再在逐题断网、gold 物理隔离的环境中完成 50/20 端到端
+运行。同时补 closed-loop replay 的独立 verify CLI、可显式选择的在线模型 backend 和
+全字段 `required_check` verifier；完整 trace、AST/数据流与更多语言增强继续作为后续能力。
