@@ -1,6 +1,6 @@
 # VulnGym T1 × T2 自动化闭环：B-v2 首版设计
 
-> 状态：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer，以及离线批处理/replay artifact 纵切，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示独立语义 T1、在线模型接入或最终数据验收已经完成。
+> 状态：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact 纵切，以及 benchmark 阶段 A/B 的公开契约与投影 harness，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示独立语义 T1、在线模型接入或最终数据验收已经完成。
 
 ## 1. 目标与总体架构
 
@@ -137,6 +137,66 @@ prompt/response、Producer assumptions、异常文本或配置的本机根目录
 位置。digest/哈希链没有签名能力，只能检查内部一致性，不能把 fixture 或 artifact
 提升为外部事实来源。
 
+### 2.5 固定公开 benchmark harness（阶段 A/B）
+
+`python -m vulngym_agent.benchmark_cli` 将独立数据生产流程的公开 bundle 接到 B-v2，
+但 bundle 不复制进本实现仓库。受信 harness 主机把它作为外部只读目录挂载，并通过
+`--benchmark-root` 显式传入。运行时 profile 固定为 `vulngym-50-20-v1`，来源 revision
+固定为 `cd69f7e163e08485ab5496115ae03439cda6e27e`，公开 manifest SHA-256 固定为
+`d4ef4a663a30a39d2ccd89dc89f70d19a06686ae86179c537cd5139b8ff00a73`。reader 不做目录
+发现，只允许读取固定 manifest、record schema、manifest schema、公开 train JSONL 和
+公开 test JSONL；profile、revision、artifact digest、Schema 或集合不一致时 fail closed。
+
+四个命令的职责与发布物如下：
+
+| 命令 | 行为 | 原子输出 |
+| --- | --- | --- |
+| `validate --benchmark-root <external-read-only-root>` | 校验完整固定公开 profile，只在 stdout 返回计数摘要 | 无目录输出 |
+| `export-tasks --split train\|test --output-dir <new-dir>` | 导出仅含 task/repo/commit/split/instruction 的无答案源码快照任务 | `tasks.jsonl`、`manifest.json` |
+| `project-train --artifact-root ... --bundle-index ... --bundle-index-sha256 ... --output-dir <new-dir>` | 完整校验每题 replay、投影一对多 finding，最后调用公开训练 oracle | `findings.jsonl`、`task_results.jsonl`、`aggregate.json`、`manifest.json` |
+| `project-test --artifact-root ... --bundle-index ... --bundle-index-sha256 ... --output-dir <new-dir>` | 完整校验每题 replay 并形成盲测提交；不读 train 文件、不调用 oracle | `findings.jsonl`、`task_results.jsonl`、`manifest.json`；无分数与 `aggregate.json` |
+
+所有 `output-dir` 必须事先不存在，且不能与 benchmark、artifact root 或 index 重叠。
+发布使用 sibling staging 和 no-replace rename，失败时不暴露半成品。训练 oracle 的
+`aggregate.json` 只包含总数、命中数、recall 与提交 finding 数，不输出 task、advisory、
+Entry 身份或逐项匹配。test 专用 reader 只打开固定 manifest、两个 Schema 与 test JSONL，
+不会触碰公开训练答案。
+
+投影前必须由受信评测端提供严格 bundle index 及其精确文件字节 SHA-256；CLI 的
+`--bundle-index-sha256` 没有默认值。index 根对象和数组项都拒绝额外键：
+
+```json
+{"bundles":[{"dataset_sha256":"<64-lower-case-replay-dataset-sha256>","task_id":"VG-TEST-<20-UPPER-HEX>"}],"contract_version":1,"manifest_sha256":"d4ef4a663a30a39d2ccd89dc89f70d19a06686ae86179c537cd5139b8ff00a73","profile_id":"vulngym-50-20-v1","split":"test"}
+```
+
+`bundles` 必须与选定 split 的 task 集合精确相等：每题一次、不得缺少或增加，task ID
+与 `dataset_sha256` 都不得重复；每个 digest 绑定 `<artifact-root>/<task_id>` 下的一份
+完整 closed-loop replay 数据集。reader 会在投影前核对固定文件集合、引用拓扑、终态、
+计数、资源上限与预期 dataset digest；所有 replay 都完成后才允许训练 oracle 或发布。
+这些 SHA 能证明“读到的字节与受信调用方给出的预期值一致”并发现损坏，却不是签名，
+不能证明源码快照、fixture、公告或模型判断的来源真实性。
+
+Entry 投影按 task 的 `repo_url + commit` 重新绑定，支持同一源码快照输出多个 finding，
+对等价端点稳定去重。每题默认保留 Top 64，`--top-k` 硬上限为 256；公开训练 oracle
+固定使用 official inclusive 行号容差 5。训练 gold 只在 finding 已跨过 Producer/投影
+边界后由 aggregate oracle 使用，绝不能转换成 `RunTask`、hint、fixture 或候选 Entry。
+
+阶段 A/B 只解决“公开数据契约与结果投影”，没有解决“从纯源码发现漏洞”。现有
+`LocalStructuredT2Producer` 仍依赖公告、fix commit 与显式 source hints，不能直接执行
+source-only 20 题；以下阶段仍是验收前置条件：
+
+- **C：sealed snapshot** —— 由受信 preparer 为每题生成并证明一个不可变源码树，排除
+  `.git` 历史、future fix、alternate/promisor、submodule/LFS 外取、符号链接/junction 与
+  TOCTOU；Producer 只看到该题当前树。
+- **D：source-only T2/T1** —— 新增 snapshot 级、一对多 finding T2，并以不共享其推理
+  的独立 semantic T1 完成正反证裁决。
+- **E：隔离 50/20 运行** —— 在逐题断网 sandbox 中执行并由独立 evaluator 汇总验收。
+
+最终盲测的评分真值必须物理隔离在独立评测端存储中。每个 Producer sandbox 只挂载一条
+无答案任务、该题 sealed tree 与有界输出位置；不得挂载 benchmark 仓库、训练 split、
+原始数据/生成器输入、评测日志或评分材料。trusted evaluator 在 Producer 退出后再读取
+公开 test 契约和已闭合 replay 进行投影，评分进程与 Producer 也必须分离。
+
 ## 3. 交付边界与实施状态
 
 ### Standard 与 Bonus
@@ -166,13 +226,16 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - `ClosedLoopOrchestrator` 同时支持 FakeT2 回归测试和上述真实 Producer 接口：每轮创建全新 T1，仅传原始任务与正式候选；初始候选后最多修复两轮、最多验证三次。它拒绝越权改锁字段、无变化、错误重复、原正确字段回归、调用/预算对账不闭合及跨轮 sidecar 冲突，所有停止原因进入 Schema-valid 状态快照。
 - `closed_loop_cli` 已把严格 `RunTask` JSONL、受信 package/repo 配置、离散绑定完整 ModelRequest 身份的离线 fixture、逐行错误隔离与真实 Producer/Orchestrator/T1 串成有界批处理；`--require-all-finalized` 可把人工审核收紧为非零退出。
 - replay writer 已以单次 staging 事务发布正式 Entry/Validation、全套 attempt sidecar 与 manifest；reader 会核对固定文件集合、canonical JSONL、引用拓扑、计数、digest、路径和资源上限，`verify_closed_loop_artifacts` 还可与调用方提供的期望事件流做逐文件精确对比。
+- `benchmark_cli` 已完成阶段 A/B：固定 public manifest/revision 的外部只读 bundle 校验、无答案 snapshot task 导出、严格 attested replay index、正式 Entry 到一对多 finding 的 Top-K 投影、train-only aggregate oracle 与 test 无评分发布。test 投影有独立 read surface，不加载公开训练答案。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立，模型提出的标题、分类和语义选择仍受严格输出契约约束，并等待独立 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：独立 verify CLI；显式配置的在线模型 backend；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义；独立 T1 的语义正判；以及题目要求的最终训练集与公开测试集验收。数据集由独立数据生产流程构建并接入本项目，本仓库当前实现不声称已完成最终 50+20 数据验收。
+尚未完成：阶段 C 的 sealed source snapshot 与证明；阶段 D 的 source-only multi-finding T2 和独立 semantic T1；阶段 E 的 50/20 隔离运行；独立 verify CLI；显式配置的在线模型 backend；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B harness 已接入公开数据契约，但本仓库当前仍不声称已完成最终 50+20 数据验收。
 
 ### 下一阶段
 
-下一阶段先补独立 verify CLI 与可显式选择的在线模型 backend，并逐项补齐全字段
-`required_check` verifier 与独立语义 T1。随后接入独立流程提供的数据集，完成训练集与
-公开测试集的端到端 50+20 验收，再决定完整 trace、AST/数据流与更多语言增强。
+下一阶段按 C → D → E 推进：先实现每题 sealed source snapshot 的受信准备、证明和
+消费边界，再实现 source-only multi-finding T2 与独立 semantic T1，最后在逐题断网、
+gold 物理隔离的环境中完成 50/20 端到端运行。同时补独立 verify CLI、可显式选择的在线
+模型 backend 和全字段 `required_check` verifier；完整 trace、AST/数据流与更多语言增强
+继续作为后续能力。

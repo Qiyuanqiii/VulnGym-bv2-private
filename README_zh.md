@@ -359,9 +359,77 @@ prompt/response、Producer assumptions、异常文本或配置的本机根目录
 只含绑定后的元数据/digest，T1 也不会读取它。canonical digest 可发现损坏并闭合引用，
 但没有签名能力，不能认证外部事实。
 
-尚未完成的是独立 verify CLI、显式配置的在线模型 backend、全字段必需检查验证器、
-能够给出语义正判的独立 T1，以及 50 条训练集加 20 条公开测试集的最终验收。数据集由
-独立数据生产流程构建后接入；当前实现不声称已经通过 50+20 验收。
+#### 固定 50/20 benchmark harness（阶段 A/B）
+
+公开数据契约以及 replay-to-finding 投影 harness 已实现。benchmark bundle 应保留在
+本实现仓库之外，由受信 harness 主机只读挂载，并通过 `--benchmark-root` 指向这个外部
+根目录。运行时 profile 固定为 `vulngym-50-20-v1`，来源 revision 固定为
+`cd69f7e163e08485ab5496115ae03439cda6e27e`，公开 manifest SHA-256 固定为
+`d4ef4a663a30a39d2ccd89dc89f70d19a06686ae86179c537cd5139b8ff00a73`。
+reader 不枚举 bundle，只打开固定 manifest、record schema、manifest schema 以及公开
+train/test JSONL；任何 profile 替换或修改都会 fail closed。
+
+```bash
+# 校验完整固定公开 profile，并只输出计数摘要。
+python -m vulngym_agent.benchmark_cli validate \
+  --benchmark-root /srv/vulngym/benchmark-public
+
+# 导出不带答案的源码快照任务；新输出目录只包含 tasks.jsonl 与 manifest.json。
+python -m vulngym_agent.benchmark_cli export-tasks \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --split test \
+  --output-dir /srv/vulngym/exports/test-tasks
+
+# 逐个校验已索引 replay bundle、把正式 Entry 投影为 finding，并仅运行公开训练集
+# aggregate oracle。
+python -m vulngym_agent.benchmark_cli project-train \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/replays/train \
+  --bundle-index /srv/vulngym/attestations/train-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/projections/train
+
+# 生成盲测提交；不加载公开训练答案，也不调用评分 oracle。
+python -m vulngym_agent.benchmark_cli project-test \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/replays/test \
+  --bundle-index /srv/vulngym/attestations/test-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/projections/test
+```
+
+尖括号内是文档占位符；真实投影必须从受信通道取得 index 文件精确字节的 64 位小写
+SHA-256。index 是不允许额外键的严格 JSON，结构如下：
+
+```json
+{"bundles":[{"dataset_sha256":"<64-lower-case-replay-dataset-sha256>","task_id":"VG-TEST-<20-UPPER-HEX>"}],"contract_version":1,"manifest_sha256":"d4ef4a663a30a39d2ccd89dc89f70d19a06686ae86179c537cd5139b8ff00a73","profile_id":"vulngym-50-20-v1","split":"test"}
+```
+
+它必须为所选 split 中每个 task 恰好列出一项，不能缺少、增加或重复 task ID，也不能
+重复 dataset digest。每个 `dataset_sha256` 绑定
+`<artifact-root>/<task_id>` 下已完整校验的 closed-loop replay 目录。index 文件 digest
+与 replay dataset digest 能依据受信评测端提供的预期值发现替换或损坏，但**不能**证明
+源码树、fixture 或模型结论的来源真实性。
+
+两个投影命令都会在一次禁止覆盖的事务中发布 `findings.jsonl`、
+`task_results.jsonl` 和 `manifest.json`。`project-train` 额外发布
+`aggregate.json`；训练 oracle 只公开总数与 recall，不公开 task/advisory/Entry 身份或
+逐项匹配。`project-test` 不读取公开 train 文件、不调用 oracle，也不产生分数或
+`aggregate.json`。每题默认最多投影 Top 64 finding，`--top-k` 硬上限为 256；固定公开
+训练 matcher 的 official inclusive 行号容差为 5。
+
+这只完成阶段 A/B：严格公开契约、无答案任务导出、replay 校验、有界一对多 finding
+投影，以及 train-only aggregate oracle；并不表示当前依赖公告/fix 锚点的
+`LocalStructuredT2Producer` 已能执行 source-only 20 题。阶段 C（每题一个经证明且
+sealed 的源码树）、阶段 D（source-only multi-finding T2 与独立 semantic T1）和阶段 E
+（50/20 隔离运行）仍待完成；独立 verify CLI、显式在线模型 backend 与全字段
+required-check verifier 也尚未完成。
+
+最终盲测时，评分真值必须物理隔离在独立评测端存储中，绝不能用于准备 task、fixture
+或模型响应。每个 Producer sandbox 必须断网，只接收一条无答案任务、对应 sealed 源码
+树和有界输出目录；不得挂载 benchmark 仓库、训练 split、原始数据/生成器输入、评测
+日志或评分材料。受信 evaluator 可在 Producer 退出后校验并投影输出；当前仓库仍不声称
+已经通过 50/20 最终验收。
 
 确定性 T1 CLI 的验证报告、证据和运行清单继续严格分开落盘：
 
