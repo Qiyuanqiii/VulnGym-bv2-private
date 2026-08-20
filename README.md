@@ -526,8 +526,10 @@ python -m vulngym_agent.snapshot_cli verify-batch \
 Preparation is one no-replace batch transaction: no official output appears
 until all task trees and both verification passes close. Fixed aggregate caps
 are 100 tasks, 1,000,000 files, 1,000,000 total path nodes, and 16 GiB of file
-content. The no-replace `renameat2` operation on POSIX and the handle-anchored
-directory rename on Windows are publication commit points. If a post-commit
+content. The no-replace `renameat2` operation on Linux and the handle-anchored
+directory rename on Windows are publication commit points. These are the two
+supported publication platforms; other POSIX systems fail closed rather than
+falling back to a non-atomic rename. If a post-commit
 identity or durability check fails, the command reports publication as
 uncertain; callers must treat the destination as possibly committed and verify
 the exact expected manifest rather than attempting path-name-based cleanup.

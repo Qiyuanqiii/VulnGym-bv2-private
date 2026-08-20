@@ -469,8 +469,9 @@ python -m vulngym_agent.snapshot_cli verify-batch \
 
 准备过程是一次禁止覆盖的整批事务：所有题目的源码树及两轮完整校验闭合之前，正式输出
 不会出现。固定批次总量上限为 100 个 task、1,000,000 个文件、1,000,000 个路径节点和
-16 GiB 文件内容。POSIX 的 no-replace `renameat2` 与 Windows 的 handle-anchored 目录
-rename 都是发布提交点。若提交后的 identity 或 durability 检查失败，命令会报告发布状态
+16 GiB 文件内容。Linux 的 no-replace `renameat2` 与 Windows 的 handle-anchored 目录
+rename 都是发布提交点，也是当前支持的两个发布平台；其他 POSIX 系统会明确拒绝，而不会
+降级到非原子 rename。若提交后的 identity 或 durability 检查失败，命令会报告发布状态
 不确定；调用方必须把目标目录视为“可能已经提交”，依据精确预期 manifest 重新校验，
 不能按路径名尝试清理。
 

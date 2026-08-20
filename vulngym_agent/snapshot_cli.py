@@ -258,6 +258,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 key_id=args.key_id,
             )
         else:
+            # A missing or non-canonical artifact root is a verification
+            # failure, while key/configuration failures remain usage errors.
+            _batch_canonical_existing_path(
+                args.sealed_root,
+                directory=True,
+                status=4,
+            )
             if _paths_overlap(args.sealed_root, args.key_file, left_exists=True):
                 raise _CliInputError("sealed batch and key paths conflict")
             key = _read_key_file(args.key_file)

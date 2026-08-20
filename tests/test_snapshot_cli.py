@@ -140,6 +140,28 @@ class SnapshotCliTests(unittest.TestCase):
         self.assertEqual(KEY_ID, verify.call_args.kwargs["expected_key_id"])
         self.assertEqual(KEY, verify.call_args.kwargs["attestation_key"])
 
+    def test_missing_verify_root_uses_verification_exit_class(self) -> None:
+        error = StringIO()
+        with mock.patch.object(
+            snapshot_cli, "verify_snapshot_batch"
+        ) as verify, redirect_stderr(error):
+            status = snapshot_cli.main(
+                [
+                    "verify-batch",
+                    "--sealed-root",
+                    str(self.root / "missing-sealed-root"),
+                    "--expected-manifest-sha256",
+                    DIGEST,
+                    "--key-file",
+                    str(self.key_file),
+                    "--expected-key-id",
+                    KEY_ID,
+                ]
+            )
+        self.assertEqual(4, status)
+        verify.assert_not_called()
+        self.assertNotIn(str(self.root), error.getvalue())
+
     def test_batch_error_exit_classes_and_messages_are_path_sanitized(self) -> None:
         secret = r"D:\sensitive\hidden\source"
         for expected in (2, 3, 4, 5):

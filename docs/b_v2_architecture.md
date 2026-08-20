@@ -235,8 +235,9 @@ python -m vulngym_agent.snapshot_cli verify-batch \
 preparer 在一个 sibling staging 中完成全部任务：每题先生成并完整校验，外层 manifest
 闭合后再逐题完整校验一次，最后以一次 no-replace rename 发布整批；任一题失败都不会
 发布半批结果。固定批次上限为 100 个 task、1,000,000 个文件、1,000,000 个路径节点和
-16 GiB 文件内容。POSIX 的 `renameat2(RENAME_NOREPLACE)` 与 Windows 针对 staging
-directory handle 的 rename 分别是提交点。提交点成功后若 destination identity、parent
+16 GiB 文件内容。Linux 的 `renameat2(RENAME_NOREPLACE)` 与 Windows 针对 staging
+directory handle 的 rename 分别是提交点，也是当前支持的两个发布平台；其他 POSIX
+系统会明确拒绝而不会降级到非原子发布。提交点成功后若 destination identity、parent
 identity 或 durability 无法确认，会返回 `publication_commit_uncertain`（单题层相应为
 `snapshot_publication_uncertain`）；调用方须把目标视为可能已提交，并用预期 manifest
 重新校验，绝不能依赖可能已被并发替换的路径名做回滚或删除。
