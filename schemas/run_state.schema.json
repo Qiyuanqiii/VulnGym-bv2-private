@@ -1,0 +1,381 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulngym.example/schemas/run_state.schema.json",
+  "title": "VulnGym B-v2 sanitized run-state snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task",
+    "status",
+    "repair_iteration",
+    "validation_count",
+    "candidate",
+    "candidate_sha256",
+    "last_validation",
+    "active_repair_plan",
+    "budget",
+    "production_history",
+    "production_attempts",
+    "validation_history",
+    "stop_reason",
+    "termination"
+  ],
+  "properties": {
+    "task": {
+      "$ref": "#/$defs/taskSummary"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "producing",
+        "validating",
+        "repairing",
+        "finalized",
+        "manual_review",
+        "failed"
+      ]
+    },
+    "repair_iteration": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 2
+    },
+    "validation_count": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 3
+    },
+    "candidate": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://vulngym.example/schemas/entry.schema.json" }
+      ]
+    },
+    "candidate_sha256": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sha256" }
+      ]
+    },
+    "last_validation": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://vulngym.example/schemas/validation.schema.json" }
+      ]
+    },
+    "active_repair_plan": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "https://vulngym.example/schemas/repair_plan.schema.json" }
+      ]
+    },
+    "budget": {
+      "$ref": "#/$defs/budget"
+    },
+    "production_history": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/productionSummary"
+      }
+    },
+    "production_attempts": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/productionAttemptSummary"
+      }
+    },
+    "validation_history": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/validationSummary"
+      }
+    },
+    "stop_reason": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "termination": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/terminationSummary" }
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "taskSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_id", "report_id", "entry_id", "inputs_sha256"],
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        },
+        "report_id": {
+          "type": ["string", "null"],
+          "pattern": "^GHSA-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$"
+        },
+        "entry_id": {
+          "type": ["string", "null"],
+          "pattern": "^entry-[0-9]{5}$"
+        },
+        "inputs_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "productionSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "mode",
+        "candidate_sha256",
+        "parent_candidate_sha256",
+        "repair_plan_sha256"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["generated", "provided", "repair"]
+        },
+        "candidate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "parent_candidate_sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        },
+        "repair_plan_sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        }
+      }
+    },
+    "productionAttemptSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "mode",
+        "candidate_sha256",
+        "outcome_sha256",
+        "disposition",
+        "parent_candidate_sha256",
+        "repair_plan_sha256"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["generated", "provided", "repair"]
+        },
+        "candidate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "outcome_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "disposition": {
+          "type": "string",
+          "enum": [
+            "accepted",
+            "rejected_locked_fields",
+            "rejected_no_progress"
+          ]
+        },
+        "parent_candidate_sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        },
+        "repair_plan_sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        }
+      }
+    },
+    "validationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "candidate_sha256",
+        "validation_sha256",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "candidate_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "validation_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "evidence_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "terminationSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "phase",
+        "attempt",
+        "error_sha256",
+        "budget_resource",
+        "budget_requested",
+        "budget_remaining"
+      ],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": [
+            "validated_correct",
+            "validation_uncertain",
+            "max_repair_iterations",
+            "no_progress",
+            "repeated_error",
+            "locked_field_changed",
+            "validation_regression",
+            "budget_exhausted",
+            "producer_error",
+            "validator_error",
+            "invalid_candidate",
+            "no_repairable_fields",
+            "producer_sidecar_conflict",
+            "unaccounted_tool_call"
+          ]
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "validation",
+            "repair",
+            "budget",
+            "producer",
+            "validator",
+            "initial_candidate",
+            "sidecar",
+            "tool_accounting"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "error_sha256": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/sha256" }
+          ]
+        },
+        "budget_resource": {
+          "type": ["string", "null"],
+          "enum": [
+            "llm_calls",
+            "tool_calls",
+            "repair_iterations",
+            null
+          ]
+        },
+        "budget_requested": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "budget_remaining": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["llm_calls", "tool_calls", "repair_iterations"],
+      "properties": {
+        "llm_calls": { "type": "integer", "minimum": 0 },
+        "tool_calls": { "type": "integer", "minimum": 0 },
+        "repair_iterations": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_llm_calls",
+        "max_tool_calls",
+        "max_repair_iterations"
+      ],
+      "properties": {
+        "max_llm_calls": { "type": "integer", "minimum": 0 },
+        "max_tool_calls": { "type": "integer", "minimum": 0 },
+        "max_repair_iterations": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        }
+      }
+    },
+    "budgetEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sequence", "resource", "amount", "usage_after"],
+      "properties": {
+        "sequence": { "type": "integer", "minimum": 1 },
+        "resource": {
+          "type": "string",
+          "enum": ["llm_calls", "tool_calls", "repair_iterations"]
+        },
+        "amount": { "type": "integer", "minimum": 1 },
+        "usage_after": { "$ref": "#/$defs/usage" },
+        "operation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["limits", "usage", "events"],
+      "properties": {
+        "limits": { "$ref": "#/$defs/limits" },
+        "usage": { "$ref": "#/$defs/usage" },
+        "events": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/budgetEvent" }
+        }
+      }
+    }
+  },
+  "$comment": "Sanitized persistence contract: raw task inputs and ProductionOutcome evidence/tool_calls/assumptions are intentionally excluded. Python state-machine invariants additionally keep candidate/candidate_sha256 and terminal status/stop_reason consistent."
+}

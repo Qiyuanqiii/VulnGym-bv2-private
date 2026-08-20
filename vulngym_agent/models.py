@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import json
 import math
 import re
+from types import MappingProxyType
 from typing import Any, Mapping
 
 
@@ -53,6 +54,18 @@ def _jsonable(value: Any) -> Any:
         return {str(key): _jsonable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_jsonable(item) for item in value]
+    return value
+
+
+def _freeze_json_value(value: Any) -> Any:
+    """Recursively snapshot an already validated JSON-compatible value."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_json_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json_value(item) for item in value)
     return value
 
 
@@ -307,6 +320,11 @@ class FieldValidation(JsonSerializable):
                 json.dumps(_jsonable(self.suggested_fix), allow_nan=False)
             except (TypeError, ValueError) as error:
                 raise ValueError("suggested_fix must be JSON serializable") from error
+            object.__setattr__(
+                self,
+                "suggested_fix",
+                _freeze_json_value(self.suggested_fix),
+            )
 
     def to_dict(self) -> dict[str, Any]:
         value: dict[str, Any] = {
@@ -370,6 +388,7 @@ class ValidationReport(JsonSerializable):
             for name, validation in self.fields.items()
         ):
             raise ValueError("fields contains an unsupported name or value")
+        object.__setattr__(self, "fields", MappingProxyType(dict(self.fields)))
         try:
             missing = tuple(self.missing_information)
         except TypeError as error:
