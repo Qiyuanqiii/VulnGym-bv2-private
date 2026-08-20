@@ -303,12 +303,103 @@ transcripts establish internal closure and binding only—they are not digital
 signatures and do not establish the external truth of a repository, advisory,
 or model conclusion.
 
-Still pending are the closed-loop batch CLI and replay artifact writer,
-full-field required-check verifiers, an independent semantic T1 capable of
-positive judgments, and final acceptance on the required training/public-test
-datasets. Dataset construction is handled by a separate data-production flow
-and will be integrated here; this implementation does not claim that the final
-50+20 data acceptance has passed.
+The offline closed-loop batch entry point and its atomic replay-artifact writer
+are now implemented. They consume one strict `RunTask` object per physical
+JSONL line, run T2 followed by a fresh T1 for every validation round, and only
+put finalized entries closed by a `correct` T1 report in `entries.jsonl`.
+
+The following is the exact shape of one `tasks.jsonl` line (package paths are
+relative POSIX paths under the trusted package root; no local root belongs in a
+task):
+
+```json
+{"task_id":"task:ghsa-w7xj","report_id":"GHSA-W7XJ-8FX7-WFCH","entry_id":"entry-00057","inputs":{"contract_version":1,"input_line":1,"repo_url":"https://github.com/open-webui/open-webui","package":{"advisory":"advisories/GHSA-W7XJ-8FX7-WFCH.json","references":[],"patches":["patches/GHSA-W7XJ-8FX7-WFCH.diff"]},"hints":{"project":"open-webui","fix_commits":[],"source_paths":["src/lib/components/common/RichTextInput.svelte"],"entry_symbols":[],"critical_mode":"auto"}}}
+```
+
+`inputs.input_line` must equal the physical line number. The trusted repository
+map is a separate strict JSON document and uses canonical GitHub URLs plus
+absolute local roots:
+
+```json
+{"contract_version":1,"repositories":[{"repo_url":"https://github.com/open-webui/open-webui","path":"/srv/vulngym/repos/open-webui"}]}
+```
+
+The current CLI deliberately has no online model adapter. It uses a bounded,
+request-free exact-request fixture as its offline backend:
+
+```json
+{"contract_version":2,"backend_id":"exact-replay","model_id":"offline-v1","responses":[{"task_id":"task:ghsa-w7xj","attempt":0,"policy_scope":"t2.initial","stage":"plan","model_call_id":"MODEL-example-plan","backend_id":"exact-replay","model_id":"offline-v1","request_sha256":"<64-lower-case-hex>","status":"success","response":{"stage-specific":"structured result"},"error_code":null}]}
+```
+
+The angle-bracket value above is documentation notation. A real response
+record discretely binds every immutable `ModelRequest` identity field:
+task, attempt, policy scope, stage, call ID, backend ID, model ID, and the
+64-character lower-case request digest. Lookup uses that collision-free field
+tuple directly; a caller-supplied or delimiter-flattened operation string
+cannot substitute for the individual checks. Each identity is registered and consumed exactly
+once, so missing, reused, or unused responses abort publication. The fixture
+contains no prompt or request payload and is test/reproduction input, **not**
+benchmark gold or an independent T1 judgment. Hidden acceptance gold must stay
+physically outside the task, fixture, package, and repository roots and must
+never be used to prepare model responses.
+
+With those inputs prepared, the minimal batch command is:
+
+```bash
+python -m vulngym_agent.closed_loop_cli \
+  --tasks tasks.jsonl \
+  --replay-responses replay-responses.json \
+  --repo-map repo-map.json \
+  --package-root /srv/vulngym/packages \
+  --output-dir /srv/vulngym/runs/run-001
+```
+
+The output parent must already exist and `--output-dir` itself must not exist
+or overlap any task, fixture, map, package, or repository input. Exit status is
+`0` for a clean batch (`manual_review` is allowed by default), `1` for row/task
+failures or, with `--require-all-finalized`, any manual-review outcome, and `2`
+for fatal configuration/I/O, total task-byte overflow, or exact-replay closure
+failure. Input defaults are 1 MiB per JSONL line, 64 MiB for the complete task
+file, and 10,000 records (`--max-input-line-bytes`, `--max-task-bytes`, and
+`--max-records`); hard ceilings are 32 MiB, 1 GiB, and 100,000 respectively.
+Replay fixtures separately default to 16 MiB and 50,000 responses.
+If `--max-records` truncates a batch while fixtures for later records remain,
+those unused fixtures fail exact closure and the entire directory is not
+published.
+
+One staging transaction publishes `entries.jsonl`, `validation.jsonl`, the
+sidecars `states.jsonl`, `candidates.jsonl`, `validations.jsonl`,
+`evidence.jsonl`, `tool_calls.jsonl`, `model_calls.jsonl`,
+`repair_history.jsonl`, `deferred.jsonl`, and `errors.jsonl`, plus
+`run_manifest.jsonl`. `validation.jsonl` is the formal report stream;
+`validations.jsonl` is the attempt-linked replay sidecar. Read or verify the
+closed bundle without invoking T1, T2, Git, or a model:
+
+```python
+from vulngym_agent.orchestrator import (
+    read_closed_loop_artifacts,
+    verify_closed_loop_artifacts,
+)
+
+bundle = read_closed_loop_artifacts("/srv/vulngym/runs/run-001")
+manifest = verify_closed_loop_artifacts("/srv/vulngym/runs/run-001")
+print(bundle.manifest.dataset_sha256, manifest.entry_count)
+```
+
+Artifacts intentionally retain bounded, public or otherwise cleared Evidence
+snippets and the Schema-required Entry code snippets. Keep bundles in the
+private repository or another controlled directory. They never persist raw
+model prompts/responses, producer assumptions, exception text, or configured
+local roots; model-call sidecars contain only bound metadata/digests, and T1
+does not read them. Canonical digests detect corruption and close references,
+but are unsigned and do not authenticate external truth.
+
+Still pending are a standalone verification CLI, an explicitly configured
+online-model backend, full-field required-check verifiers, an independent
+semantic T1 capable of positive judgments, and final acceptance on the required
+50 training plus 20 public-test records. Dataset construction is handled by a
+separate data-production flow and will be integrated here; this implementation
+does not claim that the 50+20 acceptance has passed.
 
 The deterministic T1 CLI writes separate validation, evidence, and
 run-manifest files:

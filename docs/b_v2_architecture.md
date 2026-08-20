@@ -1,6 +1,6 @@
 # VulnGym T1 × T2 自动化闭环：B-v2 首版设计
 
-> 状态：确定性 T1 基础、受控闭环编排与本地结构化 T2 Producer 纵切，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示语义 T1、批量回放或最终数据验收已经完成。
+> 状态：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer，以及离线批处理/replay artifact 纵切，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示独立语义 T1、在线模型接入或最终数据验收已经完成。
 
 ## 1. 目标与总体架构
 
@@ -39,12 +39,14 @@ Entry Point 需由路由、RPC/CLI、消息回调或反向调用关系证明“�
 
 | 边界 | 内容 | 约束 |
 | --- | --- | --- |
-| `outputs/entries.jsonl` | T2 正式 Entry | 仅 15 个 Schema 字段；`verify=0`；不得混入状态、证据、假设或日志。 |
-| `outputs/validation.jsonl` | T1 正式报告 | 核心字段三态、置信度、可读证据，可附修正建议。 |
-| `outputs/self_assessment.md` | 人工分流说明 | 汇总低置信、冲突和未收敛条目。 |
-| `artifacts/*.jsonl` | 内部 sidecar | `evidence`、`candidates`、`tool_calls`、`repair_history`、`run_manifest`；不得回流污染 Entry。 |
+| `<output-dir>/entries.jsonl` | 已 finalized 的正式 Entry | 仅 15 个 Schema 字段；`verify=0`；只有 `correct` T1 报告闭合的结果才能进入。 |
+| `<output-dir>/validation.jsonl` | 正式 T1 报告流 | 保留实际形成的终态报告；与 attempt 级 `validations.jsonl` sidecar 区分。 |
+| `<output-dir>/* sidecar` | 内部 replay 记录 | `states/candidates/validations/evidence/tool_calls/model_calls/repair_history/deferred/errors`；不得回流污染 Entry。 |
+| `<output-dir>/run_manifest.jsonl` | 数据集闭合清单 | 对所有文件、根记录、数量和 digest 建立一次事务内的闭合。 |
 
-以上是目标落盘边界；确定性 T1 CLI 已写出验证、证据和运行清单，闭环批处理 CLI 及 candidate/tool-call/repair-history 的统一 artifact writer 尚未完成。
+闭环 writer 在同一个 sibling staging 事务中写入并复核 `entries.jsonl`、
+`validation.jsonl`、全部 sidecar 和 `run_manifest.jsonl`，成功后才发布此前不存在的
+输出目录。输出目录不能与 task、fixture、repo map、资料包或仓库输入重叠。
 
 统一证据模型如下；`line_start`/`line_end` 如出现必须成对且有序：
 
@@ -71,6 +73,69 @@ Entry Point 需由路由、RPC/CLI、消息回调或反向调用关系证明“�
 Git 工具用固定参数数组读取 `cat-file/ls-tree/show`，无任意 shell，不 checkout、不运行 hook/diff driver/textconv；校验 SHA 和相对路径，拒绝绝对路径、`..` 与选项/pathspec 注入，并限制超时和 blob 大小。确定性门禁只接受对象库位于授权根目录内的普通 clone/bare repo，拒绝 gitfile、`commondir`、alternate object database 和 `info/grafts` 历史覆盖；固定 `core.commitGraph=false` 使祖先关系回到原始 commit 对象，并以 `GIT_NO_REPLACE_OBJECTS=1` / `GIT_NO_LAZY_FETCH=1` 阻止 replace refs 与 partial clone 隐式联网/写对象。AST 如需展开源码，只能由后续受控工具创建每任务独立临时目录，不能把该目录绕回只读事实门禁。
 
 确定性输入门禁已接入资源上限：默认单行 JSONL 1 MiB、每批 10,000 条、每条 trace 64 节点、每包 64 个文件；对应硬上限为 32 MiB、100,000 条、256 节点和 256 文件。超限在仓库/Git 扇出前形成结构化单条错误，超长行以固定大小缓冲排空。闭环预算默认每任务 `max_llm_calls=16`、`max_tool_calls=80`、`max_repair_iterations=2`；调用开始前计费，失败不退款，事件账本可用于确定性的内部一致性对账。全字段正确、只剩 `uncertain`、两轮耗尽、无变化/错误重复、预算耗尽、改坏锁定字段、原正确字段回归或证据冲突时立即停止。`uncertain` 不会被自动改写，直接进入人工分流。
+
+### 2.4 批处理与 replay artifact 契约
+
+`python -m vulngym_agent.closed_loop_cli` 每个物理 JSONL 行只接受一个严格
+`RunTask`：根对象恰好含 `task_id/report_id/entry_id/inputs`；`inputs` 恰好含
+`contract_version/input_line/repo_url/package/hints`，其中 `input_line` 必须等于物理
+行号。任务不携带本机根目录。受信配置另行提供绝对 `--package-root`，以及结构为
+`{"contract_version":1,"repositories":[{"repo_url":...,"path":...}]}` 的严格 repo
+map；URL 必须是 canonical GitHub URL，并按精确值映射到绝对本地 repository root。
+package root 与所有 repo root 必须互不包含。
+
+当前批处理只提供离线 `ExactReplayBackend`，不包含在线模型 provider。fixture 根对象
+恰好含 `contract_version=2/backend_id/model_id/responses`；每个 response 离散保存并核对
+完整的不可变 `ModelRequest` 身份：`task_id`、`attempt`、`policy_scope`、`stage`、
+`model_call_id`、`backend_id`、`model_id` 与 `request_sha256`，再附
+`status/response/error_code`。查找直接使用这组无碰撞字段 tuple，不能用一个调用方提供或
+经分隔符拼接的 operation 字符串替代逐字段绑定。fixture 不保存原始 request 或 prompt，
+且每组身份必须恰好消费一次；缺失、复用或剩余 fixture 都会使整个 staging 事务失败。
+它只是离线测试/复现输入，不是 gold，不代表独立 T1 结论。隐藏验收 gold 必须在物理上
+位于 task、fixture、package 与 repository root 之外，并禁止用于准备模型响应。
+
+最小执行示例：
+
+```bash
+python -m vulngym_agent.closed_loop_cli \
+  --tasks tasks.jsonl \
+  --replay-responses replay-responses.json \
+  --repo-map repo-map.json \
+  --package-root /srv/vulngym/packages \
+  --output-dir /srv/vulngym/runs/run-001
+```
+
+输出父目录必须已存在，`--output-dir` 本身必须不存在。退出码 `0` 表示无输入/任务
+失败；默认允许 `manual_review`。退出码 `1` 表示出现输入/任务失败，或启用
+`--require-all-finalized` 后存在人工审核结果；退出码 `2` 表示配置/I/O、task 总字节
+超限或 exact replay 闭合等致命错误。task 输入默认单行 1 MiB、总文件 64 MiB、
+10,000 条记录，可由 `--max-input-line-bytes`、`--max-task-bytes`、`--max-records`
+调整，硬上限依次是 32 MiB、1 GiB、100,000。fixture 默认上限另为 16 MiB 与
+50,000 个响应。若 `--max-records` 截断批次并留下后续记录对应的 unused fixture，
+exact closure 会使整批拒绝发布；artifact reader/writer 还以 `ReplayLimits` 约束单文件
+记录数、单行和总字节。
+
+落盘集合固定包含 `entries.jsonl`、`validation.jsonl`、`states.jsonl`、
+`candidates.jsonl`、`validations.jsonl`、`evidence.jsonl`、`tool_calls.jsonl`、
+`model_calls.jsonl`、`repair_history.jsonl`、`deferred.jsonl`、`errors.jsonl` 与
+`run_manifest.jsonl`。可在不运行 T1、T2、Git 或模型的情况下读取和验算：
+
+```python
+from vulngym_agent.orchestrator import (
+    read_closed_loop_artifacts,
+    verify_closed_loop_artifacts,
+)
+
+bundle = read_closed_loop_artifacts("/srv/vulngym/runs/run-001")
+manifest = verify_closed_loop_artifacts("/srv/vulngym/runs/run-001")
+```
+
+T1 只读原始资料包和正式候选，不读取 model-call sidecar。artifact 不保存 raw model
+prompt/response、Producer assumptions、异常文本或配置的本机根目录；model-call 仅保留
+可闭合的元数据与 digest。不过 Evidence snippet 和 Entry Schema 要求的代码片段会被
+有界保留，因此只应写入公开或已获许可的内容，并将整个目录留在私有仓库或其他受控
+位置。digest/哈希链没有签名能力，只能检查内部一致性，不能把 fixture 或 artifact
+提升为外部事实来源。
 
 ## 3. 交付边界与实施状态
 
@@ -99,11 +164,15 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - `LocalStructuredT2Producer` 已支持离线读取真实本地 Git 对象的 generate 流程：严格任务 → plan → 公告/仓库/fix-parent/diff 事实 → 有界候选 → semantic judge → 15 字段 Schema → reflection。模型只能在工具签发的候选 ID 中选择位置，`verify` 固定为 `0`；歧义 fix、非唯一父提交、缺失 source diff、Guard 无法落到漏洞版本等情况都会 defer。
 - 受限 repair 已支持标题、分类等有界字段，并实际执行当前可用的任务、公告与 Schema 检查；其中 semantic check 仍是受限模型判断，不是最终 T1 正判。repair 只能采用 RepairPlan 中 T1 已给出的 `suggested_fix`，只能修改获批字段，且必须保持任务身份与 locked 字段；源码位置、patch 区域、祖先和 trace 连续性等尚无专用全字段 verifier 的检查不会被当作 prompt 文本“默认通过”。
 - `ClosedLoopOrchestrator` 同时支持 FakeT2 回归测试和上述真实 Producer 接口：每轮创建全新 T1，仅传原始任务与正式候选；初始候选后最多修复两轮、最多验证三次。它拒绝越权改锁字段、无变化、错误重复、原正确字段回归、调用/预算对账不闭合及跨轮 sidecar 冲突，所有停止原因进入 Schema-valid 状态快照。
+- `closed_loop_cli` 已把严格 `RunTask` JSONL、受信 package/repo 配置、离散绑定完整 ModelRequest 身份的离线 fixture、逐行错误隔离与真实 Producer/Orchestrator/T1 串成有界批处理；`--require-all-finalized` 可把人工审核收紧为非零退出。
+- replay writer 已以单次 staging 事务发布正式 Entry/Validation、全套 attempt sidecar 与 manifest；reader 会核对固定文件集合、canonical JSONL、引用拓扑、计数、digest、路径和资源上限，`verify_closed_loop_artifacts` 还可与调用方提供的期望事件流做逐文件精确对比。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立，模型提出的标题、分类和语义选择仍受严格输出契约约束，并等待独立 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：closed-loop 批量 CLI、统一 replay artifact writer 与跨进程重放入口；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义；独立 T1 的语义正判；以及题目要求的最终训练集与公开测试集验收。数据集由独立数据生产流程构建并接入本项目，本仓库当前实现不声称已完成最终 50+20 数据验收。
+尚未完成：独立 verify CLI；显式配置的在线模型 backend；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义；独立 T1 的语义正判；以及题目要求的最终训练集与公开测试集验收。数据集由独立数据生产流程构建并接入本项目，本仓库当前实现不声称已完成最终 50+20 数据验收。
 
 ### 下一阶段
 
-下一阶段先把现有 Producer/Orchestrator 接入逐任务隔离的 closed-loop 批量 CLI，落盘可校验、可重放的 candidate/tool-call/model-call/repair-history artifacts；再逐项补齐全字段 `required_check` verifier 与独立语义 T1。随后接入独立流程提供的数据集，完成训练集与公开测试集的端到端 50+20 验收，再决定完整 trace、AST/数据流与更多语言增强。
+下一阶段先补独立 verify CLI 与可显式选择的在线模型 backend，并逐项补齐全字段
+`required_check` verifier 与独立语义 T1。随后接入独立流程提供的数据集，完成训练集与
+公开测试集的端到端 50+20 验收，再决定完整 trace、AST/数据流与更多语言增强。

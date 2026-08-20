@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulngym.example/schemas/closed_loop_replay.schema.json",
+  "title": "VulnGym B-v2 closed-loop replay JSONL line",
+  "description": "Structural envelope for replay sidecars, an exact formal Entry line from entries.jsonl, or a formal ValidationReport line from validation.jsonl. Cross-file digests, references, lineage, and boundedness are enforced by vulngym_agent.orchestrator.replay.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/replayEnvelope"
+    },
+    {
+      "allOf": [
+        {
+          "$ref": "entry.schema.json"
+        },
+        {
+          "properties": {
+            "verify": {
+              "const": 0
+            }
+          }
+        }
+      ]
+    },
+    {
+      "$ref": "validation.schema.json"
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "replayEnvelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "kind",
+        "record_id",
+        "task_id",
+        "input_line",
+        "correlation_id",
+        "attempt",
+        "payload",
+        "payload_sha256"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": 1
+        },
+        "kind": {
+          "enum": [
+            "state",
+            "candidate",
+            "validation",
+            "evidence",
+            "tool_call",
+            "model_call",
+            "repair_plan",
+            "deferred",
+            "input_failure",
+            "run_manifest",
+            "dataset_manifest"
+          ]
+        },
+        "record_id": {
+          "type": "string",
+          "pattern": "^REC-[0-9a-f]{64}$"
+        },
+        "task_id": {
+          "oneOf": [
+            {
+              "type": "string",
+              "pattern": "^(?:_manifest|[A-Za-z0-9][A-Za-z0-9._:-]{0,127})$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "input_line": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "correlation_id": {
+          "type": "string",
+          "pattern": "^(?:RUN|INPUT|DATASET)-[0-9a-f]{64}$"
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "payload": {
+          "type": "object",
+          "required": [
+            "record_key"
+          ],
+          "properties": {
+            "record_key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          }
+        },
+        "payload_sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    }
+  }
+}
