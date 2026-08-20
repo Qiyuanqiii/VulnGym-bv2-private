@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulngym.example/schemas/t2_task.schema.json",
+  "title": "VulnGym B-v2 real T2 task inputs",
+  "description": "Strict, path-root-free input contract for one offline T2 production attempt. All hints are untrusted until corroborated by deterministic tools.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "input_line",
+    "repo_url",
+    "package",
+    "hints"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": 1
+    },
+    "input_line": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "repo_url": {
+      "type": "string",
+      "pattern": "^https://github\\.com/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}$"
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["advisory", "references", "patches"],
+      "properties": {
+        "advisory": {
+          "$ref": "#/$defs/packagePath"
+        },
+        "references": {
+          "type": "array",
+          "maxItems": 127,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/packagePath"
+          }
+        },
+        "patches": {
+          "type": "array",
+          "maxItems": 127,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/packagePath"
+          }
+        }
+      }
+    },
+    "hints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project",
+        "fix_commits",
+        "source_paths",
+        "entry_symbols",
+        "critical_mode"
+      ],
+      "properties": {
+        "project": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^(?!\\s)(?!.*\\s$)[^\\u0000-\\u001f\\u007f]+$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fix_commits": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$"
+          }
+        },
+        "source_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/repositoryPath"
+          }
+        },
+        "entry_symbols": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z_$][A-Za-z0-9_.$:/-]{0,127}$"
+          }
+        },
+        "critical_mode": {
+          "enum": ["auto", "sink", "guard"]
+        }
+      }
+    }
+  },
+  "$defs": {
+    "packagePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024,
+      "allOf": [
+        {
+          "pattern": "^[^/\\\\:]"
+        },
+        {
+          "not": {
+            "pattern": "[\\\\:]"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "//"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[\\u0000-\\u001f\\u007f]"
+          }
+        }
+      ]
+    },
+    "repositoryPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "allOf": [
+        {
+          "pattern": "^[^/\\\\:-]"
+        },
+        {
+          "not": {
+            "pattern": "\\\\"
+          }
+        },
+        {
+          "not": {
+            "pattern": "(^|/)\\.{1,2}(/|$)"
+          }
+        },
+        {
+          "not": {
+            "pattern": "//"
+          }
+        },
+        {
+          "not": {
+            "pattern": "[\\u0000-\\u001f]"
+          }
+        }
+      ]
+    }
+  }
+}

@@ -19,10 +19,21 @@ from vulngym_agent.models import FieldValidation, ValidationReport
 
 from .budget import Budget, BudgetEvent, BudgetExceeded, Limits, Usage
 from .contracts import (
+    ProducerDraftResult,
+    ProductionDeferred,
+    ProductionDeferredDraft,
+    ProductionDraft,
     ProductionOutcome,
+    ProducerResult,
     RunTask,
     canonical_sha256,
     freeze_entry_candidate,
+)
+from .producer_context import (
+    ProducerAttemptController,
+    ProducerContextFactory,
+    ProducerExecutionContext,
+    ProducerTranscriptProjection,
 )
 from .repair_plan import RepairPlan, build_repair_plan
 
@@ -57,9 +68,14 @@ STOP_INVALID_CANDIDATE = "invalid_candidate"
 STOP_NO_REPAIRABLE_FIELDS = "no_repairable_fields"
 STOP_SIDECAR_CONFLICT = "producer_sidecar_conflict"
 STOP_UNACCOUNTED_TOOL_CALL = "unaccounted_tool_call"
+STOP_UNACCOUNTED_MODEL_CALL = "unaccounted_model_call"
+STOP_PRODUCER_DEFERRED = "producer_deferred"
 
 _UNACCOUNTED_TOOL_ERROR = (
     "producer tool-call records do not close the budget delta"
+)
+_UNACCOUNTED_MODEL_ERROR = (
+    "producer model-call records do not close the budget delta"
 )
 
 _TERMINAL_STOP_REASONS = {
@@ -74,6 +90,7 @@ _TERMINAL_STOP_REASONS = {
             STOP_VALIDATION_REGRESSION,
             STOP_BUDGET_EXHAUSTED,
             STOP_NO_REPAIRABLE_FIELDS,
+            STOP_PRODUCER_DEFERRED,
         }
     ),
     "failed": frozenset(
@@ -84,6 +101,7 @@ _TERMINAL_STOP_REASONS = {
             STOP_INVALID_CANDIDATE,
             STOP_SIDECAR_CONFLICT,
             STOP_UNACCOUNTED_TOOL_CALL,
+            STOP_UNACCOUNTED_MODEL_CALL,
         }
     ),
 }
@@ -103,10 +121,16 @@ _STOP_REASON_PHASES = {
     STOP_NO_REPAIRABLE_FIELDS: "validation",
     STOP_SIDECAR_CONFLICT: "sidecar",
     STOP_UNACCOUNTED_TOOL_CALL: "tool_accounting",
+    STOP_UNACCOUNTED_MODEL_CALL: "model_accounting",
+    STOP_PRODUCER_DEFERRED: "producer",
 }
 
 _MAX_REPAIR_ITERATIONS = 2
 _MAX_VALIDATIONS = _MAX_REPAIR_ITERATIONS + 1
+_COMPLETE_MODEL_STAGES = {
+    "generate": ("plan", "semantic_judge", "reflection"),
+    "repair": ("repair", "reflection"),
+}
 
 
 class CandidateValidator(Protocol):
@@ -132,6 +156,179 @@ def _input_line(task: RunTask) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
         return value
     return None
+
+
+def _policy_scope_for_attempt(attempt: int) -> str:
+    return "t2.initial" if attempt == 0 else f"t2.repair-{attempt}"
+
+
+def _assert_deferred_bound(
+    task: RunTask,
+    deferred: ProductionDeferred,
+    *,
+    attempt: int,
+    mode: str,
+    parent_candidate_sha256: str | None = None,
+    repair_plan_sha256: str | None = None,
+) -> None:
+    """Require a defer sidecar to identify exactly the active task row."""
+
+    if deferred.task_id != task.task_id:
+        raise ValueError("deferred task_id does not match the active task")
+    if deferred.report_id != task.report_id:
+        raise ValueError("deferred report_id does not match the active task")
+    if deferred.entry_id != task.entry_id:
+        raise ValueError("deferred entry_id does not match the active task")
+    if deferred.inputs_sha256 != canonical_sha256(task.inputs):
+        raise ValueError("deferred inputs_sha256 does not match the active task")
+    if deferred.attempt != attempt or deferred.mode != mode:
+        raise ValueError("deferred attempt/mode does not match the active round")
+    if deferred.parent_candidate_sha256 != parent_candidate_sha256:
+        raise ValueError("deferred parent digest does not match the active round")
+    if deferred.repair_plan_sha256 != repair_plan_sha256:
+        raise ValueError("deferred repair-plan digest does not match the active round")
+
+
+def _accounting_error(
+    result: ProducerResult,
+    *,
+    task: RunTask,
+    attempt: int,
+    before_event_count: int,
+    budget: Budget,
+) -> tuple[str, str] | None:
+    """Close one returned producer result against exact scoped ledger events."""
+
+    events = budget.events
+    if before_event_count < 0 or len(events) < before_event_count:
+        return STOP_PRODUCER_ERROR, "producer budget ledger was truncated"
+    delta = events[before_event_count:]
+    expected_scope = _policy_scope_for_attempt(attempt)
+    event_by_sequence = {event.sequence: event for event in delta}
+    claimed_sequences: set[int] = set()
+
+    def bind(records: tuple[Any, ...], resource: str) -> bool:
+        sequences = tuple(record.budget_event_sequence for record in records)
+        if sequences != tuple(sorted(sequences)) or len(sequences) != len(
+            set(sequences)
+        ):
+            return False
+        for record in records:
+            if (
+                record.task_id != task.task_id
+                or record.attempt != attempt
+                or record.policy_scope != expected_scope
+                or record.budget_event_sequence in claimed_sequences
+            ):
+                return False
+            event = event_by_sequence.get(record.budget_event_sequence)
+            if (
+                event is None
+                or event.resource != resource
+                or event.amount != 1
+                or event.operation != record.operation
+            ):
+                return False
+            claimed_sequences.add(record.budget_event_sequence)
+        expected_sequences = {
+            event.sequence for event in delta if event.resource == resource
+        }
+        return set(sequences) == expected_sequences
+
+    if not bind(result.tool_calls, "tool_calls"):
+        return STOP_UNACCOUNTED_TOOL_CALL, _UNACCOUNTED_TOOL_ERROR
+    if not bind(result.model_calls, "llm_calls"):
+        return STOP_UNACCOUNTED_MODEL_CALL, _UNACCOUNTED_MODEL_ERROR
+    if any(
+        event.resource not in {"tool_calls", "llm_calls"} for event in delta
+    ):
+        return STOP_PRODUCER_ERROR, "producer charged an unauthorized budget resource"
+    return None
+
+
+def _assert_controller_bound(
+    controller: object,
+    *,
+    task: RunTask,
+    attempt: int,
+    mode: str,
+) -> ProducerAttemptController:
+    """Reject substituted controllers before exposing any context to T2."""
+
+    if type(controller) is not ProducerAttemptController:
+        raise ValueError(
+            "producer_context_factory must return a ProducerAttemptController"
+        )
+    expected_scope = _policy_scope_for_attempt(attempt)
+    if (
+        controller.task_id != task.task_id
+        or controller.attempt != attempt
+        or controller.mode != mode
+        or controller.policy_scope != expected_scope
+    ):
+        raise ValueError("producer attempt controller identity/scope mismatch")
+    context = controller.producer_context
+    if type(context) is not ProducerExecutionContext or (
+        context.task_id != task.task_id
+        or context.attempt != attempt
+        or context.mode != mode
+        or context.policy_scope != expected_scope
+    ):
+        raise ValueError("producer execution context identity/scope mismatch")
+    return controller
+
+
+def _formalize_producer_draft(
+    task: RunTask,
+    draft: ProducerDraftResult,
+    projection: ProducerTranscriptProjection,
+    *,
+    attempt: int,
+    mode: str,
+    parent_candidate_sha256: str | None = None,
+    repair_plan_sha256: str | None = None,
+) -> ProducerResult:
+    """Bind a capability-free draft to one orchestrator-issued projection."""
+
+    expected_scope = _policy_scope_for_attempt(attempt)
+    if (
+        projection.task_id != task.task_id
+        or projection.attempt != attempt
+        or projection.mode != mode
+        or projection.policy_scope != expected_scope
+    ):
+        raise ValueError("producer transcript projection identity/scope mismatch")
+
+    if type(draft) is ProductionDraft:
+        expected_stages = _COMPLETE_MODEL_STAGES[mode]
+        if projection.model_stages != expected_stages:
+            raise ValueError(
+                "completed producer draft requires the full model-stage grammar"
+            )
+        return ProductionOutcome(
+            candidate=draft.candidate,
+            evidence=draft.evidence,
+            tool_calls=projection.tool_calls,
+            model_calls=projection.model_calls,
+            assumptions=draft.assumptions,
+        )
+
+    if type(draft) is ProductionDeferredDraft:
+        return ProductionDeferred.from_task(
+            task,
+            attempt=attempt,
+            mode=mode,
+            parent_candidate_sha256=parent_candidate_sha256,
+            repair_plan_sha256=repair_plan_sha256,
+            stage=draft.stage,
+            reason_code=draft.reason_code,
+            missing_information=draft.missing_information,
+            evidence=draft.evidence,
+            tool_calls=projection.tool_calls,
+            model_calls=projection.model_calls,
+        )
+
+    raise ValueError("producer must return a ProducerDraftResult")
 
 
 def _report_expected_verdict(report: ValidationReport) -> str:
@@ -275,6 +472,28 @@ def _freeze_budget_snapshot(value: Mapping[str, Any]) -> Mapping[str, Any]:
             ),
         }
     )
+
+
+def _assert_repair_budget_events(
+    budget: Mapping[str, Any], repair_iteration: int
+) -> None:
+    """Bind each repair round to one unit canonical ledger operation."""
+
+    repair_events = tuple(
+        event
+        for event in budget["events"]
+        if event["resource"] == "repair_iterations"
+    )
+    if len(repair_events) != repair_iteration:
+        raise ValueError("repair budget events must identify every repair round")
+    for expected_iteration, event in enumerate(repair_events, start=1):
+        if (
+            event["amount"] != 1
+            or event.get("operation") != f"repair:{expected_iteration}"
+        ):
+            raise ValueError(
+                "repair budget event must be a unit canonical repair operation"
+            )
 
 
 def _apply_task_identity_gate(
@@ -571,6 +790,8 @@ class TerminationSummary:
             )
         ):
             raise ValueError("termination error_sha256 must be SHA-256 or None")
+        if self.reason == STOP_PRODUCER_DEFERRED and self.error_sha256 is not None:
+            raise ValueError("producer deferral is not an error termination")
         budget_values = (
             self.budget_resource,
             self.budget_requested,
@@ -630,6 +851,7 @@ class RunState:
     production_history: tuple[ProductionSummary, ...] = ()
     production_attempts: tuple[ProductionAttemptSummary, ...] = ()
     validation_history: tuple[ValidationSummary, ...] = ()
+    deferred_sha256: str | None = None
     stop_reason: str | None = None
     termination: TerminationSummary | None = None
 
@@ -687,6 +909,22 @@ class RunState:
                 "validation_history must contain one summary per validation"
             )
         object.__setattr__(self, "validation_history", validation_history)
+
+        if self.deferred_sha256 is not None and (
+            not isinstance(self.deferred_sha256, str)
+            or len(self.deferred_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.deferred_sha256
+            )
+        ):
+            raise ValueError("deferred_sha256 must be a lower-case SHA-256 digest")
+        if (self.stop_reason == STOP_PRODUCER_DEFERRED) != (
+            self.deferred_sha256 is not None
+        ):
+            raise ValueError(
+                "producer-deferred state and deferred_sha256 must occur together"
+            )
 
         if self.candidate is None:
             if history:
@@ -862,6 +1100,7 @@ class RunState:
             raise ValueError(
                 "budget repair usage must equal the run repair iteration"
             )
+        _assert_repair_budget_events(frozen_budget, self.repair_iteration)
         if self.status in TERMINAL_STATUSES:
             history_count = len(history)
             attempt_count = len(attempts)
@@ -899,6 +1138,10 @@ class RunState:
                 and attempt_count == history_count + 1
                 and validation_count == history_count
             )
+            initial_deferred = initial_failure and self.deferred_sha256 is not None
+            repair_deferred = (
+                repair_producer_failure and self.deferred_sha256 is not None
+            )
 
             reason_matches_topology = False
             if self.stop_reason in {
@@ -921,6 +1164,8 @@ class RunState:
                 reason_matches_topology = rejected_repair
             elif self.stop_reason == STOP_PRODUCER_ERROR:
                 reason_matches_topology = initial_failure or repair_producer_failure
+            elif self.stop_reason == STOP_PRODUCER_DEFERRED:
+                reason_matches_topology = initial_deferred or repair_deferred
             elif self.stop_reason == STOP_VALIDATOR_ERROR:
                 reason_matches_topology = validator_failure
             elif self.stop_reason == STOP_INVALID_CANDIDATE:
@@ -938,6 +1183,14 @@ class RunState:
                     and isinstance(self.termination, TerminationSummary)
                     and self.termination.error_sha256
                     == canonical_sha256(_UNACCOUNTED_TOOL_ERROR)
+                )
+            elif self.stop_reason == STOP_UNACCOUNTED_MODEL_CALL:
+                reason_matches_topology = initial_failure or repair_producer_failure
+                reason_matches_topology = (
+                    reason_matches_topology
+                    and isinstance(self.termination, TerminationSummary)
+                    and self.termination.error_sha256
+                    == canonical_sha256(_UNACCOUNTED_MODEL_ERROR)
                 )
             elif self.stop_reason == STOP_BUDGET_EXHAUSTED:
                 pre_repair_budget_failure = (
@@ -994,7 +1247,10 @@ class RunState:
                 raise ValueError(
                     "provided provenance cannot contain generation charges"
                 )
-        if self.status in {"finalized", "manual_review"}:
+        if self.status in {"finalized", "manual_review"} and (
+            self.stop_reason != STOP_PRODUCER_DEFERRED
+            or self.candidate is not None
+        ):
             if (
                 self.candidate_sha256 is None
                 or not validation_history
@@ -1067,6 +1323,7 @@ class RunState:
             "production_history": [item.to_dict() for item in self.production_history],
             "production_attempts": [item.to_dict() for item in self.production_attempts],
             "validation_history": [item.to_dict() for item in self.validation_history],
+            "deferred_sha256": self.deferred_sha256,
             "stop_reason": self.stop_reason,
             "termination": (
                 None if self.termination is None else self.termination.to_dict()
@@ -1083,6 +1340,7 @@ class ClosedLoopOutcome:
     entry: Mapping[str, Any] | None = None
     report: ValidationReport | None = None
     production_outcomes: tuple[ProductionOutcome, ...] = ()
+    deferred_outcome: ProductionDeferred | None = None
     validation_outcomes: tuple[T1ValidationOutcome, ...] = ()
     repair_plans: tuple[RepairPlan, ...] = ()
     error: str | None = None
@@ -1101,6 +1359,21 @@ class ClosedLoopOutcome:
             raise ValueError("validation_outcomes contains an invalid value")
         object.__setattr__(self, "production_outcomes", productions)
         object.__setattr__(self, "validation_outcomes", validations)
+        deferred = self.deferred_outcome
+        if deferred is not None and not isinstance(deferred, ProductionDeferred):
+            raise ValueError("deferred_outcome must be ProductionDeferred or None")
+        if (deferred is not None) != (
+            self.state.stop_reason == STOP_PRODUCER_DEFERRED
+        ):
+            raise ValueError(
+                "deferred_outcome must occur exactly for producer_deferred"
+            )
+        if deferred is not None and (
+            canonical_sha256(deferred) != self.state.deferred_sha256
+        ):
+            raise ValueError(
+                "deferred sidecar does not match its persisted digest"
+            )
         plans = tuple(self.repair_plans)
         if any(not isinstance(plan, RepairPlan) for plan in plans):
             raise ValueError("repair_plans must contain RepairPlan values")
@@ -1110,6 +1383,27 @@ class ClosedLoopOutcome:
         ):
             raise ValueError("repair_plans must identify every charged repair")
         object.__setattr__(self, "repair_plans", plans)
+        if deferred is not None:
+            deferred_attempt = self.state.repair_iteration
+            deferred_mode = "generate" if deferred_attempt == 0 else "repair"
+            deferred_parent_sha256 = (
+                None
+                if deferred_attempt == 0
+                else canonical_sha256(productions[-1].candidate)
+            )
+            deferred_plan_sha256 = (
+                None
+                if deferred_attempt == 0
+                else canonical_sha256(plans[-1])
+            )
+            _assert_deferred_bound(
+                self.state.task,
+                deferred,
+                attempt=deferred_attempt,
+                mode=deferred_mode,
+                parent_candidate_sha256=deferred_parent_sha256,
+                repair_plan_sha256=deferred_plan_sha256,
+            )
         if len(validations) != len(self.state.validation_history):
             raise ValueError(
                 "validation_outcomes must resolve every validation summary"
@@ -1209,13 +1503,23 @@ class ClosedLoopOutcome:
             )
         ):
             raise ValueError("production sidecars do not match attempt summaries")
+        producer_results: tuple[ProducerResult, ...] = (
+            productions
+            if deferred is None
+            else (*productions, deferred)
+        )
         tool_ids: set[str] = set()
+        model_ids: set[str] = set()
         evidence_payloads: dict[str, str] = {}
-        for production in productions:
+        for production in producer_results:
             for tool_call in production.tool_calls:
                 if tool_call.tool_call_id in tool_ids:
                     raise ValueError("tool call IDs must be globally unique")
                 tool_ids.add(tool_call.tool_call_id)
+            for model_call in production.model_calls:
+                if model_call.model_call_id in model_ids:
+                    raise ValueError("model call IDs must be globally unique")
+                model_ids.add(model_call.model_call_id)
             for evidence in production.evidence:
                 digest = canonical_sha256(evidence)
                 prior = evidence_payloads.get(evidence.evidence_id)
@@ -1229,18 +1533,87 @@ class ClosedLoopOutcome:
                 if prior is not None and prior != digest:
                     raise ValueError("T1 evidence ID conflicts with producer evidence")
                 evidence_payloads[evidence.evidence_id] = digest
-        recorded_tool_calls = sum(len(item.tool_calls) for item in productions)
+        event_by_sequence = {
+            event["sequence"]: event for event in self.state.budget["events"]
+        }
+        _assert_repair_budget_events(
+            self.state.budget, self.state.repair_iteration
+        )
+        claimed_tool_sequences: set[int] = set()
+        claimed_model_sequences: set[int] = set()
+        claimed_all_sequences: set[int] = set()
+        for expected_attempt, producer_result in enumerate(producer_results):
+            expected_scope = _policy_scope_for_attempt(expected_attempt)
+            for records in (
+                producer_result.tool_calls,
+                producer_result.model_calls,
+            ):
+                record_sequences = tuple(
+                    item.budget_event_sequence for item in records
+                )
+                if record_sequences != tuple(sorted(record_sequences)):
+                    raise ValueError(
+                        "producer call sidecars must follow budget-event order"
+                    )
+            for record, resource, claimed in (
+                *(
+                    (item, "tool_calls", claimed_tool_sequences)
+                    for item in producer_result.tool_calls
+                ),
+                *(
+                    (item, "llm_calls", claimed_model_sequences)
+                    for item in producer_result.model_calls
+                ),
+            ):
+                if (
+                    record.task_id != self.state.task.task_id
+                    or record.attempt != expected_attempt
+                    or record.policy_scope != expected_scope
+                    or record.budget_event_sequence in claimed_all_sequences
+                ):
+                    raise ValueError(
+                        "producer call sidecar identity/scope is not replayable"
+                    )
+                event = event_by_sequence.get(record.budget_event_sequence)
+                if (
+                    event is None
+                    or event["resource"] != resource
+                    or event["amount"] != 1
+                    or event.get("operation") != record.operation
+                ):
+                    raise ValueError(
+                        "producer call sidecar does not bind its budget event"
+                    )
+                claimed.add(record.budget_event_sequence)
+                claimed_all_sequences.add(record.budget_event_sequence)
+
+        budget_tool_sequences = {
+            event["sequence"]
+            for event in self.state.budget["events"]
+            if event["resource"] == "tool_calls"
+        }
+        budget_model_sequences = {
+            event["sequence"]
+            for event in self.state.budget["events"]
+            if event["resource"] == "llm_calls"
+        }
+        incomplete_ledger_allowed = self.state.stop_reason in {
+            STOP_UNACCOUNTED_TOOL_CALL,
+            STOP_UNACCOUNTED_MODEL_CALL,
+            STOP_PRODUCER_ERROR,
+            STOP_SIDECAR_CONFLICT,
+            STOP_BUDGET_EXHAUSTED,
+        }
         if (
-            recorded_tool_calls != self.state.budget["usage"]["tool_calls"]
-            and self.state.stop_reason
-            not in {
-                STOP_UNACCOUNTED_TOOL_CALL,
-                STOP_PRODUCER_ERROR,
-                STOP_SIDECAR_CONFLICT,
-                STOP_BUDGET_EXHAUSTED,
-            }
+            claimed_tool_sequences != budget_tool_sequences
+            and not incomplete_ledger_allowed
         ):
             raise ValueError("tool-call sidecars do not close the budget ledger")
+        if (
+            claimed_model_sequences != budget_model_sequences
+            and not incomplete_ledger_allowed
+        ):
+            raise ValueError("model-call sidecars do not close the budget ledger")
         replayed_changes: list[str] = []
         for index, attempt in enumerate(self.state.production_attempts[1:], start=1):
             parent = productions[index - 1].candidate
@@ -1264,19 +1637,99 @@ class ClosedLoopOrchestrator:
         self,
         producer: "T2Producer",
         validator_factory: ValidatorFactory,
+        producer_context_factory: ProducerContextFactory,
         *,
         limits: Limits | Mapping[str, Any] | None = None,
     ) -> None:
         if not callable(validator_factory):
             raise ValueError("validator_factory must be callable")
+        if not callable(getattr(producer_context_factory, "create", None)):
+            raise ValueError(
+                "producer_context_factory must provide a callable create method"
+            )
         self._producer = producer
         self._validator_factory = validator_factory
+        self._producer_context_factory = producer_context_factory
         self._limits = (
             limits
             if isinstance(limits, Limits)
             else Limits.from_dict(limits)
             if isinstance(limits, Mapping)
             else Limits()
+        )
+
+    def _produce_attempt(
+        self,
+        task: RunTask,
+        *,
+        attempt: int,
+        mode: str,
+        plan: RepairPlan | None,
+        budget: Budget,
+        previous_entry: Mapping[str, Any] | None = None,
+    ) -> ProducerResult:
+        """Run T2 through a narrow context and authoritatively seal its calls."""
+
+        controller = _assert_controller_bound(
+            self._producer_context_factory.create(
+                task,
+                attempt=attempt,
+                mode=mode,
+                plan=plan,
+                budget=budget,
+            ),
+            task=task,
+            attempt=attempt,
+            mode=mode,
+        )
+        context = controller.producer_context
+        producer_error: Exception | None = None
+        draft: object | None = None
+        try:
+            if mode == "generate":
+                draft = self._producer.generate(task, context)
+            else:
+                if plan is None or previous_entry is None:
+                    raise ValueError("repair attempt requires a parent and RepairPlan")
+                draft = self._producer.repair(
+                    task,
+                    previous_entry,
+                    plan,
+                    context,
+                )
+        except Exception as error:
+            producer_error = error
+
+        # Finalization is deliberately retained by the orchestrator.  It also
+        # runs after a producer exception so a captured producer-facing facade
+        # cannot keep charging or issuing artifacts after the run terminates.
+        try:
+            projection = controller.finalize()
+        except Exception as finalization_error:
+            if producer_error is not None:
+                raise finalization_error from producer_error
+            raise
+        if producer_error is not None:
+            raise producer_error
+        if (
+            type(projection) is not ProducerTranscriptProjection
+            or not controller.issued(projection)
+        ):
+            raise ValueError(
+                "producer attempt controller returned an unissued projection"
+            )
+        return _formalize_producer_draft(
+            task,
+            draft,
+            projection,
+            attempt=attempt,
+            mode=mode,
+            parent_candidate_sha256=(
+                None
+                if previous_entry is None
+                else canonical_sha256(previous_entry)
+            ),
+            repair_plan_sha256=(None if plan is None else canonical_sha256(plan)),
         )
 
     def run(
@@ -1305,8 +1758,10 @@ class ClosedLoopOrchestrator:
         attempts: list[ProductionAttemptSummary] = []
         seen_evidence: dict[str, Mapping[str, Any]] = {}
         seen_tool_calls: dict[str, Mapping[str, Any]] = {}
+        seen_model_calls: dict[str, Mapping[str, Any]] = {}
         candidate: Mapping[str, Any] | None = None
         report: ValidationReport | None = None
+        deferred: ProductionDeferred | None = None
         active_plan: RepairPlan | None = None
         repair_iteration = 0
         all_changed: list[str] = []
@@ -1333,6 +1788,9 @@ class ClosedLoopOrchestrator:
                 production_history=tuple(history),
                 production_attempts=tuple(attempts),
                 validation_history=tuple(validation_history),
+                deferred_sha256=(
+                    None if deferred is None else canonical_sha256(deferred)
+                ),
                 stop_reason=reason,
                 termination=TerminationSummary(
                     reason=reason,
@@ -1358,6 +1816,7 @@ class ClosedLoopOrchestrator:
                 entry=candidate,
                 report=report,
                 production_outcomes=tuple(productions),
+                deferred_outcome=deferred,
                 validation_outcomes=tuple(validations),
                 repair_plans=tuple(repair_plans),
                 error=error,
@@ -1366,28 +1825,32 @@ class ClosedLoopOrchestrator:
 
         try:
             if initial_candidate is None:
-                before_llm = run_budget.usage.llm_calls
-                before_tools = run_budget.usage.tool_calls
-                produced = self._producer.generate(task, run_budget)
-                if not isinstance(produced, ProductionOutcome):
-                    raise ValueError("producer.generate must return ProductionOutcome")
-                if run_budget.usage.llm_calls - before_llm < 1:
-                    raise ValueError(
-                        "producer.generate must charge at least one LLM call"
-                    )
-                if run_budget.usage.tool_calls - before_tools != len(
-                    produced.tool_calls
-                ):
+                before_event_count = len(run_budget.events)
+                produced = self._produce_attempt(
+                    task,
+                    attempt=0,
+                    mode="generate",
+                    plan=None,
+                    budget=run_budget,
+                )
+                accounting_error = _accounting_error(
+                    produced,
+                    task=task,
+                    attempt=0,
+                    before_event_count=before_event_count,
+                    budget=run_budget,
+                )
+                if accounting_error is not None:
                     return finish(
                         "failed",
-                        STOP_UNACCOUNTED_TOOL_CALL,
-                        error=_UNACCOUNTED_TOOL_ERROR,
+                        accounting_error[0],
+                        error=accounting_error[1],
                     )
             elif isinstance(initial_candidate, ProductionOutcome):
-                if initial_candidate.tool_calls:
+                if initial_candidate.tool_calls or initial_candidate.model_calls:
                     raise ValueError(
-                        "a provided ProductionOutcome cannot import tool calls "
-                        "without an external budget ledger"
+                        "a provided ProductionOutcome cannot import calls without "
+                        "an external budget ledger"
                     )
                 produced = initial_candidate
             else:
@@ -1407,7 +1870,33 @@ class ClosedLoopOrchestrator:
             )
             return finish("failed", reason, error=str(error))
 
-        conflict = self._sidecar_conflict(produced, seen_evidence, seen_tool_calls)
+        if isinstance(produced, ProductionDeferred):
+            try:
+                _assert_deferred_bound(
+                    task,
+                    produced,
+                    attempt=0,
+                    mode="generate",
+                )
+            except Exception as error:
+                return finish("failed", STOP_PRODUCER_ERROR, error=str(error))
+            conflict = self._sidecar_conflict(
+                produced,
+                seen_evidence,
+                seen_tool_calls,
+                seen_model_calls,
+            )
+            if conflict is not None:
+                return finish("failed", STOP_SIDECAR_CONFLICT, error=conflict)
+            deferred = produced
+            return finish("manual_review", STOP_PRODUCER_DEFERRED)
+
+        conflict = self._sidecar_conflict(
+            produced,
+            seen_evidence,
+            seen_tool_calls,
+            seen_model_calls,
+        )
         if conflict is not None:
             return finish("failed", STOP_SIDECAR_CONFLICT, error=conflict)
         productions.append(produced)
@@ -1489,22 +1978,27 @@ class ClosedLoopOrchestrator:
                 repair_iteration = next_iteration
                 active_plan = next_plan
                 repair_plans.append(active_plan)
-                before_tools = run_budget.usage.tool_calls
-                repaired = self._producer.repair(
+                before_event_count = len(run_budget.events)
+                repaired = self._produce_attempt(
                     task,
-                    _plain_candidate(parent),
-                    active_plan,
-                    run_budget,
+                    attempt=repair_iteration,
+                    mode="repair",
+                    plan=active_plan,
+                    budget=run_budget,
+                    previous_entry=_plain_candidate(parent),
                 )
-                if not isinstance(repaired, ProductionOutcome):
-                    raise ValueError("producer.repair must return ProductionOutcome")
-                if run_budget.usage.tool_calls - before_tools != len(
-                    repaired.tool_calls
-                ):
+                accounting_error = _accounting_error(
+                    repaired,
+                    task=task,
+                    attempt=repair_iteration,
+                    before_event_count=before_event_count,
+                    budget=run_budget,
+                )
+                if accounting_error is not None:
                     return finish(
                         "failed",
-                        STOP_UNACCOUNTED_TOOL_CALL,
-                        error=_UNACCOUNTED_TOOL_ERROR,
+                        accounting_error[0],
+                        error=accounting_error[1],
                     )
             except BudgetExceeded as error:
                 return finish(
@@ -1516,8 +2010,34 @@ class ClosedLoopOrchestrator:
             except Exception as error:
                 return finish("failed", STOP_PRODUCER_ERROR, error=str(error))
 
+            if isinstance(repaired, ProductionDeferred):
+                try:
+                    _assert_deferred_bound(
+                        task,
+                        repaired,
+                        attempt=repair_iteration,
+                        mode="repair",
+                        parent_candidate_sha256=parent_digest,
+                        repair_plan_sha256=canonical_sha256(active_plan),
+                    )
+                except Exception as error:
+                    return finish("failed", STOP_PRODUCER_ERROR, error=str(error))
+                conflict = self._sidecar_conflict(
+                    repaired,
+                    seen_evidence,
+                    seen_tool_calls,
+                    seen_model_calls,
+                )
+                if conflict is not None:
+                    return finish("failed", STOP_SIDECAR_CONFLICT, error=conflict)
+                deferred = repaired
+                return finish("manual_review", STOP_PRODUCER_DEFERRED)
+
             conflict = self._sidecar_conflict(
-                repaired, seen_evidence, seen_tool_calls
+                repaired,
+                seen_evidence,
+                seen_tool_calls,
+                seen_model_calls,
             )
             if conflict is not None:
                 return finish("failed", STOP_SIDECAR_CONFLICT, error=conflict)
@@ -1641,9 +2161,10 @@ class ClosedLoopOrchestrator:
 
     @staticmethod
     def _sidecar_conflict(
-        outcome: ProductionOutcome,
+        outcome: ProducerResult,
         seen_evidence: dict[str, Mapping[str, Any]],
         seen_tool_calls: dict[str, Mapping[str, Any]],
+        seen_model_calls: dict[str, Mapping[str, Any]],
     ) -> str | None:
         for item in outcome.evidence:
             value = item.to_dict()
@@ -1657,6 +2178,12 @@ class ClosedLoopOrchestrator:
             if prior is not None:
                 return f"tool call ID {item.tool_call_id} is reused across attempts"
             seen_tool_calls[item.tool_call_id] = value
+        for item in outcome.model_calls:
+            value = item.to_dict()
+            prior = seen_model_calls.get(item.model_call_id)
+            if prior is not None:
+                return f"model call ID {item.model_call_id} is reused across attempts"
+            seen_model_calls[item.model_call_id] = value
         return None
 
     @staticmethod
@@ -1692,10 +2219,12 @@ __all__ = [
     "STOP_MAX_REPAIR_ITERATIONS",
     "STOP_NO_PROGRESS",
     "STOP_NO_REPAIRABLE_FIELDS",
+    "STOP_PRODUCER_DEFERRED",
     "STOP_PRODUCER_ERROR",
     "STOP_REPEATED_ERROR",
     "STOP_SIDECAR_CONFLICT",
     "STOP_UNACCOUNTED_TOOL_CALL",
+    "STOP_UNACCOUNTED_MODEL_CALL",
     "STOP_VALIDATED_CORRECT",
     "STOP_VALIDATION_REGRESSION",
     "STOP_VALIDATION_UNCERTAIN",

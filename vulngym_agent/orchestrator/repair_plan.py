@@ -27,6 +27,40 @@ _REPORT_ID_RE = re.compile(r"^GHSA-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$")
 _ENTRY_ID_RE = re.compile(r"^entry-[0-9]{5}$")
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
+REPAIR_TOOL_POLICY_VERSION = "repair-tools-v1"
+
+_SAFE_REPAIR_TOOLS_V1 = frozenset(
+    {
+        "caller_search",
+        "condition_extraction",
+        "dataflow_candidate_search",
+        "extract_advisory_fields",
+        "function_index",
+        "git_cat_file",
+        "git_diff",
+        "git_log",
+        "git_ls_tree",
+        "git_parents",
+        "git_show",
+        "normalized_code_compare",
+        "read_local_advisory",
+        "read_local_patch",
+        "read_local_reference",
+        "resolve_local_repo",
+        "ripgrep",
+        "route_recognition",
+        "tree_sitter",
+        "validate_schema",
+        "version_ancestry",
+    }
+)
+
+# The version is part of every serialized RepairPlan. Keeping the registry
+# versioned prevents a replay from silently gaining tools when policy evolves.
+SAFE_REPAIR_TOOL_REGISTRY: Mapping[str, frozenset[str]] = MappingProxyType(
+    {REPAIR_TOOL_POLICY_VERSION: _SAFE_REPAIR_TOOLS_V1}
+)
+
 _DEPENDENCIES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "repo_url": frozenset(
@@ -78,6 +112,282 @@ def _string_tuple(
     if not allow_empty and not items:
         raise ValueError(f"{name} must not be empty")
     return items
+
+
+@dataclass(frozen=True, slots=True)
+class FieldRepairPolicy:
+    """Static checks and maximum tool authority for one Entry field."""
+
+    required_checks: tuple[str, ...]
+    allowed_tools: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        checks = _string_tuple(
+            self.required_checks,
+            name="policy required_checks",
+            allow_empty=False,
+        )
+        tools = _string_tuple(
+            self.allowed_tools,
+            name="policy allowed_tools",
+        )
+        unknown = set(tools) - _SAFE_REPAIR_TOOLS_V1
+        if unknown:
+            raise ValueError(
+                f"policy contains unknown or unsafe tools: {sorted(unknown)}"
+            )
+        object.__setattr__(self, "required_checks", checks)
+        object.__setattr__(self, "allowed_tools", tools)
+
+
+_DEFAULT_FIELD_REPAIR_POLICY_V1: Mapping[str, FieldRepairPolicy] = (
+    MappingProxyType(
+        {
+            "commit": FieldRepairPolicy(
+                required_checks=(
+                    "advisory:fix_commits",
+                    "git:commit_exists",
+                    "git:vulnerable_parent",
+                    "patch:changed_paths",
+                ),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "read_local_patch",
+                    "resolve_local_repo",
+                    "extract_advisory_fields",
+                    "git_cat_file",
+                    "git_diff",
+                    "git_parents",
+                    "version_ancestry",
+                ),
+            ),
+            "critical_operation": FieldRepairPolicy(
+                required_checks=(
+                    "source:location_exists",
+                    "source:code_matches",
+                    "patch:changed_region",
+                    "semantic:critical_role",
+                ),
+                allowed_tools=(
+                    "read_local_patch",
+                    "resolve_local_repo",
+                    "git_show",
+                    "git_diff",
+                    "ripgrep",
+                    "tree_sitter",
+                    "function_index",
+                    "caller_search",
+                    "route_recognition",
+                    "condition_extraction",
+                    "normalized_code_compare",
+                    "dataflow_candidate_search",
+                ),
+            ),
+            "entry_id": FieldRepairPolicy(
+                required_checks=("task:entry_id", "schema:entry_id"),
+                allowed_tools=(),
+            ),
+            "entry_point": FieldRepairPolicy(
+                required_checks=(
+                    "source:location_exists",
+                    "source:code_matches",
+                    "semantic:entry_reachability",
+                ),
+                allowed_tools=(
+                    "read_local_patch",
+                    "resolve_local_repo",
+                    "git_show",
+                    "git_diff",
+                    "git_ls_tree",
+                    "git_log",
+                    "ripgrep",
+                    "tree_sitter",
+                    "function_index",
+                    "caller_search",
+                    "route_recognition",
+                    "normalized_code_compare",
+                ),
+            ),
+            "origin": FieldRepairPolicy(
+                required_checks=("schema:origin_constant",),
+                allowed_tools=(),
+            ),
+            "project": FieldRepairPolicy(
+                required_checks=("advisory:project", "repo:identity"),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "read_local_reference",
+                    "resolve_local_repo",
+                    "extract_advisory_fields",
+                ),
+            ),
+            "repo_url": FieldRepairPolicy(
+                required_checks=("advisory:repo_url", "git:remote"),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "read_local_reference",
+                    "resolve_local_repo",
+                    "extract_advisory_fields",
+                ),
+            ),
+            "report_id": FieldRepairPolicy(
+                required_checks=("task:report_id", "advisory:id"),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "extract_advisory_fields",
+                ),
+            ),
+            "source_link": FieldRepairPolicy(
+                required_checks=(
+                    "advisory:source_link",
+                    "schema:source_link_report_id",
+                ),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "extract_advisory_fields",
+                ),
+            ),
+            "trace": FieldRepairPolicy(
+                required_checks=(
+                    "source:trace_locations",
+                    "source:trace_code",
+                    "semantic:trace_continuity",
+                ),
+                allowed_tools=(
+                    "read_local_patch",
+                    "resolve_local_repo",
+                    "git_show",
+                    "git_diff",
+                    "ripgrep",
+                    "tree_sitter",
+                    "function_index",
+                    "caller_search",
+                    "route_recognition",
+                    "condition_extraction",
+                    "normalized_code_compare",
+                    "dataflow_candidate_search",
+                ),
+            ),
+            "verify": FieldRepairPolicy(
+                required_checks=("schema:verify_zero",),
+                allowed_tools=(),
+            ),
+            "vuln_category_l1": FieldRepairPolicy(
+                required_checks=(
+                    "advisory:vulnerability_type",
+                    "semantic:category_l1",
+                ),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "read_local_reference",
+                    "read_local_patch",
+                    "resolve_local_repo",
+                    "extract_advisory_fields",
+                    "git_show",
+                    "git_diff",
+                    "ripgrep",
+                    "tree_sitter",
+                    "condition_extraction",
+                    "dataflow_candidate_search",
+                ),
+            ),
+            "vuln_category_l2": FieldRepairPolicy(
+                required_checks=(
+                    "advisory:vulnerability_type",
+                    "semantic:category_l2",
+                ),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "read_local_reference",
+                    "read_local_patch",
+                    "resolve_local_repo",
+                    "extract_advisory_fields",
+                    "git_show",
+                    "git_diff",
+                    "ripgrep",
+                    "tree_sitter",
+                    "condition_extraction",
+                    "dataflow_candidate_search",
+                ),
+            ),
+            "vuln_ids": FieldRepairPolicy(
+                required_checks=("task:vuln_ids", "advisory:vuln_ids"),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "extract_advisory_fields",
+                ),
+            ),
+            "vuln_title": FieldRepairPolicy(
+                required_checks=("advisory:title", "semantic:title"),
+                allowed_tools=(
+                    "read_local_advisory",
+                    "read_local_reference",
+                    "read_local_patch",
+                    "resolve_local_repo",
+                    "extract_advisory_fields",
+                    "git_show",
+                    "git_diff",
+                    "ripgrep",
+                    "tree_sitter",
+                    "dataflow_candidate_search",
+                ),
+            ),
+        }
+    )
+)
+
+if set(_DEFAULT_FIELD_REPAIR_POLICY_V1) != _FIELD_SET:
+    raise RuntimeError("repair policy must cover every official Entry field")
+
+FIELD_REPAIR_POLICY_REGISTRY: Mapping[
+    str, Mapping[str, FieldRepairPolicy]
+] = MappingProxyType(
+    {REPAIR_TOOL_POLICY_VERSION: _DEFAULT_FIELD_REPAIR_POLICY_V1}
+)
+DEFAULT_FIELD_REPAIR_POLICY = FIELD_REPAIR_POLICY_REGISTRY[
+    REPAIR_TOOL_POLICY_VERSION
+]
+
+
+def _policy_subset(
+    values: Iterable[str],
+    *,
+    maximum: tuple[str, ...],
+    name: str,
+    allow_empty: bool,
+) -> tuple[str, ...]:
+    """Validate a caller override and return it in canonical policy order."""
+
+    selected = _string_tuple(values, name=name, allow_empty=allow_empty)
+    unauthorized = set(selected) - set(maximum)
+    if unauthorized:
+        raise ValueError(
+            f"{name} exceeds the field policy: {sorted(unauthorized)}"
+        )
+    selected_set = set(selected)
+    return tuple(item for item in maximum if item in selected_set)
+
+
+def _required_policy_checks(
+    values: Iterable[str], *, baseline: tuple[str, ...], name: str
+) -> tuple[str, ...]:
+    """Require the complete versioned check baseline in canonical order.
+
+    Tool authority may be narrowed for a particular repair, but a caller must
+    never turn a mandatory source, schema, or semantic check off.  The public
+    override remains accepted for wire compatibility only when it names the
+    exact baseline (possibly in a different order).
+    """
+
+    selected = _string_tuple(values, name=name, allow_empty=False)
+    missing = set(baseline) - set(selected)
+    extra = set(selected) - set(baseline)
+    if missing or extra:
+        raise ValueError(
+            f"{name} must preserve the complete field policy; "
+            f"missing={sorted(missing)}, extra={sorted(extra)}"
+        )
+    return baseline
 
 
 def dependent_field_closure(repair_fields: Iterable[str]) -> tuple[str, ...]:
@@ -178,6 +488,7 @@ class RepairPlan(JsonSerializable):
     repair_iteration: int
     previous_candidate_sha256: str
     validation_sha256: str
+    tool_policy_version: str
     repair_fields: tuple[str, ...]
     dependent_fields: tuple[str, ...]
     locked_fields: tuple[str, ...]
@@ -212,6 +523,13 @@ class RepairPlan(JsonSerializable):
         ):
             if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
                 raise ValueError(f"{name} must be a lower-case SHA-256 digest")
+
+        if (
+            not isinstance(self.tool_policy_version, str)
+            or self.tool_policy_version not in FIELD_REPAIR_POLICY_REGISTRY
+        ):
+            raise ValueError("tool_policy_version is unsupported")
+        field_policies = FIELD_REPAIR_POLICY_REGISTRY[self.tool_policy_version]
 
         repair = _field_order(self.repair_fields, name="repair_fields")
         dependent = _field_order(self.dependent_fields, name="dependent_fields")
@@ -260,7 +578,26 @@ class RepairPlan(JsonSerializable):
             instruction = self.instructions[field_name]
             if not isinstance(instruction, RepairInstruction):
                 raise ValueError("instructions must contain RepairInstruction values")
-            instruction_values[field_name] = instruction
+            policy = field_policies[field_name]
+            checks = _required_policy_checks(
+                instruction.required_checks,
+                baseline=policy.required_checks,
+                name=f"instructions.{field_name}.required_checks",
+            )
+            tools = _policy_subset(
+                instruction.allowed_tools,
+                maximum=policy.allowed_tools,
+                name=f"instructions.{field_name}.allowed_tools",
+                allow_empty=True,
+            )
+            instruction_values[field_name] = RepairInstruction(
+                failure_codes=instruction.failure_codes,
+                evidence=instruction.evidence,
+                evidence_refs=instruction.evidence_refs,
+                suggested_fix=instruction.suggested_fix,
+                required_checks=checks,
+                allowed_tools=tools,
+            )
 
         object.__setattr__(self, "repair_fields", repair)
         object.__setattr__(self, "dependent_fields", dependent)
@@ -304,6 +641,7 @@ class RepairPlan(JsonSerializable):
             "repair_iteration": self.repair_iteration,
             "previous_candidate_sha256": self.previous_candidate_sha256,
             "validation_sha256": self.validation_sha256,
+            "tool_policy_version": self.tool_policy_version,
             "repair_fields": list(self.repair_fields),
             "dependent_fields": list(self.dependent_fields),
             "locked_fields": list(self.locked_fields),
@@ -328,6 +666,7 @@ class RepairPlan(JsonSerializable):
         report_id: str | None = None,
         entry_id: str | None = None,
         global_actions: Iterable[str] = (),
+        tool_policy_version: str = REPAIR_TOOL_POLICY_VERSION,
     ) -> "RepairPlan":
         candidate = freeze_entry_candidate(previous_candidate)
         repair = _field_order(repair_fields, name="repair_fields")
@@ -353,6 +692,7 @@ class RepairPlan(JsonSerializable):
             repair_iteration=repair_iteration,
             previous_candidate_sha256=canonical_sha256(candidate),
             validation_sha256=canonical_sha256(validation_value),
+            tool_policy_version=tool_policy_version,
             repair_fields=repair,
             dependent_fields=dependent,
             locked_fields=locked,
@@ -374,6 +714,7 @@ class RepairPlan(JsonSerializable):
             "repair_iteration",
             "previous_candidate_sha256",
             "validation_sha256",
+            "tool_policy_version",
             "repair_fields",
             "dependent_fields",
             "locked_fields",
@@ -393,6 +734,7 @@ class RepairPlan(JsonSerializable):
             repair_iteration=value["repair_iteration"],
             previous_candidate_sha256=value["previous_candidate_sha256"],
             validation_sha256=value["validation_sha256"],
+            tool_policy_version=value["tool_policy_version"],
             repair_fields=value["repair_fields"],
             dependent_fields=value["dependent_fields"],
             locked_fields=value["locked_fields"],
@@ -434,9 +776,43 @@ def build_repair_plan(
     codes_by_field = failure_codes or {}
     checks_by_field = required_checks or {}
     tools_by_field = allowed_tools or {}
+    for name, overrides in (
+        ("required_checks", required_checks),
+        ("allowed_tools", allowed_tools),
+    ):
+        if overrides is None:
+            continue
+        if not isinstance(overrides, Mapping):
+            raise ValueError(f"{name} overrides must be an object")
+        extra_fields = set(overrides) - set(repair_fields)
+        if extra_fields:
+            raise ValueError(
+                f"{name} overrides contain non-repair fields: "
+                f"{sorted(extra_fields, key=str)}"
+            )
     instructions: dict[str, RepairInstruction] = {}
     for field_name in repair_fields:
         field_validation = validation.fields[field_name]
+        field_policy = DEFAULT_FIELD_REPAIR_POLICY[field_name]
+        selected_checks = (
+            field_policy.required_checks
+            if field_name not in checks_by_field
+            else _required_policy_checks(
+                checks_by_field[field_name],
+                baseline=field_policy.required_checks,
+                name=f"required_checks.{field_name}",
+            )
+        )
+        selected_tools = (
+            field_policy.allowed_tools
+            if field_name not in tools_by_field
+            else _policy_subset(
+                tools_by_field[field_name],
+                maximum=field_policy.allowed_tools,
+                name=f"allowed_tools.{field_name}",
+                allow_empty=True,
+            )
+        )
         instructions[field_name] = RepairInstruction(
             failure_codes=tuple(
                 codes_by_field.get(field_name, ("t1_incorrect",))
@@ -444,10 +820,10 @@ def build_repair_plan(
             evidence=field_validation.evidence,
             evidence_refs=field_validation.evidence_refs,
             suggested_fix=field_validation.suggested_fix,
-            required_checks=tuple(
-                checks_by_field.get(field_name, (f"revalidate:{field_name}",))
-            ),
-            allowed_tools=tuple(tools_by_field.get(field_name, ())),
+            required_checks=selected_checks,
+            # An empty tuple is an explicit deny-all policy, not a request to
+            # fall back to the field defaults.
+            allowed_tools=selected_tools,
         )
 
     return RepairPlan.create(
@@ -464,8 +840,13 @@ def build_repair_plan(
 
 
 __all__ = [
+    "DEFAULT_FIELD_REPAIR_POLICY",
+    "FIELD_REPAIR_POLICY_REGISTRY",
+    "FieldRepairPolicy",
+    "REPAIR_TOOL_POLICY_VERSION",
     "RepairInstruction",
     "RepairPlan",
+    "SAFE_REPAIR_TOOL_REGISTRY",
     "build_repair_plan",
     "dependent_field_closure",
 ]

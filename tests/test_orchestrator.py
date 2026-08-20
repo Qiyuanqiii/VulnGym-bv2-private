@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 import json
 from pathlib import Path
 from typing import Any, Mapping
@@ -13,10 +14,16 @@ from vulngym_agent.agents.t1_validator import T1ValidationOutcome
 from vulngym_agent.models import EvidenceItem, FieldValidation, ValidationReport
 from vulngym_agent.orchestrator.budget import Budget, Limits
 from vulngym_agent.orchestrator.contracts import (
+    ModelCallRecord,
+    ProductionDraft,
     ProductionOutcome,
     RunTask,
     ToolCallRecord,
     canonical_sha256,
+)
+from vulngym_agent.orchestrator.producer_context import (
+    ProducerContextFinalized,
+    ProducerExecutionContext,
 )
 from vulngym_agent.orchestrator.state_machine import (
     ClosedLoopOrchestrator,
@@ -35,9 +42,38 @@ from vulngym_agent.orchestrator.state_machine import (
     STOP_VALIDATION_UNCERTAIN,
     STOP_VALIDATOR_ERROR,
 )
+from tests.producer_context_support import (
+    FixedProducerContextFactory,
+    complete_model_stages,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _model_call(index: int, *, sequence: int) -> ModelCallRecord:
+    task_id = "task:closed-loop-001"
+    scope = "t2.initial" if index == 0 else f"t2.repair-{index}"
+    stage = "plan" if index == 0 else "repair"
+    call_id = f"MODEL-fake-{index}"
+    request_sha256 = canonical_sha256({"round": index, "kind": "request"})
+    return ModelCallRecord(
+        task_id=task_id,
+        attempt=index,
+        policy_scope=scope,
+        model_call_id=call_id,
+        stage=stage,
+        backend_id="test.fake",
+        model_id="test-model",
+        request_sha256=request_sha256,
+        operation=(
+            f"model:{task_id}:{index}:{scope}:{stage}:{call_id}:"
+            f"test.fake:test-model:{request_sha256}"
+        ),
+        budget_event_sequence=sequence,
+        status="success",
+        response_sha256=canonical_sha256({"round": index, "kind": "response"}),
+    )
 
 
 def _entry() -> dict[str, Any]:
@@ -150,18 +186,25 @@ class _FakeProducer:
     def _sidecar_evidence(self, index: int) -> tuple[EvidenceItem, ...]:
         return self.evidence_by_round[index] if index < len(self.evidence_by_round) else ()
 
-    def generate(self, task: RunTask, budget: Budget) -> ProductionOutcome:
+    def generate(
+        self, task: RunTask, context: ProducerExecutionContext
+    ) -> ProductionDraft:
         self.generate_calls += 1
-        budget.charge_llm_call(operation="fake.generate")
+        context.call_model("MODEL-fixture-0-plan", "plan", {"attempt": 0})
         if self.fail_generate:
             raise RuntimeError("generation failed")
         if self.charge_tools:
             for call in self.tool_calls:
-                budget.charge_tool_call(operation=f"fake.{call.tool_name}")
-        return ProductionOutcome(
+                context.call_tool(call.tool_call_id, call.tool_name, {})
+        context.call_model(
+            "MODEL-fixture-0-semantic_judge", "semantic_judge", {"attempt": 0}
+        )
+        context.call_model(
+            "MODEL-fixture-0-reflection", "reflection", {"attempt": 0}
+        )
+        return ProductionDraft(
             self.generated,
             evidence=self._sidecar_evidence(0),
-            tool_calls=self.tool_calls,
             assumptions=self.assumptions,
         )
 
@@ -170,15 +213,24 @@ class _FakeProducer:
         task: RunTask,
         previous_entry: Mapping[str, Any],
         plan: Any,
-        budget: Budget,
-    ) -> ProductionOutcome:
+        context: ProducerExecutionContext,
+    ) -> ProductionDraft:
         self.repair_calls += 1
         self.plans.append(plan)
         self.previous_entries.append(deepcopy(dict(previous_entry)))
-        budget.charge_llm_call(operation=f"fake.repair:{self.repair_calls}")
+        context.call_model(
+            f"MODEL-fixture-{context.attempt}-repair",
+            "repair",
+            {"attempt": context.attempt},
+        )
         if self.fail_repair == self.repair_calls:
             raise RuntimeError("repair failed")
-        return ProductionOutcome(
+        context.call_model(
+            f"MODEL-fixture-{context.attempt}-reflection",
+            "reflection",
+            {"attempt": context.attempt},
+        )
+        return ProductionDraft(
             self.repairs[self.repair_calls - 1],
             evidence=self._sidecar_evidence(self.repair_calls),
         )
@@ -203,8 +255,11 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
         limits: Limits | None = None,
     ) -> tuple[Any, _SequenceValidatorFactory]:
         factory = _SequenceValidatorFactory(reports, self.task)
+        context_factory = FixedProducerContextFactory(
+            call.tool_name for call in producer.tool_calls
+        )
         runner = ClosedLoopOrchestrator(
-            producer, factory, limits=limits or Limits()
+            producer, factory, context_factory, limits=limits or Limits()
         )
         return (
             runner.run(self.task, initial_candidate=initial_candidate),
@@ -226,7 +281,7 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
         self.assertNotIn("assumptions", factory.seen_candidates[0])
         self.assertEqual(set(factory.seen_candidates[0]), set(self.entry))
         self.assertEqual(result.state.validation_count, 1)
-        self.assertEqual(result.state.budget["usage"]["llm_calls"], 1)
+        self.assertEqual(result.state.budget["usage"]["llm_calls"], 3)
 
     def test_one_repair_can_finalize_and_only_authorized_field_changes(self) -> None:
         repaired = deepcopy(self.entry)
@@ -265,6 +320,69 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
         self.assertEqual(producer.repair_calls, 2)
         self.assertEqual(len(factory.created), 3)
         self.assertEqual(result.state.validation_count, 3)
+
+        wrong_operation_budget = result.state.to_dict()["budget"]
+        repair_event = next(
+            event
+            for event in wrong_operation_budget["events"]
+            if event["resource"] == "repair_iterations"
+        )
+        repair_event["operation"] = "repair:forged"
+        with self.assertRaisesRegex(ValueError, "canonical repair operation"):
+            replace(result.state, budget=wrong_operation_budget)
+
+        combined_budget = {
+            "limits": dict(result.state.budget["limits"]),
+            "usage": dict(result.state.budget["usage"]),
+            "events": [
+                {
+                    "sequence": 1,
+                    "resource": "llm_calls",
+                    "amount": 1,
+                    "usage_after": {
+                        "llm_calls": 1,
+                        "tool_calls": 0,
+                        "repair_iterations": 0,
+                    },
+                    "operation": result.state.budget["events"][0]["operation"],
+                },
+                {
+                    "sequence": 2,
+                    "resource": "repair_iterations",
+                    "amount": 2,
+                    "usage_after": {
+                        "llm_calls": 1,
+                        "tool_calls": 0,
+                        "repair_iterations": 2,
+                    },
+                    "operation": "repair:1",
+                },
+                {
+                    "sequence": 3,
+                    "resource": "llm_calls",
+                    "amount": 1,
+                    "usage_after": {
+                        "llm_calls": 2,
+                        "tool_calls": 0,
+                        "repair_iterations": 2,
+                    },
+                    "operation": result.state.budget["events"][2]["operation"],
+                },
+                {
+                    "sequence": 4,
+                    "resource": "llm_calls",
+                    "amount": 1,
+                    "usage_after": {
+                        "llm_calls": 3,
+                        "tool_calls": 0,
+                        "repair_iterations": 2,
+                    },
+                    "operation": result.state.budget["events"][4]["operation"],
+                },
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "budget|repair round"):
+            replace(result.state, budget=combined_budget)
         self.assertEqual(result.state.budget["usage"]["repair_iterations"], 2)
         self.assertEqual(len(result.repair_plans), 2)
         self.assertEqual(len(result.state.validation_history), 3)
@@ -457,12 +575,38 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
         self.assertEqual(result.state.budget["usage"]["repair_iterations"], 1)
         self.assertEqual(result.state.budget["usage"]["llm_calls"], 1)
 
+    def test_producer_exception_permanently_seals_the_context_facade(self) -> None:
+        producer = _FakeProducer(self.entry, fail_generate=True)
+        validators = _SequenceValidatorFactory([], self.task)
+        context_factory = FixedProducerContextFactory()
+        result = ClosedLoopOrchestrator(
+            producer,
+            validators,
+            context_factory,
+        ).run(self.task)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.state.stop_reason, STOP_PRODUCER_ERROR)
+        self.assertEqual(len(context_factory.created), 1)
+        captured = context_factory.created[0].producer_context
+        with self.assertRaises(ProducerContextFinalized):
+            captured.call_model(
+                "MODEL-after-failure",
+                "semantic_judge",
+                {"attempt": 0},
+            )
+        self.assertEqual(result.state.budget["usage"]["llm_calls"], 1)
+
     def test_validator_exception_is_a_structured_failed_outcome(self) -> None:
         class BrokenFactory:
             def __call__(self, task: RunTask) -> object:
                 raise RuntimeError("validator unavailable")
 
-        runner = ClosedLoopOrchestrator(_FakeProducer(self.entry), BrokenFactory())
+        runner = ClosedLoopOrchestrator(
+            _FakeProducer(self.entry),
+            BrokenFactory(),
+            FixedProducerContextFactory(),
+        )
         result = runner.run(self.task)
 
         self.assertEqual(result.status, "failed")
@@ -474,13 +618,49 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
         invalid["extra"] = "must not enter the official row"
         producer = _FakeProducer(self.entry)
         factory = _SequenceValidatorFactory([], self.task)
-        runner = ClosedLoopOrchestrator(producer, factory)
+        runner = ClosedLoopOrchestrator(
+            producer, factory, FixedProducerContextFactory()
+        )
 
         result = runner.run(self.task, initial_candidate=invalid)
 
         self.assertEqual(result.state.stop_reason, STOP_INVALID_CANDIDATE)
         self.assertEqual(result.state.validation_count, 0)
         self.assertEqual(producer.generate_calls, 0)
+
+    def test_factory_errors_and_substituted_controllers_fail_per_task(self) -> None:
+        class BrokenFactory:
+            def __init__(self, kind: str) -> None:
+                self.kind = kind
+
+            def create(self, task: RunTask, **kwargs: Any) -> Any:
+                if self.kind == "raises":
+                    raise RuntimeError("context factory unavailable")
+                if self.kind == "wrong-type":
+                    return object()
+                controller = FixedProducerContextFactory().create(
+                    task, **kwargs
+                )
+                controller.policy_scope = "t2.repair-1"
+                return controller
+
+        for kind, error_fragment in (
+            ("raises", "factory unavailable"),
+            ("wrong-type", "ProducerAttemptController"),
+            ("wrong-scope", "identity/scope"),
+        ):
+            with self.subTest(kind=kind):
+                producer = _FakeProducer(self.entry)
+                validators = _SequenceValidatorFactory([], self.task)
+                result = ClosedLoopOrchestrator(
+                    producer, validators, BrokenFactory(kind)
+                ).run(self.task)
+
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.state.stop_reason, STOP_PRODUCER_ERROR)
+                self.assertIn(error_fragment, result.error)
+                self.assertEqual(producer.generate_calls, 0)
+                self.assertEqual(validators.created, [])
 
     def test_pseudo_field_incorrect_is_not_broadened_into_repairs(self) -> None:
         producer = _FakeProducer(self.entry)
@@ -493,18 +673,18 @@ class ClosedLoopOrchestratorTests(unittest.TestCase):
         self.assertEqual(producer.repair_calls, 0)
 
     def test_unaccounted_tool_call_is_rejected(self) -> None:
-        tool_call = ToolCallRecord(
-            tool_call_id="TOOL-one",
-            tool_name="local.read",
-            arguments_sha256="1" * 64,
-            status="success",
-            result_sha256="2" * 64,
-        )
-        producer = _FakeProducer(
-            self.entry, tool_calls=(tool_call,), charge_tools=False
-        )
+        producer = _FakeProducer(self.entry)
         factory = _SequenceValidatorFactory([], self.task)
-        result = ClosedLoopOrchestrator(producer, factory).run(self.task)
+
+        class RogueFactory(FixedProducerContextFactory):
+            def create(self, task: RunTask, **kwargs: Any) -> Any:
+                budget = kwargs["budget"]
+                budget.charge_tool_call(operation="rogue:outside-context")
+                return super().create(task, **kwargs)
+
+        result = ClosedLoopOrchestrator(
+            producer, factory, RogueFactory()
+        ).run(self.task)
 
         self.assertEqual(result.state.stop_reason, STOP_UNACCOUNTED_TOOL_CALL)
         self.assertEqual(result.state.validation_count, 0)

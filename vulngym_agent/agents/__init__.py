@@ -1,6 +1,58 @@
 """Agent-level workflows built from deterministic tools and validators."""
 
-from .t1_validator import T1DeterministicValidator, T1ValidationOutcome
-from .t2_producer import T2Producer
+from typing import TYPE_CHECKING, Any
 
-__all__ = ["T1DeterministicValidator", "T1ValidationOutcome", "T2Producer"]
+from .model_runtime import (
+    AttemptModelRuntime,
+    AttemptModelTranscript,
+    ModelBlocked,
+    ModelRequest,
+    ModelResult,
+    ReplayResponse,
+    ReplayStructuredModelBackend,
+    StructuredModelBackend,
+)
+from .t1_validator import T1DeterministicValidator, T1ValidationOutcome
+from .t2_inputs import T2Hints, T2TaskInputV1
+from .t2_producer import T2Producer
+from .t2_toolbox import LOCAL_T2_TOOL_NAMES, LocalT2Toolbox
+
+if TYPE_CHECKING:
+    from .real_t2_producer import LocalStructuredT2Producer
+    from .t2_execution import LocalT2ContextFactory
+
+
+def __getattr__(name: str) -> Any:
+    """Load context-dependent T2 workflows without creating import cycles."""
+
+    if name == "LocalStructuredT2Producer":
+        from .real_t2_producer import LocalStructuredT2Producer
+
+        globals()[name] = LocalStructuredT2Producer
+        return LocalStructuredT2Producer
+    if name == "LocalT2ContextFactory":
+        from .t2_execution import LocalT2ContextFactory
+
+        globals()[name] = LocalT2ContextFactory
+        return LocalT2ContextFactory
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+__all__ = [
+    "AttemptModelRuntime",
+    "AttemptModelTranscript",
+    "ModelBlocked",
+    "ModelRequest",
+    "ModelResult",
+    "ReplayResponse",
+    "ReplayStructuredModelBackend",
+    "StructuredModelBackend",
+    "LOCAL_T2_TOOL_NAMES",
+    "LocalStructuredT2Producer",
+    "LocalT2ContextFactory",
+    "LocalT2Toolbox",
+    "T1DeterministicValidator",
+    "T1ValidationOutcome",
+    "T2Hints",
+    "T2Producer",
+    "T2TaskInputV1",
+]
