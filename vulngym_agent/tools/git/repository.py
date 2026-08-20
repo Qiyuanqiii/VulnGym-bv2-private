@@ -7,9 +7,11 @@ executes code from the inspected repository.
 
 from __future__ import annotations
 
+import hashlib
 import ntpath
 import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from difflib import unified_diff
@@ -21,10 +23,14 @@ _SHA_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
 _MAX_ERROR_CHARS: Final[int] = 2_000
 DEFAULT_MAX_BLOB_BYTES: Final[int] = 8 * 1024 * 1024
 DEFAULT_MAX_COMMIT_BYTES: Final[int] = 1024 * 1024
+DEFAULT_MAX_TREE_BYTES: Final[int] = 8 * 1024 * 1024
+DEFAULT_MAX_TREE_ENTRIES: Final[int] = 100_000
+MAX_TREE_DEPTH: Final[int] = 256
 DEFAULT_MAX_DIFF_INPUT_BYTES: Final[int] = 2 * 1024 * 1024
 DEFAULT_MAX_DIFF_OUTPUT_BYTES: Final[int] = 2 * 1024 * 1024
 DEFAULT_MAX_DIFF_LINES: Final[int] = 10_000
 MAX_DIFF_CONTEXT_LINES: Final[int] = 100
+MAX_STORAGE_SCAN_ENTRIES: Final[int] = 1_000_000
 _PROMISOR_CONFIG_RE: Final[re.Pattern[str]] = re.compile(
     r"remote\..+\.promisor\Z", re.IGNORECASE
 )
@@ -193,6 +199,12 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _is_reparse(result: os.stat_result) -> bool:
+    attributes = getattr(result, "st_file_attributes", 0)
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & flag)
+
+
 class GitRepository:
     """Read immutable facts from one local Git repository.
 
@@ -248,6 +260,18 @@ class GitRepository:
         if not resolved.is_dir():
             raise RepositoryUnavailable(f"repository path is not a directory: {resolved}")
         dot_git = resolved / ".git"
+        try:
+            dot_git_state = os.lstat(dot_git)
+        except FileNotFoundError:
+            dot_git_state = None
+        except OSError as error:
+            raise RepositoryUnavailable("repository metadata cannot be inspected") from error
+        if dot_git_state is not None and (
+            stat.S_ISLNK(dot_git_state.st_mode) or _is_reparse(dot_git_state)
+        ):
+            raise RepositoryUnavailable(
+                "repository metadata must not be a link or reparse point"
+            )
         if dot_git.is_file():
             raise RepositoryUnavailable(
                 "linked worktrees and submodules with an external gitdir are not "
@@ -262,10 +286,14 @@ class GitRepository:
             )
 
         try:
-            git_directory = (dot_git if is_worktree_root else resolved).resolve(
-                strict=True
-            )
-            object_directory = (git_directory / "objects").resolve(strict=True)
+            git_directory = (dot_git if is_worktree_root else resolved).resolve(strict=True)
+            raw_object_directory = git_directory / "objects"
+            raw_object_state = os.lstat(raw_object_directory)
+            if stat.S_ISLNK(raw_object_state.st_mode) or _is_reparse(raw_object_state):
+                raise RepositoryUnavailable(
+                    "Git object storage must not be a link or reparse point"
+                )
+            object_directory = raw_object_directory.resolve(strict=True)
         except (OSError, RuntimeError) as error:
             raise RepositoryUnavailable(
                 "repository metadata/object directory cannot be resolved"
@@ -300,6 +328,15 @@ class GitRepository:
         self.path = resolved
         self.git_directory = git_directory
         self.object_directory = object_directory
+        try:
+            git_state = os.stat(git_directory)
+            object_state = os.stat(object_directory)
+        except OSError as error:
+            raise RepositoryUnavailable(
+                "repository metadata/object storage cannot be inspected"
+            ) from error
+        self._git_directory_identity = (git_state.st_dev, git_state.st_ino)
+        self._object_directory_identity = (object_state.st_dev, object_state.st_ino)
         self.timeout_seconds = float(timeout_seconds)
         self.max_blob_bytes = max_blob_bytes
         self.max_diff_input_bytes = max_diff_input_bytes
@@ -457,6 +494,324 @@ class GitRepository:
                     "partial/promisor repositories are not accepted by the "
                     "offline read-only fact gate"
                 )
+
+    def assert_storage_safe(self) -> None:
+        """Re-check the local object-store containment and redirection policy.
+
+        Snapshot preparation calls this both before and after a raw object
+        traversal.  It detects metadata-directory replacement and storage
+        redirections introduced after this wrapper was constructed.
+        """
+
+        for path, expected in (
+            (self.git_directory, self._git_directory_identity),
+            (self.object_directory, self._object_directory_identity),
+        ):
+            try:
+                state = os.lstat(path)
+            except OSError as error:
+                raise RepositoryUnavailable(
+                    "repository metadata/object storage changed"
+                ) from error
+            if (
+                not stat.S_ISDIR(state.st_mode)
+                or stat.S_ISLNK(state.st_mode)
+                or _is_reparse(state)
+                or (state.st_dev, state.st_ino) != expected
+            ):
+                raise RepositoryUnavailable(
+                    "repository metadata/object storage changed"
+                )
+        markers = (
+            self.git_directory / "commondir",
+            self.object_directory / "info" / "alternates",
+            self.object_directory / "info" / "http-alternates",
+            self.git_directory / "info" / "grafts",
+        )
+        for marker in markers:
+            try:
+                os.lstat(marker)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                raise RepositoryUnavailable(
+                    "Git storage redirection state cannot be inspected"
+                ) from error
+            raise RepositoryUnavailable(
+                "Git storage redirection appeared after repository validation"
+            )
+        pending = [self.object_directory]
+        scanned = 0
+        while pending:
+            directory = pending.pop()
+            try:
+                with os.scandir(directory) as iterator:
+                    for entry in iterator:
+                        scanned += 1
+                        if scanned > MAX_STORAGE_SCAN_ENTRIES:
+                            raise RepositoryUnavailable(
+                                "Git object storage exceeds the metadata scan limit"
+                            )
+                        try:
+                            # Direct lstat is required on Windows: directory
+                            # enumeration may report a zero/one link count for
+                            # a hard-linked file even when the path itself has
+                            # multiple names.
+                            state = os.lstat(entry.path)
+                        except OSError as error:
+                            raise RepositoryUnavailable(
+                                "Git object storage changed during scanning"
+                            ) from error
+                        if entry.is_symlink() or _is_reparse(state):
+                            raise RepositoryUnavailable(
+                                "Git object storage must not contain links or reparse points"
+                            )
+                        if stat.S_ISDIR(state.st_mode):
+                            pending.append(Path(entry.path))
+                        elif not stat.S_ISREG(state.st_mode) or state.st_nlink > 1:
+                            raise RepositoryUnavailable(
+                                "Git object storage contains an unsafe object file"
+                            )
+            except OSError as error:
+                raise RepositoryUnavailable(
+                    "Git object storage cannot be scanned safely"
+                ) from error
+        self._assert_history_storage()
+
+    def _read_object_bytes(
+        self,
+        object_id: object,
+        *,
+        expected_type: str,
+        max_bytes: int,
+        operation: str,
+    ) -> bytes:
+        object_id = validate_commit_sha(object_id)
+        if expected_type not in {"blob", "commit", "tree"}:
+            raise ValueError("expected_type is not a supported raw Git object type")
+        if (
+            isinstance(max_bytes, bool)
+            or not isinstance(max_bytes, int)
+            or max_bytes < 0
+        ):
+            raise ValueError("max_bytes must be a non-negative integer")
+        object_type = self.object_type(object_id)
+        if object_type != expected_type:
+            detail = (
+                "object is absent"
+                if object_type is None
+                else f"object has type {object_type!r}"
+            )
+            raise GitCommandError(
+                operation,
+                128,
+                f"{object_id} is not a {expected_type}: {detail}",
+            )
+        size_result = self._run(
+            ("cat-file", "-s", object_id), operation=operation
+        )
+        try:
+            object_size = int(size_result.stdout.decode("ascii").strip())
+        except (UnicodeDecodeError, ValueError) as error:
+            raise GitCommandError(
+                operation, 0, "git returned an invalid object size"
+            ) from error
+        if object_size < 0:
+            raise GitCommandError(operation, 0, "git returned a negative object size")
+        if object_size > max_bytes:
+            raise GitBlobTooLarge(
+                f"{expected_type} object is {object_size} bytes; limit is {max_bytes}"
+            )
+        value_result = self._run(
+            ("cat-file", expected_type, object_id), operation=operation
+        )
+        data = value_result.stdout
+        if len(data) != object_size:
+            raise GitCommandError(operation, 0, "Git object size changed while reading")
+        header = f"{expected_type} {len(data)}\0".encode("ascii")
+        actual_id = hashlib.sha1(header + data, usedforsecurity=False).hexdigest()
+        if actual_id != object_id:
+            raise GitCommandError(
+                operation, 0, "Git object content does not match its object ID"
+            )
+        return data
+
+    def commit_tree(self, commit: object) -> str:
+        """Return the unique root-tree ID from one exact raw commit object."""
+
+        canonical_commit = self._require_commit(commit, operation="cat-file")
+        data = self._read_object_bytes(
+            canonical_commit,
+            expected_type="commit",
+            max_bytes=DEFAULT_MAX_COMMIT_BYTES,
+            operation="cat-file",
+        )
+        header, separator, _ = data.partition(b"\n\n")
+        if not separator:
+            raise GitCommandError(
+                "cat-file", 0, "commit object has no header terminator"
+            )
+        tree_lines = [
+            line[5:] for line in header.splitlines() if line.startswith(b"tree ")
+        ]
+        if len(tree_lines) != 1:
+            raise GitCommandError(
+                "cat-file", 0, "commit object must contain exactly one tree header"
+            )
+        try:
+            return validate_commit_sha(tree_lines[0].decode("ascii"))
+        except (UnicodeDecodeError, InvalidCommitSha) as error:
+            raise GitCommandError(
+                "cat-file", 0, "commit object contains an invalid tree ID"
+            ) from error
+
+    @staticmethod
+    def _parse_raw_tree(data: bytes) -> tuple[tuple[str, str, str, bytes], ...]:
+        records: list[tuple[str, str, str, bytes]] = []
+        seen_names: set[bytes] = set()
+        position = 0
+        while position < len(data):
+            space = data.find(b" ", position)
+            nul = data.find(b"\0", space + 1) if space >= 0 else -1
+            if space <= position or nul <= space + 1 or nul + 21 > len(data):
+                raise GitCommandError("cat-file", 0, "Git tree object is malformed")
+            raw_mode = data[position:space]
+            raw_name = data[space + 1 : nul]
+            raw_object_id = data[nul + 1 : nul + 21]
+            position = nul + 21
+            try:
+                mode = raw_mode.decode("ascii")
+            except UnicodeDecodeError as error:
+                raise GitCommandError(
+                    "cat-file", 0, "Git tree mode is not ASCII"
+                ) from error
+            if mode not in {"40000", "100644", "100755", "120000", "160000"}:
+                raise GitCommandError("cat-file", 0, "Git tree mode is unsupported")
+            if not raw_name or b"/" in raw_name or raw_name in seen_names:
+                raise GitCommandError("cat-file", 0, "Git tree entry name is invalid")
+            seen_names.add(raw_name)
+            object_type = (
+                "tree"
+                if mode == "40000"
+                else "commit"
+                if mode == "160000"
+                else "blob"
+            )
+            records.append((mode, object_type, raw_object_id.hex(), raw_name))
+        return tuple(records)
+
+    def list_tree_entries(
+        self,
+        commit: object,
+        *,
+        max_entries: int = DEFAULT_MAX_TREE_ENTRIES,
+        max_output_bytes: int = DEFAULT_MAX_TREE_BYTES,
+        include_trees: bool = False,
+    ) -> tuple[TreeEntry, ...]:
+        """Return bounded entries from one exact commit's raw tree.
+
+        Tree objects are read one at a time after a size check, so an enormous
+        ``ls-tree`` response is never accumulated.  ``max_entries`` counts
+        both directory and leaf nodes even when directory entries are omitted
+        from the result.  Reused tree objects are parsed once but every path
+        occurrence still consumes that node budget.
+        """
+
+        for name, value in (
+            ("max_entries", max_entries),
+            ("max_output_bytes", max_output_bytes),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(include_trees, bool):
+            raise ValueError("include_trees must be a boolean")
+        root_tree = self.commit_tree(commit)
+        remaining = max_output_bytes
+        output: list[TreeEntry] = []
+        seen_paths: set[bytes] = set()
+        tree_cache: dict[str, tuple[tuple[str, str, str, bytes], ...]] = {}
+        entry_count = 0
+
+        def walk(
+            tree_id: str,
+            prefix: bytes,
+            depth: int,
+            ancestors: frozenset[str],
+        ) -> None:
+            nonlocal remaining, entry_count
+            if depth > MAX_TREE_DEPTH:
+                raise GitBlobTooLarge(
+                    f"Git tree nesting exceeds the limit of {MAX_TREE_DEPTH}"
+                )
+            if tree_id in ancestors:
+                raise GitCommandError("cat-file", 0, "Git tree contains a cycle")
+            records = tree_cache.get(tree_id)
+            if records is None:
+                data = self._read_object_bytes(
+                    tree_id,
+                    expected_type="tree",
+                    max_bytes=remaining,
+                    operation="cat-file",
+                )
+                remaining -= len(data)
+                records = self._parse_raw_tree(data)
+                tree_cache[tree_id] = records
+            next_ancestors = ancestors | {tree_id}
+            for mode, object_type, object_id, name in records:
+                entry_count += 1
+                if entry_count > max_entries:
+                    raise GitBlobTooLarge(
+                        f"Git tree contains more than {max_entries} entries"
+                    )
+                path_bytes = prefix + name
+                if path_bytes in seen_paths:
+                    raise GitCommandError(
+                        "cat-file", 0, "Git tree contains a duplicate path"
+                    )
+                seen_paths.add(path_bytes)
+                if object_type == "tree":
+                    if include_trees:
+                        output.append(
+                            TreeEntry(
+                                mode=mode,
+                                object_type=object_type,
+                                object_id=object_id,
+                                path=path_bytes.decode(
+                                    "utf-8", errors="surrogateescape"
+                                ),
+                            )
+                        )
+                    walk(
+                        object_id,
+                        path_bytes + b"/",
+                        depth + 1,
+                        next_ancestors,
+                    )
+                    continue
+                output.append(
+                    TreeEntry(
+                        mode=mode,
+                        object_type=object_type,
+                        object_id=object_id,
+                        path=path_bytes.decode("utf-8", errors="surrogateescape"),
+                    )
+                )
+
+        walk(root_tree, b"", 0, frozenset())
+        return tuple(output)
+
+    def read_blob_object(
+        self, object_id: object, *, max_bytes: int | None = None
+    ) -> bytes:
+        """Read and hash-verify one exact blob object by its canonical ID."""
+
+        limit = self.max_blob_bytes if max_bytes is None else max_bytes
+        return self._read_object_bytes(
+            object_id,
+            expected_type="blob",
+            max_bytes=limit,
+            operation="cat-file",
+        )
 
     def object_type(self, object_id: str) -> str | None:
         """Return the exact object's Git type, or ``None`` if it is absent."""
