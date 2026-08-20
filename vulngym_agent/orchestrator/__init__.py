@@ -49,7 +49,10 @@ from .replay import (
     ReplayLimits,
     ReplayManifest,
     ReplayRecord,
+    VerifiedFormalEntries,
+    VerifiedTaskEntries,
     read_closed_loop_artifacts,
+    read_verified_formal_entries,
     verify_closed_loop_artifacts,
     write_closed_loop_artifacts,
 )
@@ -107,6 +110,8 @@ __all__ = [
     "ReplayLimits",
     "ReplayManifest",
     "ReplayRecord",
+    "VerifiedFormalEntries",
+    "VerifiedTaskEntries",
     "RunTask",
     "RunState",
     "STOP_PRODUCER_DEFERRED",
@@ -122,6 +127,7 @@ __all__ = [
     "canonical_sha256",
     "dependent_field_closure",
     "read_closed_loop_artifacts",
+    "read_verified_formal_entries",
     "verify_closed_loop_artifacts",
     "write_closed_loop_artifacts",
 ]
