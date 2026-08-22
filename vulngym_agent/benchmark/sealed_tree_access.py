@@ -1,0 +1,1192 @@
+"""Trusted, bounded read access to an authenticated sealed source tree.
+
+The discovery agents receive :class:`BoundSealedTree`, never a filesystem
+path, an attestation key, or the authenticated control directory.  Binding is
+performed only after the complete sealed-snapshot verifier succeeds and the
+snapshot-native D0 task identifiers match exactly.
+
+Every successful read is constrained to one exact manifest member, checks the
+original directory and file identities, performs a stable descriptor read,
+and revalidates both SHA-256 and the raw Git blob object id.  ``finalize()``
+performs one more complete authenticated verification and permanently closes
+the capability.
+"""
+
+from __future__ import annotations
+
+import ctypes
+from ctypes import wintypes
+from dataclasses import dataclass
+import hashlib
+import os
+from pathlib import Path
+import stat
+import threading
+from typing import Callable, Final, Mapping
+
+from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskInputV1
+from vulngym_agent.benchmark.sealed_snapshot import (
+    DEFAULT_SNAPSHOT_POLICY,
+    SealedSnapshotError,
+    SealedSnapshotFile,
+    SnapshotPolicy,
+    VerifiedSealedSnapshot,
+    _windows_assert_no_named_streams,
+    verify_sealed_snapshot,
+)
+
+
+SEALED_TREE_ACCESS_VERSION: Final[str] = "source-discovery-sealed-tree-v1"
+
+_HARD_MAX_INVENTORY_CALLS: Final[int] = 64
+_HARD_MAX_READ_CALLS: Final[int] = 8_192
+_HARD_MAX_BYTES_PER_READ: Final[int] = 16 * 1024 * 1024
+_HARD_MAX_TOTAL_BYTES_READ: Final[int] = 256 * 1024 * 1024
+_READ_CHUNK_BYTES: Final[int] = 1024 * 1024
+_MIN_ATTESTATION_KEY_BYTES: Final[int] = 16
+_MAX_ATTESTATION_KEY_BYTES: Final[int] = 4_096
+
+_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "access_finalized",
+        "invalid_argument",
+        "invalid_binding",
+        "source_changed",
+        "source_limit_exceeded",
+        "source_not_found",
+        "snapshot_verification_failed",
+        "unsafe_source_path",
+    }
+)
+
+
+class SealedTreeAccessError(RuntimeError):
+    """Stable, host-path-free failure at the sealed-tree capability boundary."""
+
+    def __init__(self, code: str, message: str) -> None:
+        if not isinstance(code, str) or code not in _ERROR_CODES:
+            raise ValueError("unknown sealed-tree access error code")
+        self.code = code
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class SealedTreeAccessLimits:
+    """Bounded resource policy for one source-discovery capability."""
+
+    max_inventory_calls: int = 8
+    max_read_calls: int = 4_096
+    max_bytes_per_read: int = 4 * 1024 * 1024
+    max_total_bytes_read: int = 64 * 1024 * 1024
+    version: str = SEALED_TREE_ACCESS_VERSION
+
+    def __post_init__(self) -> None:
+        limits = (
+            ("max_inventory_calls", self.max_inventory_calls, _HARD_MAX_INVENTORY_CALLS),
+            ("max_read_calls", self.max_read_calls, _HARD_MAX_READ_CALLS),
+            (
+                "max_bytes_per_read",
+                self.max_bytes_per_read,
+                _HARD_MAX_BYTES_PER_READ,
+            ),
+            (
+                "max_total_bytes_read",
+                self.max_total_bytes_read,
+                _HARD_MAX_TOTAL_BYTES_READ,
+            ),
+        )
+        if self.version != SEALED_TREE_ACCESS_VERSION:
+            raise ValueError("sealed-tree access policy version is invalid")
+        for name, value, maximum in limits:
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise ValueError(f"{name} must be within its fixed hard limit")
+        if self.max_bytes_per_read > self.max_total_bytes_read:
+            raise ValueError("per-read bytes must not exceed aggregate bytes")
+
+
+DEFAULT_SEALED_TREE_ACCESS_LIMITS: Final[SealedTreeAccessLimits] = (
+    SealedTreeAccessLimits()
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SealedTreeFile:
+    """One path-free-of-host-state file record from the verified manifest."""
+
+    path: str
+    git_mode: str
+    blob_oid: str
+    size: int
+    sha256: str
+
+    @classmethod
+    def _from_verified(cls, value: SealedSnapshotFile) -> "SealedTreeFile":
+        return cls(
+            path=value.path,
+            git_mode=value.git_mode,
+            blob_oid=value.blob_oid,
+            size=value.size,
+            sha256=value.sha256,
+        )
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "blob_oid": self.blob_oid,
+            "git_mode": self.git_mode,
+            "path": self.path,
+            "sha256": self.sha256,
+            "size": self.size,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SourceReadUsage:
+    """One immutable, content-bound successful read receipt."""
+
+    sequence: int
+    path: str
+    bytes_read: int
+    sha256: str
+    blob_oid: str
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "blob_oid": self.blob_oid,
+            "bytes_read": self.bytes_read,
+            "path": self.path,
+            "sequence": self.sequence,
+            "sha256": self.sha256,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SourceUsageLedger:
+    """Bounded snapshot of source access, suitable for trusted artifacts."""
+
+    task_id: str
+    snapshot_id: str
+    inventory_calls: int
+    read_calls: int
+    bytes_read: int
+    reads: tuple[SourceReadUsage, ...]
+    finalized: bool
+    verification_succeeded: bool
+    access_version: str = SEALED_TREE_ACCESS_VERSION
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "access_version": self.access_version,
+            "bytes_read": self.bytes_read,
+            "finalized": self.finalized,
+            "inventory_calls": self.inventory_calls,
+            "read_calls": self.read_calls,
+            "reads": [item.to_dict() for item in self.reads],
+            "snapshot_id": self.snapshot_id,
+            "task_id": self.task_id,
+            "verification_succeeded": self.verification_succeeded,
+        }
+
+
+_DirectoryIdentity = tuple[int, int]
+_FileIdentity = tuple[int, int, int, int | None, int | None]
+
+
+def _is_reparse(result: os.stat_result) -> bool:
+    attributes = getattr(result, "st_file_attributes", 0)
+    flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return bool(attributes & flag)
+
+
+def _safe_directory(path: Path) -> tuple[os.stat_result, _DirectoryIdentity]:
+    try:
+        result = os.lstat(path)
+    except OSError:
+        raise SealedTreeAccessError(
+            "source_changed", "a trusted source directory is unavailable"
+        ) from None
+    if (
+        not stat.S_ISDIR(result.st_mode)
+        or stat.S_ISLNK(result.st_mode)
+        or _is_reparse(result)
+    ):
+        raise SealedTreeAccessError(
+            "unsafe_source_path", "trusted source paths must remain plain directories"
+        )
+    return result, (result.st_dev, result.st_ino)
+
+
+def _file_identity(result: os.stat_result) -> _FileIdentity:
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_size,
+        getattr(result, "st_mtime_ns", None),
+        getattr(result, "st_ctime_ns", None),
+    )
+
+
+def _safe_regular(path: Path) -> tuple[os.stat_result, _FileIdentity]:
+    try:
+        result = os.lstat(path)
+    except OSError:
+        raise SealedTreeAccessError(
+            "source_changed", "a trusted source file is unavailable"
+        ) from None
+    if (
+        not stat.S_ISREG(result.st_mode)
+        or stat.S_ISLNK(result.st_mode)
+        or _is_reparse(result)
+        or result.st_nlink > 1
+    ):
+        raise SealedTreeAccessError(
+            "unsafe_source_path", "trusted source entries must remain plain files"
+        )
+    return result, _file_identity(result)
+
+
+def _root_chain(path: Path) -> tuple[Path, ...]:
+    return tuple(reversed(path.parents)) + (path,)
+
+
+def _assert_safe_open_directory(
+    result: os.stat_result,
+    *,
+    expected: _DirectoryIdentity,
+) -> None:
+    if (
+        not stat.S_ISDIR(result.st_mode)
+        or stat.S_ISLNK(result.st_mode)
+        or _is_reparse(result)
+        or (result.st_dev, result.st_ino) != expected
+    ):
+        raise SealedTreeAccessError(
+            "source_changed", "an opened source directory identity did not match"
+        )
+
+
+def _assert_safe_open_file(
+    result: os.stat_result,
+    *,
+    expected: _FileIdentity,
+    expected_size: int,
+) -> None:
+    if (
+        not stat.S_ISREG(result.st_mode)
+        or stat.S_ISLNK(result.st_mode)
+        or _is_reparse(result)
+        or result.st_nlink > 1
+        or (result.st_dev, result.st_ino) != expected[:2]
+        or result.st_size != expected_size
+    ):
+        raise SealedTreeAccessError(
+            "source_changed", "an opened source file identity did not match"
+        )
+
+
+def _posix_open_tree_descriptor(
+    tree: Path,
+    *,
+    expected: _DirectoryIdentity,
+) -> int:
+    if (
+        os.name == "nt"
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+        or os.open not in os.supports_dir_fd
+    ):
+        raise SealedTreeAccessError(
+            "unsafe_source_path",
+            "this platform cannot provide handle-relative source traversal",
+        )
+    flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(tree, flags)
+        _assert_safe_open_directory(os.fstat(descriptor), expected=expected)
+        return descriptor
+    except SealedTreeAccessError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except OSError:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise SealedTreeAccessError(
+            "source_changed", "the authenticated source root could not be pinned"
+        ) from None
+
+
+def _posix_open_relative_file(
+    tree_descriptor: int,
+    parts: tuple[str, ...],
+    *,
+    directories: Mapping[str, _DirectoryIdentity],
+    expected_file: _FileIdentity,
+    expected_size: int,
+) -> tuple[int, os.stat_result]:
+    directory_flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    current: int | None = None
+    result_descriptor: int | None = None
+    try:
+        current = os.dup(tree_descriptor)
+        _assert_safe_open_directory(os.fstat(current), expected=directories[""])
+        for depth, component in enumerate(parts[:-1], start=1):
+            next_descriptor = os.open(component, directory_flags, dir_fd=current)
+            try:
+                relative = "/".join(parts[:depth])
+                _assert_safe_open_directory(
+                    os.fstat(next_descriptor), expected=directories[relative]
+                )
+            except BaseException:
+                os.close(next_descriptor)
+                raise
+            os.close(current)
+            current = next_descriptor
+        result_descriptor = os.open(parts[-1], file_flags, dir_fd=current)
+        opened = os.fstat(result_descriptor)
+        _assert_safe_open_file(
+            opened, expected=expected_file, expected_size=expected_size
+        )
+        return result_descriptor, opened
+    except SealedTreeAccessError:
+        if result_descriptor is not None:
+            os.close(result_descriptor)
+        raise
+    except OSError:
+        if result_descriptor is not None:
+            try:
+                os.close(result_descriptor)
+            except OSError:
+                pass
+        raise SealedTreeAccessError(
+            "source_changed", "handle-relative source traversal failed"
+        ) from None
+    finally:
+        if current is not None:
+            try:
+                os.close(current)
+            except OSError:
+                pass
+
+
+def _windows_normalized_final_path(handle: int) -> str:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_final = kernel32.GetFinalPathNameByHandleW
+    get_final.argtypes = [
+        wintypes.HANDLE,
+        wintypes.LPWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+    ]
+    get_final.restype = wintypes.DWORD
+    required = get_final(handle, None, 0, 0)
+    if required < 1:
+        raise OSError(ctypes.get_last_error(), "final source identity is unavailable")
+    buffer = ctypes.create_unicode_buffer(required + 1)
+    written = get_final(handle, buffer, len(buffer), 0)
+    if written < 1 or written >= len(buffer):
+        raise OSError(ctypes.get_last_error(), "final source identity is unavailable")
+    value = buffer.value
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return os.path.normcase(os.path.normpath(value))
+
+
+def _windows_open_source_handle(path: Path, *, read_data: bool) -> tuple[int, str]:
+    if os.name != "nt":
+        raise OSError("Windows source handles are unavailable")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    desired_access = 0x0080 | (0x80000000 if read_data else 0)
+    handle = create_file(
+        str(path),
+        desired_access,
+        0x00000001 | 0x00000002 | 0x00000004,
+        None,
+        3,
+        0x00200000 | (0x08000000 if read_data else 0),
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle in {None, 0, invalid_handle}:
+        raise OSError(ctypes.get_last_error(), "source handle could not be opened")
+    numeric_handle = int(handle)
+    try:
+        final_path = _windows_normalized_final_path(numeric_handle)
+        return numeric_handle, final_path
+    except BaseException:
+        _windows_close_handle(numeric_handle)
+        raise
+
+
+def _windows_close_handle(handle: int) -> None:
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle(handle)
+
+
+def _windows_expected_final_path(
+    path: Path,
+    *,
+    expected_file: _FileIdentity,
+    expected_size: int,
+) -> str:
+    import msvcrt
+
+    handle: int | None = None
+    descriptor: int | None = None
+    try:
+        handle, final_path = _windows_open_source_handle(path, read_data=True)
+        descriptor = msvcrt.open_osfhandle(
+            handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+        handle = None
+        _assert_safe_open_file(
+            os.fstat(descriptor),
+            expected=expected_file,
+            expected_size=expected_size,
+        )
+        return final_path
+    except SealedTreeAccessError:
+        raise
+    except (OSError, ValueError):
+        raise SealedTreeAccessError(
+            "source_changed", "a source file final identity is unavailable"
+        ) from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if handle is not None:
+            _windows_close_handle(handle)
+
+
+def _windows_open_source_descriptor(
+    path: Path,
+    *,
+    expected_final_path: str,
+    expected_file: _FileIdentity,
+    expected_size: int,
+) -> tuple[int, os.stat_result]:
+    import msvcrt
+
+    handle: int | None = None
+    descriptor: int | None = None
+    try:
+        handle, final_path = _windows_open_source_handle(path, read_data=True)
+        if final_path != expected_final_path:
+            raise SealedTreeAccessError(
+                "source_changed", "a source file resolved outside its sealed identity"
+            )
+        descriptor = msvcrt.open_osfhandle(
+            handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
+        handle = None  # ownership transferred to the CRT descriptor
+        opened = os.fstat(descriptor)
+        _assert_safe_open_file(
+            opened, expected=expected_file, expected_size=expected_size
+        )
+        return descriptor, opened
+    except SealedTreeAccessError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except (OSError, ValueError):
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise SealedTreeAccessError(
+            "source_changed", "a trusted Windows source handle could not be opened"
+        ) from None
+    finally:
+        if handle is not None:
+            _windows_close_handle(handle)
+
+
+def _assert_no_named_streams(path: Path) -> None:
+    if os.name != "nt":
+        return
+    try:
+        _windows_assert_no_named_streams(path)
+    except (SealedSnapshotError, OSError):
+        raise SealedTreeAccessError(
+            "unsafe_source_path", "trusted source paths must not contain named streams"
+        ) from None
+
+
+def _read_stable_descriptor(
+    descriptor: int,
+    opened: os.stat_result,
+    record: SealedTreeFile,
+) -> bytes:
+    chunks: list[bytes] = []
+    remaining = record.size + 1
+    try:
+        while remaining:
+            chunk = os.read(descriptor, min(_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        finished = os.fstat(descriptor)
+    except OSError:
+        raise SealedTreeAccessError(
+            "source_changed", "a trusted source file could not be read"
+        ) from None
+    if _file_identity(finished) != _file_identity(opened) or len(data) != opened.st_size:
+        raise SealedTreeAccessError(
+            "source_changed", "a trusted source file changed while reading"
+        )
+    return data
+
+
+def _capture_identity_state(
+    tree: Path,
+    files: tuple[SealedTreeFile, ...],
+) -> tuple[
+    tuple[tuple[Path, _DirectoryIdentity], ...],
+    dict[str, _DirectoryIdentity],
+    dict[str, _FileIdentity],
+]:
+    base_chain: list[tuple[Path, _DirectoryIdentity]] = []
+    for component in _root_chain(tree):
+        _, identity = _safe_directory(component)
+        base_chain.append((component, identity))
+
+    directories: dict[str, _DirectoryIdentity] = {"": base_chain[-1][1]}
+    file_identities: dict[str, _FileIdentity] = {}
+    for record in files:
+        parts = record.path.split("/")
+        for depth in range(1, len(parts)):
+            relative = "/".join(parts[:depth])
+            if relative in directories:
+                continue
+            _, identity = _safe_directory(tree.joinpath(*parts[:depth]))
+            directories[relative] = identity
+        _, identity = _safe_regular(tree.joinpath(*parts))
+        file_identities[record.path] = identity
+    return tuple(base_chain), directories, file_identities
+
+
+def _assert_identity_state(
+    tree: Path,
+    files: tuple[SealedTreeFile, ...],
+    base_chain: tuple[tuple[Path, _DirectoryIdentity], ...],
+    directories: Mapping[str, _DirectoryIdentity],
+    file_identities: Mapping[str, _FileIdentity],
+) -> None:
+    for component, expected in base_chain:
+        _, current = _safe_directory(component)
+        if current != expected:
+            raise SealedTreeAccessError(
+                "source_changed", "a trusted source directory identity changed"
+            )
+    for relative, expected in directories.items():
+        if not relative:
+            continue
+        _, current = _safe_directory(tree.joinpath(*relative.split("/")))
+        if current != expected:
+            raise SealedTreeAccessError(
+                "source_changed", "a trusted source directory identity changed"
+            )
+    for record in files:
+        _, current = _safe_regular(tree.joinpath(*record.path.split("/")))
+        if current != file_identities[record.path]:
+            raise SealedTreeAccessError(
+                "source_changed", "a trusted source file identity changed"
+            )
+
+
+def _snapshot_fingerprint(snapshot: VerifiedSealedSnapshot) -> tuple[object, ...]:
+    return (
+        snapshot.task_id,
+        snapshot.repo_url,
+        snapshot.commit,
+        snapshot.root_tree,
+        snapshot.content_root,
+        snapshot.manifest_sha256,
+        snapshot.key_id,
+        snapshot.file_count,
+        snapshot.total_bytes,
+        snapshot.files,
+    )
+
+
+class _TrustedTreeAuthority:
+    """Private holder of evaluator-only path and authentication material."""
+
+    __slots__ = (
+        "_base_chain",
+        "_directories",
+        "_expected_fingerprint",
+        "_file_identities",
+        "_files",
+        "_key_material",
+        "_key_id",
+        "_policy",
+        "_snapshot_root",
+        "_tree",
+        "_tree_descriptor",
+        "_windows_final_paths",
+    )
+
+    def __init__(
+        self,
+        *,
+        snapshot_root: Path,
+        key_material: bytearray,
+        key_id: str,
+        policy: SnapshotPolicy,
+        verified: VerifiedSealedSnapshot,
+        files: tuple[SealedTreeFile, ...],
+    ) -> None:
+        self._snapshot_root = snapshot_root
+        self._tree = verified.agent_tree
+        self._key_material = key_material
+        self._key_id = key_id
+        self._policy = policy
+        self._expected_fingerprint = _snapshot_fingerprint(verified)
+        self._files = files
+        (
+            self._base_chain,
+            self._directories,
+            self._file_identities,
+        ) = _capture_identity_state(self._tree, files)
+        self._tree_descriptor: int | None = None
+        self._windows_final_paths: dict[str, str] = {}
+        if os.name == "nt":
+            for record in files:
+                path = self._tree.joinpath(*record.path.split("/"))
+                _assert_no_named_streams(path)
+                self._windows_final_paths[record.path] = (
+                    _windows_expected_final_path(
+                        path,
+                        expected_file=self._file_identities[record.path],
+                        expected_size=record.size,
+                    )
+                )
+        else:
+            self._tree_descriptor = _posix_open_tree_descriptor(
+                self._tree, expected=self._directories[""]
+            )
+
+    def close(self) -> None:
+        if self._tree_descriptor is not None:
+            try:
+                os.close(self._tree_descriptor)
+            except OSError:
+                pass
+            self._tree_descriptor = None
+        for index in range(len(self._key_material)):
+            self._key_material[index] = 0
+        self._snapshot_root = Path()
+        self._tree = Path()
+        self._base_chain = ()
+        self._directories = {}
+        self._file_identities = {}
+        self._windows_final_paths = {}
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except BaseException:
+            # Best-effort cleanup only; trusted callers must still finalize.
+            pass
+
+    def assert_identity_state(self) -> None:
+        _assert_identity_state(
+            self._tree,
+            self._files,
+            self._base_chain,
+            self._directories,
+            self._file_identities,
+        )
+        if os.name == "nt":
+            for record in self._files:
+                path = self._tree.joinpath(*record.path.split("/"))
+                _assert_no_named_streams(path)
+                current = _windows_expected_final_path(
+                    path,
+                    expected_file=self._file_identities[record.path],
+                    expected_size=record.size,
+                )
+                if current != self._windows_final_paths[record.path]:
+                    raise SealedTreeAccessError(
+                        "source_changed", "a source file final identity changed"
+                    )
+        else:
+            if self._tree_descriptor is None:
+                raise SealedTreeAccessError(
+                    "source_changed", "the authenticated source root is not pinned"
+                )
+            try:
+                opened_tree = os.fstat(self._tree_descriptor)
+            except OSError:
+                raise SealedTreeAccessError(
+                    "source_changed", "the authenticated source root is unavailable"
+                ) from None
+            _assert_safe_open_directory(
+                opened_tree, expected=self._directories[""]
+            )
+
+    def reverify(self, task: DiscoveryTaskInputV1) -> None:
+        try:
+            verified = verify_sealed_snapshot(
+                self._snapshot_root,
+                expected_task_id=task.task_id,
+                expected_repo_url=task.repo_url,
+                expected_commit=task.commit,
+                attestation_key=self._key_material,
+                expected_key_id=self._key_id,
+                policy=self._policy,
+            )
+        except (SealedSnapshotError, OSError, ValueError, TypeError):
+            raise SealedTreeAccessError(
+                "snapshot_verification_failed",
+                "the authenticated source snapshot did not verify",
+            ) from None
+        if _snapshot_fingerprint(verified) != self._expected_fingerprint:
+            raise SealedTreeAccessError(
+                "invalid_binding", "the authenticated source binding changed"
+            )
+        self.assert_identity_state()
+
+    def read(self, record: SealedTreeFile) -> bytes:
+        parts = record.path.split("/")
+        for component, expected in self._base_chain:
+            _, current = _safe_directory(component)
+            if current != expected:
+                raise SealedTreeAccessError(
+                    "source_changed", "a trusted source directory identity changed"
+                )
+        for depth in range(1, len(parts)):
+            relative = "/".join(parts[:depth])
+            _, current = _safe_directory(self._tree.joinpath(*parts[:depth]))
+            if current != self._directories[relative]:
+                raise SealedTreeAccessError(
+                    "source_changed", "a trusted source directory identity changed"
+                )
+
+        path = self._tree.joinpath(*parts)
+        _, before_identity = _safe_regular(path)
+        if before_identity != self._file_identities[record.path]:
+            raise SealedTreeAccessError(
+                "source_changed", "a trusted source file identity changed"
+            )
+        _assert_no_named_streams(path)
+
+        descriptor: int | None = None
+        try:
+            if os.name == "nt":
+                descriptor, opened = _windows_open_source_descriptor(
+                    path,
+                    expected_final_path=self._windows_final_paths[record.path],
+                    expected_file=before_identity,
+                    expected_size=record.size,
+                )
+            else:
+                if self._tree_descriptor is None:
+                    raise SealedTreeAccessError(
+                        "source_changed", "the authenticated source root is not pinned"
+                    )
+                descriptor, opened = _posix_open_relative_file(
+                    self._tree_descriptor,
+                    tuple(parts),
+                    directories=self._directories,
+                    expected_file=before_identity,
+                    expected_size=record.size,
+                )
+            data = _read_stable_descriptor(descriptor, opened, record)
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+        _, after_identity = _safe_regular(path)
+        if after_identity != before_identity:
+            raise SealedTreeAccessError(
+                "source_changed", "a trusted source file identity changed"
+            )
+        _assert_no_named_streams(path)
+        for component, expected in self._base_chain:
+            _, current = _safe_directory(component)
+            if current != expected:
+                raise SealedTreeAccessError(
+                    "source_changed", "a trusted source directory identity changed"
+                )
+        for depth in range(1, len(parts)):
+            relative = "/".join(parts[:depth])
+            _, current = _safe_directory(self._tree.joinpath(*parts[:depth]))
+            if current != self._directories[relative]:
+                raise SealedTreeAccessError(
+                    "source_changed", "a trusted source directory identity changed"
+                )
+
+        git_header = f"blob {len(data)}\0".encode("ascii")
+        git_oid = hashlib.sha1(
+            git_header + data, usedforsecurity=False
+        ).hexdigest()
+        if (
+            len(data) != record.size
+            or hashlib.sha256(data).hexdigest() != record.sha256
+            or git_oid != record.blob_oid
+        ):
+            raise SealedTreeAccessError(
+                "source_changed", "trusted source bytes no longer match the manifest"
+            )
+        return data
+
+
+_CONSTRUCTION_TOKEN: Final[object] = object()
+
+
+class BoundSealedTree:
+    """Path-hidden, read-only capability bound to one D0 discovery task."""
+
+    __slots__ = (
+        "__authority",
+        "__by_path",
+        "__bytes_read",
+        "__files",
+        "__finalized",
+        "__inventory_calls",
+        "__limits",
+        "__lock",
+        "__reads",
+        "__task",
+        "__verification_succeeded",
+    )
+
+    def __init__(
+        self,
+        token: object,
+        *,
+        task: DiscoveryTaskInputV1,
+        authority: _TrustedTreeAuthority,
+        files: tuple[SealedTreeFile, ...],
+        limits: SealedTreeAccessLimits,
+    ) -> None:
+        if token is not _CONSTRUCTION_TOKEN:
+            raise TypeError("BoundSealedTree values must be created by the trusted binder")
+        self.__task = task
+        self.__authority: _TrustedTreeAuthority | None = authority
+        self.__files = files
+        self.__by_path = {item.path: item for item in files}
+        self.__limits = limits
+        self.__inventory_calls = 0
+        self.__bytes_read = 0
+        self.__reads: list[SourceReadUsage] = []
+        self.__finalized = False
+        self.__verification_succeeded = False
+        self.__lock = threading.RLock()
+
+    def __repr__(self) -> str:
+        return (
+            "BoundSealedTree("
+            f"task_id={self.task_id!r}, snapshot_id={self.snapshot_id!r}, "
+            f"file_count={self.file_count}, finalized={self.__finalized})"
+        )
+
+    def __reduce__(self) -> object:
+        raise TypeError("BoundSealedTree capabilities cannot be serialized")
+
+    @property
+    def task_id(self) -> str:
+        return self.__task.task_id
+
+    @property
+    def snapshot_id(self) -> str:
+        return self.__task.snapshot_id
+
+    @property
+    def repo_url(self) -> str:
+        return self.__task.repo_url
+
+    @property
+    def commit(self) -> str:
+        return self.__task.commit
+
+    @property
+    def manifest_sha256(self) -> str:
+        return self.__task.snapshot_manifest_sha256
+
+    @property
+    def content_root(self) -> str:
+        return self.__task.snapshot_content_root
+
+    @property
+    def file_count(self) -> int:
+        return len(self.__files)
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(item.size for item in self.__files)
+
+    def _require_active(self) -> _TrustedTreeAuthority:
+        if self.__finalized or self.__authority is None:
+            raise SealedTreeAccessError(
+                "access_finalized", "the sealed source capability is finalized"
+            )
+        return self.__authority
+
+    def _invalidate(self) -> None:
+        authority = self.__authority
+        self.__authority = None
+        self.__finalized = True
+        self.__verification_succeeded = False
+        if authority is not None:
+            authority.close()
+
+    def inventory(self) -> tuple[SealedTreeFile, ...]:
+        """Return the canonical verified-manifest inventory, never host paths."""
+
+        with self.__lock:
+            self._require_active()
+            if self.__inventory_calls >= self.__limits.max_inventory_calls:
+                raise SealedTreeAccessError(
+                    "source_limit_exceeded", "source inventory call budget is exhausted"
+                )
+            self.__inventory_calls += 1
+            return self.__files
+
+    def read_bytes(self, path: str, *, maximum_bytes: int) -> bytes:
+        """Read one exact manifest member within the caller and run budgets."""
+
+        with self.__lock:
+            authority = self._require_active()
+            if not isinstance(path, str):
+                raise SealedTreeAccessError(
+                    "invalid_argument", "source path must be a string"
+                )
+            if type(maximum_bytes) is not int or not (
+                0 <= maximum_bytes <= self.__limits.max_bytes_per_read
+            ):
+                raise SealedTreeAccessError(
+                    "invalid_argument", "maximum_bytes is outside the read policy"
+                )
+            record = self.__by_path.get(path)
+            if record is None:
+                raise SealedTreeAccessError(
+                    "source_not_found", "source path is not in the verified manifest"
+                )
+            if record.size > maximum_bytes:
+                raise SealedTreeAccessError(
+                    "source_limit_exceeded", "source file exceeds the requested byte limit"
+                )
+            if len(self.__reads) >= self.__limits.max_read_calls:
+                raise SealedTreeAccessError(
+                    "source_limit_exceeded", "source read call budget is exhausted"
+                )
+            if (
+                self.__bytes_read + record.size
+                > self.__limits.max_total_bytes_read
+            ):
+                raise SealedTreeAccessError(
+                    "source_limit_exceeded", "aggregate source byte budget is exhausted"
+                )
+            try:
+                data = authority.read(record)
+            except SealedTreeAccessError as error:
+                if error.code in {
+                    "source_changed",
+                    "snapshot_verification_failed",
+                    "unsafe_source_path",
+                }:
+                    self._invalidate()
+                raise
+            self.__bytes_read += len(data)
+            self.__reads.append(
+                SourceReadUsage(
+                    sequence=len(self.__reads) + 1,
+                    path=record.path,
+                    bytes_read=len(data),
+                    sha256=record.sha256,
+                    blob_oid=record.blob_oid,
+                )
+            )
+            return data
+
+    def usage_snapshot(self) -> SourceUsageLedger:
+        """Return a deeply immutable point-in-time usage ledger."""
+
+        with self.__lock:
+            return SourceUsageLedger(
+                task_id=self.task_id,
+                snapshot_id=self.snapshot_id,
+                inventory_calls=self.__inventory_calls,
+                read_calls=len(self.__reads),
+                bytes_read=self.__bytes_read,
+                reads=tuple(self.__reads),
+                finalized=self.__finalized,
+                verification_succeeded=self.__verification_succeeded,
+            )
+
+    def finalize(self) -> SourceUsageLedger:
+        """Reverify the authenticated tree, close the capability, and seal usage."""
+
+        with self.__lock:
+            authority = self._require_active()
+            try:
+                authority.reverify(self.__task)
+            except SealedTreeAccessError:
+                self._invalidate()
+                raise
+            authority.close()
+            self.__authority = None
+            self.__finalized = True
+            self.__verification_succeeded = True
+            return self.usage_snapshot()
+
+
+def bind_sealed_tree(
+    task: DiscoveryTaskInputV1,
+    snapshot_root: str | os.PathLike[str],
+    *,
+    attestation_key: bytes | bytearray | memoryview,
+    expected_key_id: str,
+    policy: SnapshotPolicy = DEFAULT_SNAPSHOT_POLICY,
+    limits: SealedTreeAccessLimits = DEFAULT_SEALED_TREE_ACCESS_LIMITS,
+) -> BoundSealedTree:
+    """Verify, identity-bind, and hide one sealed snapshot behind a capability."""
+
+    if not isinstance(task, DiscoveryTaskInputV1):
+        raise SealedTreeAccessError(
+            "invalid_argument", "task must be a DiscoveryTaskInputV1 value"
+        )
+    if not isinstance(policy, SnapshotPolicy) or not isinstance(
+        limits, SealedTreeAccessLimits
+    ):
+        raise SealedTreeAccessError(
+            "invalid_argument", "sealed-tree policies have invalid types"
+        )
+    if not isinstance(attestation_key, (bytes, bytearray, memoryview)):
+        raise SealedTreeAccessError(
+            "invalid_argument", "attestation material must be bytes-like"
+        )
+    try:
+        key_size = (
+            attestation_key.nbytes
+            if isinstance(attestation_key, memoryview)
+            else len(attestation_key)
+        )
+    except (TypeError, ValueError):
+        raise SealedTreeAccessError(
+            "invalid_argument", "attestation material must be readable bytes"
+        ) from None
+    if not _MIN_ATTESTATION_KEY_BYTES <= key_size <= _MAX_ATTESTATION_KEY_BYTES:
+        raise SealedTreeAccessError(
+            "invalid_argument", "attestation material is outside its byte limit"
+        )
+    try:
+        key_material = bytearray(attestation_key)
+    except (TypeError, ValueError, BufferError):
+        raise SealedTreeAccessError(
+            "invalid_argument", "attestation material must be contiguous bytes"
+        ) from None
+    try:
+        root = Path(os.path.abspath(os.fspath(snapshot_root)))
+        verified = verify_sealed_snapshot(
+            root,
+            expected_task_id=task.task_id,
+            expected_repo_url=task.repo_url,
+            expected_commit=task.commit,
+            attestation_key=key_material,
+            expected_key_id=expected_key_id,
+            policy=policy,
+        )
+    except (SealedSnapshotError, OSError, ValueError, TypeError):
+        for index in range(len(key_material)):
+            key_material[index] = 0
+        raise SealedTreeAccessError(
+            "snapshot_verification_failed",
+            "the authenticated source snapshot did not verify",
+        ) from None
+
+    if (
+        verified.task_id != task.task_id
+        or verified.repo_url != task.repo_url
+        or verified.commit != task.commit
+        or verified.manifest_sha256 != task.snapshot_manifest_sha256
+        or verified.content_root != task.snapshot_content_root
+    ):
+        for index in range(len(key_material)):
+            key_material[index] = 0
+        raise SealedTreeAccessError(
+            "invalid_binding", "snapshot metadata does not match the discovery task"
+        )
+
+    files = tuple(SealedTreeFile._from_verified(item) for item in verified.files)
+    authority: _TrustedTreeAuthority | None = None
+    try:
+        authority = _TrustedTreeAuthority(
+            snapshot_root=root,
+            key_material=key_material,
+            key_id=expected_key_id,
+            policy=policy,
+            verified=verified,
+            files=files,
+        )
+        # Bracket identity capture with another complete authenticated verify.
+        authority.reverify(task)
+    except SealedTreeAccessError:
+        if authority is not None:
+            authority.close()
+        else:
+            for index in range(len(key_material)):
+                key_material[index] = 0
+        raise
+
+    return BoundSealedTree(
+        _CONSTRUCTION_TOKEN,
+        task=task,
+        authority=authority,
+        files=files,
+        limits=limits,
+    )
+
+
+__all__ = [
+    "BoundSealedTree",
+    "DEFAULT_SEALED_TREE_ACCESS_LIMITS",
+    "SEALED_TREE_ACCESS_VERSION",
+    "SealedTreeAccessError",
+    "SealedTreeAccessLimits",
+    "SealedTreeFile",
+    "SourceReadUsage",
+    "SourceUsageLedger",
+    "bind_sealed_tree",
+]

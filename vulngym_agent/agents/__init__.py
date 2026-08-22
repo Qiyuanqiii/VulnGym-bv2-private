@@ -18,6 +18,7 @@ from .t2_producer import T2Producer
 from .t2_toolbox import LOCAL_T2_TOOL_NAMES, LocalT2Toolbox
 
 if TYPE_CHECKING:
+    from .discovery_toolbox import DiscoveryToolbox
     from .real_t2_producer import LocalStructuredT2Producer
     from .t2_execution import LocalT2ContextFactory
 
@@ -35,11 +36,32 @@ def __getattr__(name: str) -> Any:
 
         globals()[name] = LocalT2ContextFactory
         return LocalT2ContextFactory
+    if name in {
+        "DISCOVERY_TOOL_CONTRACT_IDS",
+        "DISCOVERY_TOOL_NAMES",
+        "DiscoveryToolbox",
+    }:
+        from .discovery_toolbox import (
+            DISCOVERY_TOOL_CONTRACT_IDS,
+            DISCOVERY_TOOL_NAMES,
+            DiscoveryToolbox,
+        )
+
+        exports = {
+            "DISCOVERY_TOOL_CONTRACT_IDS": DISCOVERY_TOOL_CONTRACT_IDS,
+            "DISCOVERY_TOOL_NAMES": DISCOVERY_TOOL_NAMES,
+            "DiscoveryToolbox": DiscoveryToolbox,
+        }
+        globals().update(exports)
+        return exports[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
     "AttemptModelRuntime",
     "AttemptModelTranscript",
+    "DISCOVERY_TOOL_CONTRACT_IDS",
+    "DISCOVERY_TOOL_NAMES",
+    "DiscoveryToolbox",
     "ModelBlocked",
     "ModelRequest",
     "ModelResult",
