@@ -638,6 +638,15 @@ class AttemptModelRuntime:
         with self._lock:
             return tuple(self._records)
 
+    @property
+    def sealed_transcript(self) -> AttemptModelTranscript | None:
+        """Return this runtime's own transcript only after a clean one-way seal."""
+
+        with self._lock:
+            if not self._finalized or self._finalization_error is not None:
+                return None
+            return self._transcript
+
     def call(
         self,
         model_call_id: str,

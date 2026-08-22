@@ -32,6 +32,7 @@ from vulngym_agent.benchmark.sealed_tree_access import (
     BoundSealedTree,
     SealedTreeAccessError,
     SealedTreeFile,
+    SourceReadUsage,
     SourceUsageLedger,
 )
 from vulngym_agent.tools import (
@@ -252,9 +253,14 @@ class DiscoveryToolbox:
         "_artifacts",
         "_file_by_path",
         "_files",
+        "_expected_bytes_read",
+        "_expected_inventory_calls",
+        "_expected_reads",
         "_lifecycle_lock",
         "_registry",
+        "_source_claimed",
         "_tree",
+        "_tree_claim_token",
         "task",
     )
 
@@ -287,7 +293,12 @@ class DiscoveryToolbox:
         self._files: tuple[SealedTreeFile, ...] | None = None
         self._file_by_path: Mapping[str, SealedTreeFile] | None = None
         self._artifacts: dict[str, _ArtifactBinding] = {}
+        self._expected_inventory_calls = 0
+        self._expected_bytes_read = 0
+        self._expected_reads: list[SourceReadUsage] = []
         self._lifecycle_lock = RLock()
+        self._source_claimed = False
+        self._tree_claim_token = object()
         handlers = {
             "source_inventory": self._source_inventory,
             "source_search": self._source_search,
@@ -306,6 +317,29 @@ class DiscoveryToolbox:
                 for name in DISCOVERY_TOOL_NAMES
             }
         )
+
+    def claim_source_usage(self) -> None:
+        """Atomically claim the pre-bound tree after this owner is recoverable.
+
+        The token is stored before this method is entered.  Consequently, even
+        an asynchronous cancellation immediately after the tree accepts the
+        claim can be followed by ``abort_source_usage`` on this same toolbox.
+        This controller-only lifecycle method is absent from ``registry``.
+        """
+
+        with self._lifecycle_lock:
+            if self._source_claimed:
+                raise SealedTreeAccessError(
+                    "access_claimed", "source usage is already claimed"
+                )
+            self._tree._claim_for_discovery(self._tree_claim_token)
+            self._source_claimed = True
+
+    def _require_source_claimed(self) -> None:
+        if not self._source_claimed:
+            raise SealedTreeAccessError(
+                "invalid_binding", "source usage has not been claimed"
+            )
 
     @property
     def registry(self) -> Mapping[str, ToolDefinition]:
@@ -327,6 +361,7 @@ class DiscoveryToolbox:
         """
 
         with self._lifecycle_lock:
+            self._require_source_claimed()
             return self._tree.usage_snapshot()
 
     def finalize_source_usage(self) -> SourceUsageLedger:
@@ -338,7 +373,34 @@ class DiscoveryToolbox:
         """
 
         with self._lifecycle_lock:
-            return self._tree.finalize()
+            self._require_source_claimed()
+            ledger = self._tree.finalize(_claim_token=self._tree_claim_token)
+            expected = SourceUsageLedger(
+                task_id=self.task.task_id,
+                snapshot_id=self.task.snapshot_id,
+                inventory_calls=self._expected_inventory_calls,
+                read_calls=len(self._expected_reads),
+                bytes_read=self._expected_bytes_read,
+                reads=tuple(self._expected_reads),
+                finalized=True,
+                verification_succeeded=True,
+            )
+            if ledger != expected:
+                raise SealedTreeAccessError(
+                    "invalid_binding",
+                    "source usage does not match the discovery owner",
+                )
+            return ledger
+
+    def abort_source_usage(self) -> SourceUsageLedger:
+        """Close the owned source capability after a failed finalization.
+
+        This controller-only fail-safe is intentionally absent from the model
+        registry.  It never upgrades verification to success.
+        """
+
+        with self._lifecycle_lock:
+            return self._tree._abort(_claim_token=self._tree_claim_token)
 
     def _serialized_handler(
         self,
@@ -346,6 +408,7 @@ class DiscoveryToolbox:
     ) -> Callable[[ToolCallEnvelope], ToolHandlerOutput]:
         def invoke(envelope: ToolCallEnvelope) -> ToolHandlerOutput:
             with self._lifecycle_lock:
+                self._require_source_claimed()
                 return handler(envelope)
 
         return invoke
@@ -363,7 +426,8 @@ class DiscoveryToolbox:
     def _inventory(self) -> tuple[SealedTreeFile, ...]:
         if self._files is None:
             try:
-                files = self._tree.inventory()
+                files = self._tree.inventory(_claim_token=self._tree_claim_token)
+                self._expected_inventory_calls += 1
             except SealedTreeAccessError as error:
                 raise ToolBlocked(
                     "sealed_tree_access_failed", {"access_code": error.code}
@@ -389,11 +453,29 @@ class DiscoveryToolbox:
 
     def _read_bytes(self, path: str, *, maximum_bytes: int) -> bytes:
         try:
-            return self._tree.read_bytes(path, maximum_bytes=maximum_bytes)
+            data = self._tree.read_bytes(
+                path,
+                maximum_bytes=maximum_bytes,
+                _claim_token=self._tree_claim_token,
+            )
         except SealedTreeAccessError as error:
             raise ToolBlocked(
                 "sealed_tree_access_failed", {"access_code": error.code}
             ) from error
+        record = None if self._file_by_path is None else self._file_by_path.get(path)
+        if record is None:
+            raise ToolBlocked("sealed_tree_contract_mismatch")
+        self._expected_bytes_read += len(data)
+        self._expected_reads.append(
+            SourceReadUsage(
+                sequence=len(self._expected_reads) + 1,
+                path=record.path,
+                bytes_read=len(data),
+                sha256=record.sha256,
+                blob_oid=record.blob_oid,
+            )
+        )
+        return data
 
     def _check_scope(self, envelope: ToolCallEnvelope, expected_tool: str) -> None:
         if envelope.task_id != self.task.task_id:

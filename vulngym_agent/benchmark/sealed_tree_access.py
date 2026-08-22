@@ -48,6 +48,7 @@ _MAX_ATTESTATION_KEY_BYTES: Final[int] = 4_096
 
 _ERROR_CODES: Final[frozenset[str]] = frozenset(
     {
+        "access_claimed",
         "access_finalized",
         "invalid_argument",
         "invalid_binding",
@@ -881,6 +882,7 @@ class BoundSealedTree:
         "__authority",
         "__by_path",
         "__bytes_read",
+        "__claim_token",
         "__files",
         "__finalized",
         "__inventory_calls",
@@ -907,6 +909,7 @@ class BoundSealedTree:
         self.__files = files
         self.__by_path = {item.path: item for item in files}
         self.__limits = limits
+        self.__claim_token: object | None = None
         self.__inventory_calls = 0
         self.__bytes_read = 0
         self.__reads: list[SourceReadUsage] = []
@@ -956,12 +959,38 @@ class BoundSealedTree:
     def total_bytes(self) -> int:
         return sum(item.size for item in self.__files)
 
-    def _require_active(self) -> _TrustedTreeAuthority:
+    def _require_active(
+        self, claim_token: object | None = None
+    ) -> _TrustedTreeAuthority:
         if self.__finalized or self.__authority is None:
             raise SealedTreeAccessError(
                 "access_finalized", "the sealed source capability is finalized"
             )
+        if self.__claim_token is not None and claim_token is not self.__claim_token:
+            raise SealedTreeAccessError(
+                "access_claimed", "the sealed source capability has another owner"
+            )
         return self.__authority
+
+    def _claim_for_discovery(self, claim_token: object) -> None:
+        """Atomically transfer all mutable access to one discovery toolbox."""
+
+        if claim_token is None:
+            raise SealedTreeAccessError(
+                "invalid_binding", "a discovery owner token is required"
+            )
+        with self.__lock:
+            self._require_active()
+            if (
+                self.__inventory_calls != 0
+                or self.__bytes_read != 0
+                or self.__reads
+            ):
+                raise SealedTreeAccessError(
+                    "invalid_binding",
+                    "a discovery owner requires a fresh sealed source capability",
+                )
+            self.__claim_token = claim_token
 
     def _invalidate(self) -> None:
         authority = self.__authority
@@ -971,11 +1000,13 @@ class BoundSealedTree:
         if authority is not None:
             authority.close()
 
-    def inventory(self) -> tuple[SealedTreeFile, ...]:
+    def inventory(
+        self, *, _claim_token: object | None = None
+    ) -> tuple[SealedTreeFile, ...]:
         """Return the canonical verified-manifest inventory, never host paths."""
 
         with self.__lock:
-            self._require_active()
+            self._require_active(_claim_token)
             if self.__inventory_calls >= self.__limits.max_inventory_calls:
                 raise SealedTreeAccessError(
                     "source_limit_exceeded", "source inventory call budget is exhausted"
@@ -983,11 +1014,17 @@ class BoundSealedTree:
             self.__inventory_calls += 1
             return self.__files
 
-    def read_bytes(self, path: str, *, maximum_bytes: int) -> bytes:
+    def read_bytes(
+        self,
+        path: str,
+        *,
+        maximum_bytes: int,
+        _claim_token: object | None = None,
+    ) -> bytes:
         """Read one exact manifest member within the caller and run budgets."""
 
         with self.__lock:
-            authority = self._require_active()
+            authority = self._require_active(_claim_token)
             if not isinstance(path, str):
                 raise SealedTreeAccessError(
                     "invalid_argument", "source path must be a string"
@@ -1055,11 +1092,13 @@ class BoundSealedTree:
                 verification_succeeded=self.__verification_succeeded,
             )
 
-    def finalize(self) -> SourceUsageLedger:
+    def finalize(
+        self, *, _claim_token: object | None = None
+    ) -> SourceUsageLedger:
         """Reverify the authenticated tree, close the capability, and seal usage."""
 
         with self.__lock:
-            authority = self._require_active()
+            authority = self._require_active(_claim_token)
             try:
                 authority.reverify(self.__task)
             except SealedTreeAccessError:
@@ -1069,6 +1108,16 @@ class BoundSealedTree:
             self.__authority = None
             self.__finalized = True
             self.__verification_succeeded = True
+            return self.usage_snapshot()
+
+    def _abort(self, *, _claim_token: object | None = None) -> SourceUsageLedger:
+        """Irreversibly close without claiming successful re-verification."""
+
+        with self.__lock:
+            if self.__finalized:
+                return self.usage_snapshot()
+            self._require_active(_claim_token)
+            self._invalidate()
             return self.usage_snapshot()
 
 

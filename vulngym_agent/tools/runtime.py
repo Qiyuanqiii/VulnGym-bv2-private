@@ -760,6 +760,15 @@ class AttemptToolRuntime:
         with self._lock:
             return tuple(self._artifacts)
 
+    @property
+    def sealed_transcript(self) -> AttemptToolTranscript | None:
+        """Return this runtime's own transcript only after a clean one-way seal."""
+
+        with self._lock:
+            if not self._finalized or self._finalization_error is not None:
+                return None
+            return self._transcript
+
     def artifact_ref(self, artifact_id: str) -> ArtifactRef:
         """Return the exact opaque reference issued for an existing artifact."""
 

@@ -104,7 +104,9 @@ class AttemptToolRuntimeTests(unittest.TestCase):
         self.assertEqual(record.budget_event_sequence, budget.events[0].sequence)
         self.assertEqual(record.result_sha256, result.result_sha256)
 
+        self.assertIsNone(runtime.sealed_transcript)
         transcript = runtime.finalize()
+        self.assertIs(runtime.sealed_transcript, transcript)
         records, artifacts = transcript
         self.assertEqual(records, (result,))
         self.assertEqual(artifacts, runtime.artifacts)
@@ -544,6 +546,7 @@ class AttemptToolRuntimeTests(unittest.TestCase):
 
         with self.assertRaises(ToolLedgerMismatch):
             runtime.finalize()
+        self.assertIsNone(runtime.sealed_transcript)
         with self.assertRaises(ToolLedgerMismatch):
             runtime.finalize()
         with self.assertRaises(ToolRuntimeFinalized):

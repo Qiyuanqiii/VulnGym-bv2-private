@@ -90,7 +90,9 @@ class AttemptModelRuntimeTests(unittest.TestCase):
         self.assertEqual(record.response_sha256, result.response_sha256)
         self.assertEqual(runtime.records, (record,))
 
+        self.assertIsNone(runtime.sealed_transcript)
         transcript = runtime.finalize()
+        self.assertIs(runtime.sealed_transcript, transcript)
         self.assertEqual(transcript.records, (record,))
         self.assertEqual(runtime.finalize(), transcript)
         self.assertRegex(transcript.transcript_sha256, r"^[0-9a-f]{64}$")
@@ -270,6 +272,7 @@ class AttemptModelRuntimeTests(unittest.TestCase):
 
         with self.assertRaises(ModelLedgerMismatch):
             runtime.finalize()
+        self.assertIsNone(runtime.sealed_transcript)
         with self.assertRaises(ModelLedgerMismatch):
             runtime.finalize()
         with self.assertRaises(ModelRuntimeFinalized):

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
-from threading import Event, Thread
+from threading import Barrier, Event, Lock, Thread
 import unittest
 from unittest import mock
 
@@ -27,7 +27,10 @@ from vulngym_agent.benchmark.discovery_contracts import (
     DiscoveryTaskInputV1,
 )
 from vulngym_agent.benchmark.sealed_snapshot import prepare_sealed_snapshot
-from vulngym_agent.benchmark.sealed_tree_access import bind_sealed_tree
+from vulngym_agent.benchmark.sealed_tree_access import (
+    SealedTreeAccessError,
+    bind_sealed_tree,
+)
 from vulngym_agent.orchestrator import Budget, Limits
 from vulngym_agent.tools import ArtifactRef, AttemptToolRuntime, ToolReferenceError
 from vulngym_agent.tools.git.repository import GitRepository
@@ -97,6 +100,7 @@ class DiscoveryToolboxTests(unittest.TestCase):
             expected_key_id=KEY_ID,
         )
         self.toolbox = DiscoveryToolbox(self.task, self.tree)
+        self.toolbox.claim_source_usage()
         self.runtime = AttemptToolRuntime(
             task_id=self.task.task_id,
             attempt=0,
@@ -109,7 +113,7 @@ class DiscoveryToolboxTests(unittest.TestCase):
     def tearDown(self) -> None:
         try:
             if not self.tree.usage_snapshot().finalized:
-                self.tree.finalize()
+                self.toolbox.abort_source_usage()
         finally:
             self.temporary.cleanup()
 
@@ -201,7 +205,14 @@ class DiscoveryToolboxTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             self.toolbox.registry["shell"] = object()  # type: ignore[index]
 
-        second = DiscoveryToolbox(self.task, self.tree)
+        second_tree = bind_sealed_tree(
+            self.task,
+            self.snapshot_root,
+            attestation_key=KEY,
+            expected_key_id=KEY_ID,
+        )
+        second = DiscoveryToolbox(self.task, second_tree)
+        second.claim_source_usage()
         replay = AttemptToolRuntime(
             task_id=self.task.task_id,
             attempt=0,
@@ -214,6 +225,7 @@ class DiscoveryToolboxTests(unittest.TestCase):
             self.runtime.finalize().registry_sha256,
             replay.finalize().registry_sha256,
         )
+        second.abort_source_usage()
 
     def test_inventory_is_batched_canonical_and_snapshot_bound(self) -> None:
         result = self.call(
@@ -587,7 +599,72 @@ class DiscoveryToolboxTests(unittest.TestCase):
         self.assertEqual("sealed_tree_access_failed", blocked.error_code)
         self.assertEqual("access_finalized", blocked.error["access_code"])
         self.assertNotIn("finalize_source_usage", self.toolbox.registry)
+        self.assertNotIn("abort_source_usage", self.toolbox.registry)
+        self.assertNotIn("claim_source_usage", self.toolbox.registry)
         self.assertNotIn("usage_snapshot", self.toolbox.registry)
+
+    def test_tree_claim_is_atomic_and_direct_mutation_is_denied(self) -> None:
+        second = DiscoveryToolbox(self.task, self.tree)
+        with self.assertRaises(SealedTreeAccessError) as captured:
+            second.claim_source_usage()
+        self.assertEqual("access_claimed", captured.exception.code)
+        with self.assertRaises(SealedTreeAccessError) as captured:
+            self.tree.inventory()
+        self.assertEqual("access_claimed", captured.exception.code)
+        with self.assertRaises(SealedTreeAccessError) as captured:
+            self.tree.finalize()
+        self.assertEqual("access_claimed", captured.exception.code)
+
+        result = self.call(
+            1,
+            "source_inventory",
+            {"cursor": 0, "limit": MAX_INVENTORY_BATCH_FILES},
+        )
+        self.assertEqual("success", result.status)
+
+    def test_concurrent_tree_claim_has_exactly_one_owner(self) -> None:
+        tree = bind_sealed_tree(
+            self.task,
+            self.snapshot_root,
+            attestation_key=KEY,
+            expected_key_id=KEY_ID,
+        )
+        barrier = Barrier(2)
+        lock = Lock()
+        owners = []
+        errors = []
+
+        def claim() -> None:
+            toolbox = DiscoveryToolbox(self.task, tree)
+            barrier.wait()
+            try:
+                toolbox.claim_source_usage()
+            except SealedTreeAccessError as error:
+                with lock:
+                    errors.append(error.code)
+            else:
+                with lock:
+                    owners.append(toolbox)
+
+        workers = [Thread(target=claim) for _ in range(2)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(5)
+        self.assertTrue(all(not worker.is_alive() for worker in workers))
+        self.assertEqual(1, len(owners))
+        self.assertEqual(["access_claimed"], errors)
+        owners[0].abort_source_usage()
+        self.assertTrue(tree.usage_snapshot().finalized)
+
+    def test_final_usage_rejects_calls_outside_the_toolbox_ledger(self) -> None:
+        self.tree.inventory(_claim_token=self.toolbox._tree_claim_token)
+        with self.assertRaises(SealedTreeAccessError) as captured:
+            self.toolbox.finalize_source_usage()
+        self.assertEqual("invalid_binding", captured.exception.code)
+        usage = self.tree.usage_snapshot()
+        self.assertTrue(usage.finalized)
+        self.assertTrue(usage.verification_succeeded)
 
     def test_controller_finalize_is_serialized_after_an_inflight_tool(self) -> None:
         source = self._read_source()
