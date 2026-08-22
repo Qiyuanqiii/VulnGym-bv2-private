@@ -39,6 +39,12 @@ from vulngym_agent.orchestrator.replay import (
     VerifiedFormalEntries,
     read_verified_formal_entries,
 )
+from vulngym_agent.orchestrator.discovery_replay import (
+    DiscoveryReplayError,
+    DiscoveryReplayLimits,
+    VerifiedDiscoveryResult,
+    read_discovery_result_bundle,
+)
 
 from .contracts import (
     BenchmarkContractError,
@@ -49,6 +55,12 @@ from .contracts import (
     SnapshotTaskSpec,
     iter_evaluator_findings,
     iter_public_benchmark_jsonl,
+)
+from .discovery_contracts import DiscoveryTaskResult
+from .discovery_projection import (
+    DISCOVERY_PROJECTION_VERSION,
+    DiscoveryProjectionError,
+    project_discovery_result,
 )
 
 
@@ -66,6 +78,8 @@ PROFILE_TRAIN_ENTRIES = 125
 
 DEFAULT_TOP_K = 64
 MAX_TOP_K = 256
+DEFAULT_DISCOVERY_TOP_K = 64
+MAX_DISCOVERY_TOP_K = 64
 MAX_RAW_ENTRIES_PER_TASK = 4096
 OFFICIAL_TOLERANCE = 5
 ARTIFACT_INDEX_CONTRACT_VERSION = 1
@@ -83,6 +97,10 @@ _BENCHMARK_REPLAY_LIMITS = ReplayLimits(
     max_records_per_file=4096,
     max_line_bytes=1_048_576,
     max_total_bytes=64 * 1024 * 1024,
+)
+_BENCHMARK_DISCOVERY_REPLAY_LIMITS = DiscoveryReplayLimits(
+    max_line_bytes=2 * 1024 * 1024,
+    max_total_bytes=8 * 1024 * 1024,
 )
 
 _MANIFEST_PATH = "manifests/source_and_hash_manifest.json"
@@ -111,10 +129,17 @@ _MAX_JSON_NODES = 300_000
 class BenchmarkHarnessError(ValueError):
     """A deterministic, local-path-free harness failure."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        committed: bool = False,
+    ) -> None:
         if not isinstance(code, str) or not code:
             raise ValueError("error code must be a non-empty string")
         self.code = code
+        self.committed = committed is True
         super().__init__(message)
 
 
@@ -246,7 +271,7 @@ class ArtifactBundleIndex:
             raise ValueError("artifact index contract_version must be 1")
         if self.profile_id != PROFILE_ID or self.manifest_sha256 != PROFILE_MANIFEST_SHA256:
             raise ValueError("artifact index profile binding is invalid")
-        if self.split not in {"train", "test"}:
+        if type(self.split) is not str or self.split not in {"train", "test"}:
             raise ValueError("artifact index split must be train or test")
         bundles = tuple(self.bundles)
         if any(not isinstance(item, ArtifactBundleDigest) for item in bundles):
@@ -281,6 +306,133 @@ class ReplayProjectionSummary:
         if self.aggregate is not None:
             value["aggregate"] = self.aggregate.to_dict()
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryProjectionStats:
+    """Non-semantic counters for one verified D0 discovery result."""
+
+    candidate_count: int
+    emit_review_count: int
+    reject_review_count: int
+    defer_review_count: int
+    trace_node_count: int
+    unique_findings: int
+    emitted_findings: int
+    truncated_findings: int
+    task_deferred: int
+
+    def __post_init__(self) -> None:
+        values = (
+            self.candidate_count,
+            self.emit_review_count,
+            self.reject_review_count,
+            self.defer_review_count,
+            self.trace_node_count,
+            self.unique_findings,
+            self.emitted_findings,
+            self.truncated_findings,
+            self.task_deferred,
+        )
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError(
+                "discovery projection counters must be non-negative integers"
+            )
+        if self.task_deferred not in (0, 1):
+            raise ValueError("task_deferred must be integer 0 or 1")
+        if self.emitted_findings + self.truncated_findings != self.unique_findings:
+            raise ValueError("discovery finding counters do not close")
+        review_count = (
+            self.emit_review_count
+            + self.reject_review_count
+            + self.defer_review_count
+        )
+        if self.task_deferred:
+            if any(value != 0 for value in values[:-1]):
+                raise ValueError("a deferred discovery task cannot expose partial counters")
+        elif review_count != self.candidate_count:
+            raise ValueError("a finalized discovery task requires one review per candidate")
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "candidate_count": self.candidate_count,
+            "defer_review_count": self.defer_review_count,
+            "emit_review_count": self.emit_review_count,
+            "emitted_findings": self.emitted_findings,
+            "reject_review_count": self.reject_review_count,
+            "task_deferred": self.task_deferred,
+            "trace_node_count": self.trace_node_count,
+            "truncated_findings": self.truncated_findings,
+            "unique_findings": self.unique_findings,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryProjectionSummary:
+    """Path-free summary of one complete discovery-bundle projection."""
+
+    split: Literal["train", "test"]
+    task_count: int
+    finalized_task_count: int
+    deferred_task_count: int
+    candidate_count: int
+    finding_count: int
+    bundle_index_sha256: str
+    output_manifest_sha256: str
+    aggregate: TrainingAggregate | None = None
+
+    def __post_init__(self) -> None:
+        counts = (
+            self.task_count,
+            self.finalized_task_count,
+            self.deferred_task_count,
+            self.candidate_count,
+            self.finding_count,
+        )
+        if self.split not in {"train", "test"}:
+            raise ValueError("discovery projection split is invalid")
+        if any(type(value) is not int or value < 0 for value in counts):
+            raise ValueError(
+                "discovery projection counts must be non-negative integers"
+            )
+        if self.finalized_task_count + self.deferred_task_count != self.task_count:
+            raise ValueError("discovery projection task counts do not close")
+        for value in (self.bundle_index_sha256, self.output_manifest_sha256):
+            if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+                raise ValueError("discovery projection digest is invalid")
+        if (self.split == "train") != (type(self.aggregate) is TrainingAggregate):
+            raise ValueError("only training discovery projections carry an aggregate")
+
+    def to_dict(self) -> dict[str, Any]:
+        value: dict[str, Any] = {
+            "bundle_index_sha256": self.bundle_index_sha256,
+            "candidate_count": self.candidate_count,
+            "deferred_task_count": self.deferred_task_count,
+            "finalized_task_count": self.finalized_task_count,
+            "finding_count": self.finding_count,
+            "output_manifest_sha256": self.output_manifest_sha256,
+            "split": self.split,
+            "task_count": self.task_count,
+        }
+        if self.aggregate is not None:
+            value["aggregate"] = self.aggregate.to_dict()
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectedDiscoveryTask:
+    task_id: str
+    snapshot_id: str
+    status: Literal["finalized", "deferred"]
+    findings: tuple[Mapping[str, Any], ...]
+    stats: DiscoveryProjectionStats
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "findings",
+            tuple(_freeze_json(finding) for finding in self.findings),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -979,42 +1131,20 @@ def _cleanup_relative_staging(
     staging_identity: tuple[int, int],
     file_names: Iterable[str],
 ) -> None:
-    """Best-effort cleanup anchored to trusted descriptors.
+    """Retain an unpublished staging directory for trusted later cleanup.
 
-    Any identity mismatch leaves the temporary directory behind.  Leaking a
-    private staging directory is safer than deleting a concurrently replaced
-    object.
+    Python does not expose an atomic "unlink this name only if it still denotes
+    this inode" operation.  A stat-then-unlink sequence therefore cannot safely
+    remove staging members in the presence of same-directory name replacement.
     """
 
-    try:
-        current = os.stat(
-            staging_name, dir_fd=parent_descriptor, follow_symlinks=False
-        )
-        if (
-            not stat.S_ISDIR(current.st_mode)
-            or _is_reparse(current)
-            or (current.st_dev, current.st_ino) != staging_identity
-        ):
-            return
-        opened = os.fstat(staging_descriptor)
-        if (opened.st_dev, opened.st_ino) != staging_identity:
-            return
-        for name in file_names:
-            try:
-                item = os.stat(name, dir_fd=staging_descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                continue
-            if not stat.S_ISREG(item.st_mode) or _is_reparse(item):
-                return
-            os.unlink(name, dir_fd=staging_descriptor)
-        current = os.stat(
-            staging_name, dir_fd=parent_descriptor, follow_symlinks=False
-        )
-        if (current.st_dev, current.st_ino) != staging_identity:
-            return
-        os.rmdir(staging_name, dir_fd=parent_descriptor)
-    except (OSError, NotImplementedError):
-        return
+    _ = (
+        parent_descriptor,
+        staging_descriptor,
+        staging_name,
+        staging_identity,
+        file_names,
+    )
 
 
 def _cleanup_path_staging(
@@ -1023,32 +1153,9 @@ def _cleanup_path_staging(
     checked_parent: Sequence[tuple[Path, tuple[int, int]]],
     file_names: Iterable[str],
 ) -> None:
-    """Best-effort non-recursive cleanup for platforms without dirfd I/O."""
+    """Retain path-based staging without stat-then-delete name races."""
 
-    try:
-        _parent_chain_unchanged(checked_parent)
-        current = _checked_lstat(staging, directory=True)
-        if (current.st_dev, current.st_ino) != staging_identity:
-            return
-        for name in file_names:
-            target = staging / name
-            try:
-                item = os.lstat(target)
-            except FileNotFoundError:
-                continue
-            if (
-                not stat.S_ISREG(item.st_mode)
-                or stat.S_ISLNK(item.st_mode)
-                or _is_reparse(item)
-            ):
-                return
-            target.unlink()
-        _parent_chain_unchanged(checked_parent)
-        current = _checked_lstat(staging, directory=True)
-        if (current.st_dev, current.st_ino) == staging_identity:
-            staging.rmdir()
-    except (BenchmarkHarnessError, FileNotFoundError, OSError):
-        return
+    _ = (staging, staging_identity, checked_parent, file_names)
 
 
 def _publish_directory(
@@ -1302,6 +1409,18 @@ def export_answer_free_tasks(
 def _positive_top_k(value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= MAX_TOP_K:
         raise ValueError(f"top_k must be an integer from 1 to {MAX_TOP_K}")
+    return value
+
+
+def _positive_discovery_top_k(value: Any) -> int:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_DISCOVERY_TOP_K
+    ):
+        raise ValueError(
+            f"top_k must be an integer from 1 to {MAX_DISCOVERY_TOP_K}"
+        )
     return value
 
 
@@ -1669,7 +1788,7 @@ def load_artifact_bundle_index(
 ) -> ArtifactBundleIndex:
     """Read one attested, bounded, exact-membership replay bundle index."""
 
-    if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(
+    if type(expected_sha256) is not str or not _SHA256_RE.fullmatch(
         expected_sha256
     ):
         raise BenchmarkHarnessError(
@@ -2000,6 +2119,587 @@ def project_verified_replay_bundles(
     )
 
 
+def _project_verified_discovery_result(
+    task: SnapshotTaskSpec,
+    result: DiscoveryTaskResult,
+    *,
+    top_k: int,
+) -> _ProjectedDiscoveryTask:
+    try:
+        # D0 owns the fixed 64-finding authority.  The caller's top-k is a
+        # stable slice after that complete projection and can never widen it.
+        complete = project_discovery_result(
+            result,
+            max_findings=MAX_DISCOVERY_TOP_K,
+        )
+        result_task = result.task
+        observed = (
+            result_task.task_id,
+            result_task.repo_url,
+            result_task.commit,
+            result_task.instruction_id,
+        )
+        candidates = result.candidates
+        reviews = result.reviews
+        status = result.status
+        decisions = {"emit": 0, "reject": 0, "defer": 0}
+        for review in reviews:
+            decisions[review.decision] += 1
+        trace_nodes = sum(len(candidate.trace) for candidate in candidates)
+    except (
+        AttributeError,
+        DiscoveryProjectionError,
+        KeyError,
+        RecursionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        raise BenchmarkHarnessError(
+            "discovery_projection_rejected",
+            "verified discovery result failed strict D0 projection",
+        ) from None
+
+    expected = (task.task_id, task.repo_url, task.commit, task.instruction_id)
+    if observed != expected:
+        raise BenchmarkHarnessError(
+            "discovery_task_binding_mismatch",
+            "verified discovery result does not match its public task snapshot",
+        )
+
+    emitted = complete[:top_k]
+    finding_bytes = 0
+    for finding in complete:
+        size = len(_canonical_json(dict(finding)).encode("utf-8")) + 1
+        if size > MAX_FINDING_BYTES:
+            raise BenchmarkHarnessError(
+                "finding_limit_exceeded",
+                "one projected discovery finding exceeds its byte budget",
+            )
+        finding_bytes += size
+    if finding_bytes > MAX_TASK_FINDING_BYTES:
+        raise BenchmarkHarnessError(
+            "task_output_limit_exceeded",
+            "one task's discovery findings exceed their byte budget",
+        )
+
+    stats = DiscoveryProjectionStats(
+        candidate_count=len(candidates),
+        emit_review_count=decisions["emit"],
+        reject_review_count=decisions["reject"],
+        defer_review_count=decisions["defer"],
+        trace_node_count=trace_nodes,
+        unique_findings=len(complete),
+        emitted_findings=len(emitted),
+        truncated_findings=len(complete) - len(emitted),
+        task_deferred=1 if status == "deferred" else 0,
+    )
+    return _ProjectedDiscoveryTask(
+        task_id=task.task_id,
+        snapshot_id=result_task.snapshot_id,
+        status=status,
+        findings=emitted,
+        stats=stats,
+    )
+
+
+def _discovery_output_files(
+    *,
+    split: Literal["train", "test"],
+    projected: Sequence[_ProjectedDiscoveryTask],
+    bundle_records: Sequence[Mapping[str, Any]],
+    bundle_index_sha256: str,
+    top_k: int,
+    aggregate: TrainingAggregate | None,
+) -> tuple[dict[str, bytes], str]:
+    findings = tuple(
+        finding
+        for task_projection in projected
+        for finding in task_projection.findings
+    )
+    finding_payload = _jsonl(findings)
+    task_result_payload = _jsonl(bundle_records)
+    files: dict[str, bytes] = {
+        "findings.jsonl": finding_payload,
+        "task_results.jsonl": task_result_payload,
+    }
+    if split == "train":
+        if aggregate is None:
+            raise ValueError("training discovery projection requires an aggregate")
+        files["aggregate.json"] = (
+            _canonical_json(aggregate.to_dict()) + "\n"
+        ).encode("utf-8")
+    elif aggregate is not None:
+        raise ValueError("test discovery projection must not include an aggregate")
+
+    stat_names = tuple(DiscoveryProjectionStats.__dataclass_fields__)
+    totals = {
+        name: sum(getattr(item.stats, name) for item in projected)
+        for name in stat_names
+    }
+    dataset_bindings = [
+        {
+            "dataset_sha256": record["dataset_sha256"],
+            "snapshot_id": record["snapshot_id"],
+            "task_id": record["task_id"],
+        }
+        for record in bundle_records
+    ]
+    file_bindings = {
+        name: {"bytes": len(payload), "sha256": _sha256(payload)}
+        for name, payload in sorted(files.items())
+    }
+    manifest: dict[str, Any] = {
+        "bundle_datasets": dataset_bindings,
+        "bundle_datasets_sha256": _sha256(
+            _canonical_json(dataset_bindings).encode("utf-8")
+        ),
+        "bundle_index_sha256": bundle_index_sha256,
+        "contract_version": ARTIFACT_INDEX_CONTRACT_VERSION,
+        "discovery_projection_version": DISCOVERY_PROJECTION_VERSION,
+        "files": file_bindings,
+        "kind": "verified_discovery_benchmark_projection",
+        "manifest_sha256": PROFILE_MANIFEST_SHA256,
+        "max_d0_findings": MAX_DISCOVERY_TOP_K,
+        "profile_id": PROFILE_ID,
+        "schema_version": PROFILE_SCHEMA_VERSION,
+        "split": split,
+        "task_count": len(projected),
+        "top_k": top_k,
+        **totals,
+    }
+    if split == "train":
+        manifest["official_tolerance"] = OFFICIAL_TOLERANCE
+    manifest_payload = (_canonical_json(manifest) + "\n").encode("utf-8")
+    files["manifest.json"] = manifest_payload
+    if sum(len(payload) for payload in files.values()) > MAX_TOTAL_OUTPUT_BYTES:
+        raise BenchmarkHarnessError(
+            "output_limit_exceeded",
+            "projected discovery output exceeds its byte budget",
+        )
+    return files, _sha256(manifest_payload)
+
+
+def _strict_read_published_discovery_output(
+    output: Path,
+    expected_files: Mapping[str, bytes],
+) -> str:
+    """Bind one final-name byte snapshot; the evaluator owns write exclusion."""
+
+    expected_names = frozenset(expected_files)
+    test_names = frozenset(
+        {"findings.jsonl", "manifest.json", "task_results.jsonl"}
+    )
+    train_names = test_names | {"aggregate.json"}
+    if expected_names not in (test_names, train_names):
+        raise ValueError("discovery output members do not match the fixed layout")
+    if any(type(payload) is not bytes for payload in expected_files.values()):
+        raise ValueError("discovery output payloads must be exact bytes")
+
+    directory_before = _checked_lstat(output, directory=True)
+    directory_identity = _identity(directory_before)
+    directory_descriptor: int | None = None
+    try:
+        if os.name == "posix":
+            directory_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            directory_descriptor = os.open(output, directory_flags)
+            opened_directory = os.fstat(directory_descriptor)
+            if (
+                not stat.S_ISDIR(opened_directory.st_mode)
+                or _is_reparse(opened_directory)
+                or (opened_directory.st_dev, opened_directory.st_ino)
+                != (directory_before.st_dev, directory_before.st_ino)
+            ):
+                raise ValueError("published discovery output changed while opening")
+
+        def list_members() -> tuple[str, ...]:
+            source: int | Path = (
+                directory_descriptor
+                if directory_descriptor is not None
+                else output
+            )
+            return tuple(os.listdir(source))
+
+        def stat_member(name: str) -> os.stat_result:
+            if directory_descriptor is not None:
+                result = os.stat(
+                    name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                if not stat.S_ISREG(result.st_mode) or _is_reparse(result):
+                    raise ValueError(
+                        "published discovery member is not a regular file"
+                    )
+                return result
+            return _checked_lstat(output / name, directory=False)
+
+        names_before = list_members()
+        if (
+            any(type(name) is not str for name in names_before)
+            or len(names_before) != len(expected_names)
+            or frozenset(names_before) != expected_names
+        ):
+            raise ValueError("published discovery output has an invalid member set")
+
+        def member_identity(
+            value: os.stat_result,
+        ) -> tuple[int, int, int, int | None]:
+            return _identity(value)
+
+        def read_exact_member(
+            name: str,
+            expected: bytes,
+        ) -> tuple[bytes, tuple[int, int, int, int | None]]:
+            named_before = stat_member(name)
+            if named_before.st_size != len(expected):
+                raise ValueError(
+                    "published discovery output has an invalid member size"
+                )
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_BINARY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            try:
+                if directory_descriptor is None:
+                    descriptor = os.open(output / name, flags)
+                else:
+                    descriptor = os.open(
+                        name,
+                        flags,
+                        dir_fd=directory_descriptor,
+                    )
+            except OSError as error:
+                raise ValueError(
+                    "published discovery member is unavailable"
+                ) from error
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or _is_reparse(opened)
+                    or (opened.st_dev, opened.st_ino)
+                    != (named_before.st_dev, named_before.st_ino)
+                ):
+                    raise ValueError(
+                        "published discovery member changed while opening"
+                    )
+                with os.fdopen(descriptor, "rb", closefd=False) as stream:
+                    payload = stream.read(len(expected) + 1)
+                finished = os.fstat(descriptor)
+            finally:
+                os.close(descriptor)
+            named_after = stat_member(name)
+            if (
+                member_identity(opened) != member_identity(finished)
+                or member_identity(opened) != member_identity(named_after)
+                or len(payload) != opened.st_size
+            ):
+                raise ValueError("published discovery member changed while reading")
+            if payload != expected or _sha256(payload) != _sha256(expected):
+                raise ValueError("published discovery member bytes do not match")
+            return payload, member_identity(named_after)
+
+        observed: dict[str, bytes] = {}
+        member_identities: dict[str, tuple[int, int, int, int | None]] = {}
+        for name in sorted(expected_names):
+            payload, identity = read_exact_member(name, expected_files[name])
+            observed[name] = payload
+            member_identities[name] = identity
+
+        # A later member may be used as the trigger to alter one that was
+        # already checked; directory metadata need not change for in-place
+        # writes.  Re-read every member after the complete first pass and bind
+        # both its exact bytes and extended identity before returning.
+        for name in sorted(expected_names):
+            payload, identity = read_exact_member(name, expected_files[name])
+            if payload != observed[name] or identity != member_identities[name]:
+                raise ValueError(
+                    "published discovery member changed after its first verification"
+                )
+
+        # Close the second-pass later-member window with one final name-bound
+        # identity sweep.  This mirrors the result-bundle reader's terminal
+        # member check; no directory metadata change is assumed for file writes.
+        for name in sorted(expected_names):
+            if _identity(stat_member(name)) != member_identities[name]:
+                raise ValueError(
+                    "published discovery member changed before verification closed"
+                )
+
+        names_after = list_members()
+        opened_directory_after = (
+            directory_before
+            if directory_descriptor is None
+            else os.fstat(directory_descriptor)
+        )
+        named_directory_after = _checked_lstat(output, directory=True)
+        if (
+            len(names_after) != len(expected_names)
+            or frozenset(names_after) != expected_names
+            or _identity(opened_directory_after) != directory_identity
+            or _identity(named_directory_after) != directory_identity
+        ):
+            raise ValueError("published discovery output changed during verification")
+        return _sha256(observed["manifest.json"])
+    finally:
+        if directory_descriptor is not None:
+            os.close(directory_descriptor)
+
+
+def _discovery_output_may_be_committed(output: Path) -> bool:
+    try:
+        os.lstat(output)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
+def _publish_verified_discovery_output(
+    output: Path,
+    files: Mapping[str, bytes],
+    *,
+    protected_roots: Iterable[str | os.PathLike[str]],
+) -> str:
+    """Publish once, then verify the fixed final-name interface before return."""
+
+    # Validate the internal layout before there can be a publication commit.
+    expected_names = frozenset(files)
+    base_names = frozenset(
+        {"findings.jsonl", "manifest.json", "task_results.jsonl"}
+    )
+    if expected_names not in (base_names, base_names | {"aggregate.json"}):
+        raise ValueError("discovery output members do not match the fixed layout")
+
+    try:
+        os.lstat(output)
+    except FileNotFoundError:
+        output_was_absent = True
+    except OSError:
+        output_was_absent = False
+    else:
+        output_was_absent = False
+
+    try:
+        _publish_directory(output, files, protected_roots=protected_roots)
+    except BenchmarkHarnessError as error:
+        may_be_committed = error.committed or (
+            (error.code != "output_exists" or output_was_absent)
+            and _discovery_output_may_be_committed(output)
+        )
+        if may_be_committed:
+            raise BenchmarkHarnessError(
+                "discovery_publication_uncertain",
+                "discovery output may have committed but is not verified",
+                committed=True,
+            ) from error
+        raise
+    except Exception as error:
+        if _discovery_output_may_be_committed(output):
+            raise BenchmarkHarnessError(
+                "discovery_publication_uncertain",
+                "discovery output may have committed but is not verified",
+                committed=True,
+            ) from error
+        raise BenchmarkHarnessError(
+            "output_transaction_failed",
+            "output directory transaction failed",
+        ) from error
+
+    try:
+        return _strict_read_published_discovery_output(output, files)
+    except Exception as error:
+        raise BenchmarkHarnessError(
+            "discovery_publication_uncertain",
+            "committed discovery output failed final interface verification",
+            committed=True,
+        ) from error
+
+
+def project_verified_discovery_bundles(
+    benchmark_root: str | os.PathLike[str],
+    *,
+    artifact_root: str | os.PathLike[str],
+    bundle_index: str | os.PathLike[str],
+    bundle_index_sha256: str,
+    output_dir: str | os.PathLike[str],
+    split: Literal["train", "test"],
+    top_k: int = DEFAULT_DISCOVERY_TOP_K,
+) -> DiscoveryProjectionSummary:
+    """Verify D2/D3 bundles, project fixed D0 results, and publish once."""
+
+    if split not in {"train", "test"}:
+        raise ValueError("split must be train or test")
+    if (
+        type(bundle_index_sha256) is not str
+        or _SHA256_RE.fullmatch(bundle_index_sha256) is None
+    ):
+        raise BenchmarkHarnessError(
+            "invalid_index_digest",
+            "bundle index digest must be lower-case SHA-256",
+        )
+    limit = _positive_discovery_top_k(top_k)
+    benchmark, artifacts, index_path, output = _preflight_projection_paths(
+        benchmark_root, artifact_root, bundle_index, output_dir
+    )
+    tasks = load_answer_free_tasks(benchmark, split=split)
+    index = load_artifact_bundle_index(
+        index_path,
+        expected_sha256=bundle_index_sha256,
+        split=split,
+        tasks=tasks,
+    )
+    indexed = {item.task_id: item.dataset_sha256 for item in index.bundles}
+    artifact_state = _checked_lstat(artifacts, directory=True)
+    artifact_identity = (artifact_state.st_dev, artifact_state.st_ino)
+    protected_paths = (benchmark, artifacts, index_path, output)
+    projected: list[_ProjectedDiscoveryTask] = []
+    bundle_records: list[dict[str, Any]] = []
+    projected_output_bytes = 0
+
+    # No train oracle or publication is reachable until every indexed bundle
+    # has passed the dedicated discovery reader and fixed D0 projection.
+    for task in tasks:
+        current_root = _checked_lstat(artifacts, directory=True)
+        if (current_root.st_dev, current_root.st_ino) != artifact_identity:
+            raise BenchmarkHarnessError(
+                "artifact_root_changed",
+                "artifact root changed during discovery verification",
+            )
+        dataset_sha256 = indexed[task.task_id]
+        try:
+            verified = read_discovery_result_bundle(
+                artifacts / task.task_id,
+                expected_dataset_sha256=dataset_sha256,
+                expected_task_id=task.task_id,
+                protected_paths=protected_paths,
+                limits=_BENCHMARK_DISCOVERY_REPLAY_LIMITS,
+            )
+        except (DiscoveryReplayError, ValueError, OSError) as error:
+            raise BenchmarkHarnessError(
+                "discovery_artifact_rejected",
+                "a discovery bundle failed complete verification",
+            ) from error
+        if type(verified) is not VerifiedDiscoveryResult:
+            raise BenchmarkHarnessError(
+                "discovery_artifact_rejected",
+                "discovery reader returned an invalid result",
+            )
+        try:
+            verified_dataset_sha256 = verified.dataset_sha256
+            verified_result = verified.result
+        except (AttributeError, RecursionError, RuntimeError, TypeError, ValueError):
+            raise BenchmarkHarnessError(
+                "discovery_artifact_rejected",
+                "discovery reader returned an invalid result",
+            ) from None
+        if (
+            type(verified_dataset_sha256) is not str
+            or type(verified_result) is not DiscoveryTaskResult
+        ):
+            raise BenchmarkHarnessError(
+                "discovery_artifact_rejected",
+                "discovery reader returned an invalid result",
+            )
+        if verified_dataset_sha256 != dataset_sha256:
+            raise BenchmarkHarnessError(
+                "discovery_digest_mismatch",
+                "discovery bundle digest does not match its index",
+            )
+        task_projection = _project_verified_discovery_result(
+            task,
+            verified_result,
+            top_k=limit,
+        )
+        bundle_record = {
+            "dataset_sha256": dataset_sha256,
+            "snapshot_id": task_projection.snapshot_id,
+            "status": task_projection.status,
+            "task_id": task.task_id,
+            **task_projection.stats.to_dict(),
+        }
+        projected_output_bytes += sum(
+            len(_canonical_json(dict(finding)).encode("utf-8")) + 1
+            for finding in task_projection.findings
+        )
+        projected_output_bytes += len(
+            _canonical_json(bundle_record).encode("utf-8")
+        ) + 1
+        if projected_output_bytes > MAX_TOTAL_OUTPUT_BYTES:
+            raise BenchmarkHarnessError(
+                "output_limit_exceeded",
+                "projected discovery output exceeds its byte budget",
+            )
+        projected.append(task_projection)
+        if (
+            sum(item.stats.trace_node_count for item in projected)
+            > MAX_TRACE_NODES_PER_BATCH
+        ):
+            raise BenchmarkHarnessError(
+                "trace_node_limit_exceeded",
+                "projected discovery batch exceeds its trace-node budget",
+            )
+        bundle_records.append(bundle_record)
+
+    current_artifact_state = _checked_lstat(artifacts, directory=True)
+    if (current_artifact_state.st_dev, current_artifact_state.st_ino) != artifact_identity:
+        raise BenchmarkHarnessError(
+            "artifact_root_changed",
+            "artifact root changed during discovery verification",
+        )
+
+    aggregate: TrainingAggregate | None = None
+    if split == "train":
+        aggregate = evaluate_training_aggregate(
+            benchmark,
+            (
+                finding
+                for task_projection in projected
+                for finding in task_projection.findings
+            ),
+        )
+    files, manifest_digest = _discovery_output_files(
+        split=split,
+        projected=projected,
+        bundle_records=bundle_records,
+        bundle_index_sha256=bundle_index_sha256,
+        top_k=limit,
+        aggregate=aggregate,
+    )
+    summary = DiscoveryProjectionSummary(
+        split=split,
+        task_count=len(projected),
+        finalized_task_count=sum(item.status == "finalized" for item in projected),
+        deferred_task_count=sum(item.status == "deferred" for item in projected),
+        candidate_count=sum(item.stats.candidate_count for item in projected),
+        finding_count=sum(len(item.findings) for item in projected),
+        bundle_index_sha256=bundle_index_sha256,
+        output_manifest_sha256=manifest_digest,
+        aggregate=aggregate,
+    )
+    published_manifest_digest = _publish_verified_discovery_output(
+        output,
+        files,
+        protected_roots=(benchmark, artifacts, index_path),
+    )
+    if published_manifest_digest != manifest_digest:
+        raise BenchmarkHarnessError(
+            "discovery_publication_uncertain",
+            "committed discovery manifest digest is not the prepared digest",
+            committed=True,
+        )
+    return summary
+
+
 def _line_span(value: Any) -> tuple[int, int] | None:
     if isinstance(value, bool):
         return None
@@ -2160,7 +2860,11 @@ __all__ = [
     "ArtifactBundleDigest",
     "ArtifactBundleIndex",
     "BenchmarkHarnessError",
+    "DEFAULT_DISCOVERY_TOP_K",
     "DEFAULT_TOP_K",
+    "DiscoveryProjectionStats",
+    "DiscoveryProjectionSummary",
+    "MAX_DISCOVERY_TOP_K",
     "MAX_TOP_K",
     "PROFILE_MANIFEST_SHA256",
     "PROFILE_SOURCE_REVISION",
@@ -2173,6 +2877,7 @@ __all__ = [
     "export_answer_free_tasks",
     "load_artifact_bundle_index",
     "load_answer_free_tasks",
+    "project_verified_discovery_bundles",
     "project_verified_replay_bundles",
     "validate_public_bundle",
 ]

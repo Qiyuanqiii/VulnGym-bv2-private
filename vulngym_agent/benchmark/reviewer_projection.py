@@ -8,12 +8,14 @@ from .discovery_contracts import (
     DiscoveryContractError,
     DiscoveryDeferred,
     DiscoveryReview,
+    DiscoveryTaskInputV1,
     DiscoveryTaskResult,
 )
 from .reviewer_contracts import (
     ReviewerContractError,
     ReviewerDeferredV1,
     ReviewerFinalizedV1,
+    ReviewerInputV1,
     ReviewerResultV1,
     parse_reviewer_result_v1,
 )
@@ -83,15 +85,74 @@ def _canonical_result(value: object) -> ReviewerResultV1:
 
 def _canonical_producer_result(value: object) -> ProducerResultV1:
     if type(value) is ProducerDraftV1:
-        parser = ProducerDraftV1.from_dict
+        try:
+            # ReviewerInputV1 closes the complete embedded D2 exact-type graph
+            # before the draft serializer is invoked.
+            return ReviewerInputV1(producer_draft=value).producer_draft
+        except (
+            AttributeError,
+            KeyError,
+            RecursionError,
+            ReviewerContractError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            raise ReviewerProjectionError(
+                "invalid_result", "producer result did not pass strict D2 normalization"
+            ) from None
     elif type(value) is ProducerDeferredV1:
-        parser = ProducerDeferredV1.from_dict
+        try:
+            task = value.task
+            exact = (
+                type(task) is DiscoveryTaskInputV1
+                and type(task.task_id) is str
+                and type(task.repo_url) is str
+                and type(task.commit) is str
+                and type(task.instruction_id) is str
+                and type(task.snapshot_manifest_sha256) is str
+                and type(task.snapshot_content_root) is str
+                and type(task.snapshot_id) is str
+                and type(task.contract_version) is int
+                and type(value.stage) is str
+                and type(value.reason_code) is str
+                and type(value.missing_information) is tuple
+                and all(type(item) is str for item in value.missing_information)
+                and type(value.coverage_status) is str
+                and type(value.policy_version) is str
+                and type(value.contract_version) is int
+            )
+        except (AttributeError, RecursionError, RuntimeError, TypeError, ValueError):
+            exact = False
+        if not exact:
+            raise ReviewerProjectionError(
+                "invalid_result", "producer result contains a polymorphic contract value"
+            )
     else:
         raise ReviewerProjectionError(
             "invalid_result", "producer result must be an exact D2 result"
         )
     try:
-        return parser(value.to_dict())
+        canonical_task = DiscoveryTaskInputV1(
+            task_id=task.task_id,
+            repo_url=task.repo_url,
+            commit=task.commit,
+            instruction_id=task.instruction_id,
+            snapshot_manifest_sha256=task.snapshot_manifest_sha256,
+            snapshot_content_root=task.snapshot_content_root,
+            contract_version=task.contract_version,
+        )
+        if canonical_task.snapshot_id != task.snapshot_id:
+            raise ValueError("snapshot_id does not match the task snapshot")
+        return ProducerDeferredV1(
+            task=canonical_task,
+            stage=value.stage,
+            reason_code=value.reason_code,
+            missing_information=value.missing_information,
+            coverage_status=value.coverage_status,
+            policy_version=value.policy_version,
+            contract_version=value.contract_version,
+        )
     except (
         AttributeError,
         KeyError,

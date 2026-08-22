@@ -10,9 +10,12 @@ from typing import Sequence
 
 from vulngym_agent.benchmark.harness import (
     BenchmarkHarnessError,
+    DEFAULT_DISCOVERY_TOP_K,
     DEFAULT_TOP_K,
+    MAX_DISCOVERY_TOP_K,
     MAX_TOP_K,
     export_answer_free_tasks,
+    project_verified_discovery_bundles,
     project_verified_replay_bundles,
     validate_public_bundle,
 )
@@ -26,6 +29,18 @@ def _top_k(value: str) -> int:
     if not 1 <= parsed <= MAX_TOP_K:
         raise argparse.ArgumentTypeError(
             f"top-k must be between 1 and {MAX_TOP_K}"
+        )
+    return parsed
+
+
+def _discovery_top_k(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("top-k must be an integer") from None
+    if not 1 <= parsed <= MAX_DISCOVERY_TOP_K:
+        raise argparse.ArgumentTypeError(
+            f"top-k must be between 1 and {MAX_DISCOVERY_TOP_K}"
         )
     return parsed
 
@@ -59,6 +74,27 @@ def _parser() -> argparse.ArgumentParser:
         project.add_argument("--bundle-index-sha256", required=True)
         project.add_argument("--output-dir", type=Path, required=True)
         project.add_argument("--top-k", type=_top_k, default=DEFAULT_TOP_K)
+    for name, help_text in (
+        (
+            "project-discovery-train",
+            "verify discovery bundles, project D0, and run the train oracle",
+        ),
+        (
+            "project-discovery-test",
+            "verify discovery bundles and create a blind D0 submission",
+        ),
+    ):
+        project = commands.add_parser(name, help=help_text)
+        project.add_argument("--benchmark-root", type=Path, required=True)
+        project.add_argument("--artifact-root", type=Path, required=True)
+        project.add_argument("--bundle-index", type=Path, required=True)
+        project.add_argument("--bundle-index-sha256", required=True)
+        project.add_argument("--output-dir", type=Path, required=True)
+        project.add_argument(
+            "--top-k",
+            type=_discovery_top_k,
+            default=DEFAULT_DISCOVERY_TOP_K,
+        )
     return parser
 
 
@@ -85,7 +121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 split=args.split,
                 output_dir=args.output_dir,
             )
-        else:
+        elif args.command in {"project-train", "project-test"}:
             summary = project_verified_replay_bundles(
                 args.benchmark_root,
                 artifact_root=args.artifact_root,
@@ -93,6 +129,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 bundle_index_sha256=args.bundle_index_sha256,
                 output_dir=args.output_dir,
                 split="train" if args.command == "project-train" else "test",
+                top_k=args.top_k,
+            )
+        else:
+            summary = project_verified_discovery_bundles(
+                args.benchmark_root,
+                artifact_root=args.artifact_root,
+                bundle_index=args.bundle_index,
+                bundle_index_sha256=args.bundle_index_sha256,
+                output_dir=args.output_dir,
+                split=(
+                    "train"
+                    if args.command == "project-discovery-train"
+                    else "test"
+                ),
                 top_k=args.top_k,
             )
     except BenchmarkHarnessError as error:

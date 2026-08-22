@@ -4,6 +4,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -28,6 +29,8 @@ from vulngym_agent.benchmark.reviewer_projection import project_discovery_run_v1
 from vulngym_agent.benchmark.sealed_snapshot import prepare_sealed_snapshot
 from vulngym_agent.benchmark.sealed_tree_access import bind_sealed_tree
 from vulngym_agent.orchestrator.budget import Budget, Limits
+import vulngym_agent.orchestrator as orchestrator_api
+import vulngym_agent.orchestrator.discovery_pipeline as discovery_pipeline_module
 from vulngym_agent.orchestrator.discovery_pipeline import (
     SourceDiscoveryRunV1,
     run_source_discovery_task_v1,
@@ -115,7 +118,10 @@ class SourceDiscoveryPipelineTests(unittest.TestCase):
             missing_information=("source evidence",),
         )
 
-    def _draft(self) -> ProducerDraftV1:
+    def _draft(
+        self, task: DiscoveryTaskInputV1 | None = None
+    ) -> ProducerDraftV1:
+        task = self.task if task is None else task
         lines = SOURCE.splitlines(keepends=True)
 
         def location(line: int) -> DiscoveryLocation:
@@ -129,10 +135,10 @@ class SourceDiscoveryPipelineTests(unittest.TestCase):
         source_id = _artifact("pipeline-source", 1)
         relationship_id = _artifact("pipeline-link", 1)
         candidate = DiscoveryCandidate(
-            task_id=self.task.task_id,
-            snapshot_id=self.task.snapshot_id,
-            repo_url=self.task.repo_url,
-            commit=self.task.commit,
+            task_id=task.task_id,
+            snapshot_id=task.snapshot_id,
+            repo_url=task.repo_url,
+            commit=task.commit,
             entry_point=location(1),
             critical_operation=location(3),
             trace=(location(2),),
@@ -154,7 +160,7 @@ class SourceDiscoveryPipelineTests(unittest.TestCase):
             ),
         )
         return ProducerDraftV1(
-            task=self.task,
+            task=task,
             candidates=(candidate,),
             validation_receipts=(receipt,),
         )
@@ -196,6 +202,27 @@ class SourceDiscoveryPipelineTests(unittest.TestCase):
                 return result
 
         return Controller
+
+    def test_public_orchestrator_exports_discovery_lane(self) -> None:
+        expected = {
+            "DEFAULT_DISCOVERY_REPLAY_LIMITS",
+            "DISCOVERY_REPLAY_FILES",
+            "DiscoveryReplayError",
+            "DiscoveryReplayLimits",
+            "SOURCE_DISCOVERY_RUN_CONTRACT_VERSION",
+            "SourceDiscoveryRunV1",
+            "VerifiedDiscoveryResult",
+            "read_discovery_result_bundle",
+            "run_source_discovery_task_v1",
+            "write_discovery_result_bundle",
+        }
+        self.assertTrue(expected.issubset(orchestrator_api.__all__))
+        self.assertEqual(len(orchestrator_api.__all__), len(set(orchestrator_api.__all__)))
+        self.assertIs(SourceDiscoveryRunV1, orchestrator_api.SourceDiscoveryRunV1)
+        self.assertIs(
+            run_source_discovery_task_v1,
+            orchestrator_api.run_source_discovery_task_v1,
+        )
 
     def test_d2_deferred_never_acquires_or_runs_d3(self) -> None:
         producer = self._deferred()
@@ -320,6 +347,30 @@ class SourceDiscoveryPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "run_sha256"):
             SourceDiscoveryRunV1.from_dict(tampered)
 
+        oversized = bytearray(discovery_pipeline_module._MAX_RUN_WIRE_BYTES + 1)
+        with self.assertRaisesRegex(ValueError, "oversized"):
+            SourceDiscoveryRunV1.from_wire(oversized)
+
+        callbacks: list[str] = []
+
+        class WireText(str):
+            def encode(self, *args, **kwargs):
+                callbacks.append("text")
+                return super().encode(*args, **kwargs)
+
+        class WireBytes(bytearray):
+            def __len__(self):
+                callbacks.append("bytes")
+                return super().__len__()
+
+        for polymorphic in (
+            WireText(result.to_wire().decode()),
+            WireBytes(result.to_wire()),
+        ):
+            with self.assertRaises(ValueError):
+                SourceDiscoveryRunV1.from_wire(polymorphic)
+        self.assertEqual([], callbacks)
+
     def test_run_contract_rejects_incomplete_or_inconsistent_closure(self) -> None:
         deferred = self._deferred()
         deferred_projection = project_discovery_run_v1(deferred, None)
@@ -350,6 +401,173 @@ class SourceDiscoveryPipelineTests(unittest.TestCase):
         discovery = project_discovery_run_v1(self._deferred(), None)
         with self.assertRaisesRegex(ValueError, "exact D2 result"):
             SourceDiscoveryRunV1(evil, None, discovery)
+
+    def test_nested_polymorphic_contracts_never_invoke_overrides(self) -> None:
+        serializer_calls: list[str] = []
+        deferred_projection = project_discovery_run_v1(self._deferred(), None)
+
+        class EvilTask(DiscoveryTaskInputV1):
+            def to_dict(self):
+                serializer_calls.append("d2-deferred-task")
+                raise AssertionError("nested task serializer was invoked")
+
+        evil_task = EvilTask(
+            task_id=self.task.task_id,
+            repo_url=self.task.repo_url,
+            commit=self.task.commit,
+            instruction_id=self.task.instruction_id,
+            snapshot_manifest_sha256=self.task.snapshot_manifest_sha256,
+            snapshot_content_root=self.task.snapshot_content_root,
+        )
+        deferred = self._deferred()
+        object.__setattr__(deferred, "task", evil_task)
+        with self.assertRaisesRegex(ValueError, "polymorphic contract value"):
+            SourceDiscoveryRunV1(deferred, None, deferred_projection)
+
+        class EvilLocation(DiscoveryLocation):
+            def to_dict(self):
+                serializer_calls.append("d2-draft-location")
+                raise AssertionError("nested location serializer was invoked")
+
+        draft_with_evil_location = self._draft()
+        entry = draft_with_evil_location.candidates[0].entry_point
+        object.__setattr__(
+            draft_with_evil_location.candidates[0],
+            "entry_point",
+            EvilLocation(
+                file=entry.file,
+                line_start=entry.line_start,
+                line_end=entry.line_end,
+                code_sha256=entry.code_sha256,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "strict normalization"):
+            SourceDiscoveryRunV1(
+                draft_with_evil_location,
+                None,
+                deferred_projection,
+            )
+
+        reviewer_draft = self._draft()
+        reviewer = self._reviewer_deferred(reviewer_draft)
+        reviewer_projection = project_discovery_run_v1(reviewer_draft, reviewer)
+        reviewer_override_armed = False
+
+        class EvilReviewerInput(ReviewerInputV1):
+            def to_dict(self):
+                if reviewer_override_armed:
+                    serializer_calls.append("d3-review-input")
+                    raise AssertionError("nested reviewer serializer was invoked")
+                return super().to_dict()
+
+        evil_review_input = EvilReviewerInput(producer_draft=reviewer_draft)
+        reviewer_override_armed = True
+        object.__setattr__(reviewer, "review_input", evil_review_input)
+        with self.assertRaisesRegex(ValueError, "strict normalization"):
+            SourceDiscoveryRunV1(
+                reviewer_draft,
+                reviewer,
+                reviewer_projection,
+            )
+
+        self.assertEqual(serializer_calls, [])
+
+    def test_malformed_exact_contract_objects_raise_value_error(self) -> None:
+        malformed_task = object.__new__(DiscoveryTaskInputV1)
+        with self.assertRaises(ValueError):
+            discovery_pipeline_module._canonical_task(malformed_task)
+
+        malformed_deferred = object.__new__(ProducerDeferredV1)
+        with self.assertRaises(ValueError):
+            discovery_pipeline_module._canonical_producer(malformed_deferred)
+
+    def test_wrong_producer_task_is_rejected_before_d3_acquisition(self) -> None:
+        wrong_task = DiscoveryTaskInputV1(
+            task_id="VG-TRAIN-F123456789ABCDEF0789",
+            repo_url=self.task.repo_url,
+            commit=self.task.commit,
+            instruction_id=self.task.instruction_id,
+            snapshot_manifest_sha256=self.task.snapshot_manifest_sha256,
+            snapshot_content_root=self.task.snapshot_content_root,
+        )
+        producer = self._draft(wrong_task)
+        producer_seen: list[tuple[object, ...]] = []
+        d2_trees: list[object] = []
+        d3_factory_calls: list[str] = []
+
+        def d2_tree_factory():
+            tree = self._tree()
+            d2_trees.append(tree)
+            return tree
+
+        def forbidden_d3_factory():
+            d3_factory_calls.append("d3")
+            self.fail("a mismatched D2 task must not acquire D3 resources")
+
+        class ForbiddenReviewerController:
+            def __init__(self, *_args, **_kwargs) -> None:
+                raise AssertionError(
+                    "a mismatched D2 task must not construct the D3 controller"
+                )
+
+        with (
+            mock.patch(
+                "vulngym_agent.orchestrator.discovery_pipeline.SourceDiscoveryAttemptController",
+                self._producer_controller(producer, producer_seen),
+            ),
+            mock.patch(
+                "vulngym_agent.orchestrator.discovery_pipeline.SourceDiscoveryReviewerController",
+                ForbiddenReviewerController,
+            ),
+        ):
+            with self.assertRaisesRegex(ValueError, "does not match the requested task"):
+                run_source_discovery_task_v1(
+                    self.task,
+                    d2_tree_factory=d2_tree_factory,
+                    d2_budget_factory=lambda: Budget(Limits()),
+                    d2_backend=object(),
+                    d3_tree_factory=forbidden_d3_factory,
+                    d3_budget_factory=forbidden_d3_factory,
+                    d3_backend=object(),
+                )
+
+        self.assertEqual(len(producer_seen), 1)
+        self.assertEqual(d3_factory_calls, [])
+        self.assertEqual(len(d2_trees), 1)
+        self.assertTrue(d2_trees[0].usage_snapshot().finalized)
+
+    def test_tree_factory_return_interruption_finalizes_tree(self) -> None:
+        created_trees: list[object] = []
+        triggered = False
+
+        def factory():
+            tree = self._tree()
+            created_trees.append(tree)
+            return tree
+
+        def interrupt(frame, event, argument):
+            nonlocal triggered
+            if (
+                event == "line"
+                and frame.f_code is discovery_pipeline_module._acquire_tree.__code__
+                and created_trees
+            ):
+                triggered = True
+                sys.settrace(None)
+                raise KeyboardInterrupt()
+            return interrupt
+
+        previous_trace = sys.gettrace()
+        sys.settrace(interrupt)
+        try:
+            with self.assertRaises(KeyboardInterrupt):
+                discovery_pipeline_module._acquire_tree(factory, name="test_factory")
+        finally:
+            sys.settrace(previous_trace)
+
+        self.assertTrue(triggered)
+        self.assertEqual(len(created_trees), 1)
+        self.assertTrue(created_trees[0].usage_snapshot().finalized)
 
     def test_invalid_task_and_d2_failure_do_not_touch_d3_factories(self) -> None:
         factory_calls: list[str] = []

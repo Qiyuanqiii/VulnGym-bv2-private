@@ -35,6 +35,7 @@ from vulngym_agent.benchmark.reviewer_contracts import (
     ReviewerFinalizedV1,
     ReviewerInputV1,
     ReviewerResultV1,
+    parse_reviewer_result_v1,
 )
 from vulngym_agent.benchmark.reviewer_projection import project_discovery_run_v1
 from vulngym_agent.benchmark.sealed_tree_access import BoundSealedTree
@@ -71,40 +72,122 @@ def _canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def _task_has_exact_types(value: object) -> bool:
+    try:
+        return (
+            type(value) is DiscoveryTaskInputV1
+            and type(value.task_id) is str
+            and type(value.repo_url) is str
+            and type(value.commit) is str
+            and type(value.instruction_id) is str
+            and type(value.snapshot_manifest_sha256) is str
+            and type(value.snapshot_content_root) is str
+            and type(value.snapshot_id) is str
+            and type(value.contract_version) is int
+        )
+    except (AttributeError, RecursionError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _producer_deferred_has_exact_types(value: object) -> bool:
+    try:
+        return (
+            type(value) is ProducerDeferredV1
+            and _task_has_exact_types(value.task)
+            and type(value.stage) is str
+            and type(value.reason_code) is str
+            and type(value.missing_information) is tuple
+            and all(type(item) is str for item in value.missing_information)
+            and type(value.coverage_status) is str
+            and type(value.policy_version) is str
+            and type(value.contract_version) is int
+        )
+    except (AttributeError, RecursionError, RuntimeError, TypeError, ValueError):
+        return False
+
+
 def _canonical_task(value: object) -> DiscoveryTaskInputV1:
-    if type(value) is not DiscoveryTaskInputV1:
+    if not _task_has_exact_types(value):
         raise ValueError("task must be an exact DiscoveryTaskInputV1")
     try:
-        return DiscoveryTaskInputV1.from_dict(value.to_dict())
+        canonical = DiscoveryTaskInputV1(
+            task_id=value.task_id,
+            repo_url=value.repo_url,
+            commit=value.commit,
+            instruction_id=value.instruction_id,
+            snapshot_manifest_sha256=value.snapshot_manifest_sha256,
+            snapshot_content_root=value.snapshot_content_root,
+            contract_version=value.contract_version,
+        )
+        if canonical.snapshot_id != value.snapshot_id:
+            raise ValueError("snapshot_id does not match the task snapshot")
+        return canonical
     except (AttributeError, KeyError, RecursionError, RuntimeError, TypeError, ValueError):
         raise ValueError("task did not pass strict normalization") from None
 
 
 def _canonical_producer(value: object) -> ProducerResultV1:
     if type(value) is ProducerDraftV1:
-        parser = ProducerDraftV1.from_wire
+        try:
+            # ReviewerInputV1 performs the bounded, full exact-type graph
+            # preflight before invoking the draft's serializer.
+            return ReviewerInputV1(producer_draft=value).producer_draft
+        except (
+            AttributeError,
+            KeyError,
+            RecursionError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            raise ValueError(
+                "producer_result did not pass strict normalization"
+            ) from None
     elif type(value) is ProducerDeferredV1:
-        parser = ProducerDeferredV1.from_wire
+        if not _producer_deferred_has_exact_types(value):
+            raise ValueError(
+                "producer_result contains a polymorphic contract value"
+            )
     else:
         raise ValueError("producer_result must be an exact D2 result")
     try:
-        return parser(value.to_wire())
-    except (AttributeError, KeyError, RecursionError, RuntimeError, TypeError, ValueError):
+        return ProducerDeferredV1(
+            task=_canonical_task(value.task),
+            stage=value.stage,
+            reason_code=value.reason_code,
+            missing_information=value.missing_information,
+            coverage_status=value.coverage_status,
+            policy_version=value.policy_version,
+            contract_version=value.contract_version,
+        )
+    except (
+        AttributeError,
+        KeyError,
+        RecursionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
         raise ValueError("producer_result did not pass strict normalization") from None
 
 
 def _canonical_reviewer(value: object | None) -> ReviewerResultV1 | None:
     if value is None:
         return None
-    if type(value) is ReviewerFinalizedV1:
-        parser = ReviewerFinalizedV1.from_wire
-    elif type(value) is ReviewerDeferredV1:
-        parser = ReviewerDeferredV1.from_wire
-    else:
+    if type(value) not in (ReviewerFinalizedV1, ReviewerDeferredV1):
         raise ValueError("reviewer_result must be an exact D3 result or None")
     try:
-        return parser(value.to_wire())
-    except (AttributeError, KeyError, RecursionError, RuntimeError, TypeError, ValueError):
+        # The public parser rebuilds exact nested D3 values and rejects any
+        # polymorphic node before that node's serialization can run.
+        return parse_reviewer_result_v1(value)
+    except (
+        AttributeError,
+        KeyError,
+        RecursionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
         raise ValueError("reviewer_result did not pass strict normalization") from None
 
 
@@ -235,15 +318,16 @@ class SourceDiscoveryRunV1:
 
     @classmethod
     def from_wire(cls, value: Any) -> "SourceDiscoveryRunV1":
-        if isinstance(value, str):
+        if type(value) is str:
             if not value or len(value) > _MAX_RUN_WIRE_BYTES:
                 raise ValueError("source discovery run wire is empty or oversized")
             try:
                 raw = value.encode("utf-8")
             except UnicodeError:
                 raise ValueError("source discovery run wire is not UTF-8") from None
-        elif isinstance(value, (bytes, bytearray, memoryview)):
-            if isinstance(value, memoryview) and value.nbytes > _MAX_RUN_WIRE_BYTES:
+        elif type(value) in (bytes, bytearray, memoryview):
+            wire_size = value.nbytes if type(value) is memoryview else len(value)
+            if wire_size > _MAX_RUN_WIRE_BYTES:
                 raise ValueError("source discovery run wire is oversized")
             raw = bytes(value)
         else:
@@ -274,10 +358,17 @@ class SourceDiscoveryRunV1:
 def _acquire_tree(factory: TreeFactory, *, name: str) -> BoundSealedTree:
     if not callable(factory):
         raise ValueError(f"{name} must be callable")
-    tree = factory()
-    if type(tree) is not BoundSealedTree:
-        raise ValueError(f"{name} must return an exact BoundSealedTree")
-    return tree
+    tree: BoundSealedTree | None = None
+    try:
+        tree = factory()
+        if type(tree) is not BoundSealedTree:
+            raise ValueError(f"{name} must return an exact BoundSealedTree")
+        return tree
+    except BaseException:
+        # This also covers asynchronous interruption after the factory has
+        # returned but before the capability is handed to the caller.
+        _close_tree(tree)
+        raise
 
 
 def _acquire_budget(factory: BudgetFactory, *, name: str) -> Budget:
@@ -338,6 +429,8 @@ def run_source_discovery_task_v1(
                 d2_backend,
             ).run()
         )
+        if producer_result.task != canonical_task:
+            raise ValueError("producer_result task does not match the requested task")
         _require_closed_tree(d2_tree, name="D2")
     except BaseException:
         _close_tree(d2_tree)

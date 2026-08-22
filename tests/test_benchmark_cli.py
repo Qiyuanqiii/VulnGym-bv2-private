@@ -63,6 +63,67 @@ class BenchmarkCliTests(unittest.TestCase):
             self.assertEqual(project.call_args.kwargs["split"], split)
             self.assertEqual(project.call_args.kwargs["top_k"], 64)
 
+    def test_discovery_commands_are_explicit_and_use_the_64_cap(self) -> None:
+        for command, split in (
+            ("project-discovery-train", "train"),
+            ("project-discovery-test", "test"),
+        ):
+            summary = mock.Mock()
+            summary.to_dict.return_value = {"kind": "discovery", "split": split}
+            output = StringIO()
+            with mock.patch.object(
+                benchmark_cli,
+                "project_verified_discovery_bundles",
+                return_value=summary,
+            ) as discovery, mock.patch.object(
+                benchmark_cli, "project_verified_replay_bundles"
+            ) as legacy, redirect_stdout(output):
+                status = benchmark_cli.main(
+                    [
+                        command,
+                        "--benchmark-root",
+                        "benchmark",
+                        "--artifact-root",
+                        "artifacts",
+                        "--bundle-index",
+                        "index.json",
+                        "--bundle-index-sha256",
+                        "a" * 64,
+                        "--output-dir",
+                        "output",
+                    ]
+                )
+            self.assertEqual(status, 0)
+            self.assertEqual(
+                json.loads(output.getvalue()),
+                {"kind": "discovery", "split": split},
+            )
+            self.assertEqual(discovery.call_args.kwargs["split"], split)
+            self.assertEqual(discovery.call_args.kwargs["top_k"], 64)
+            legacy.assert_not_called()
+
+        error = StringIO()
+        with redirect_stderr(error), self.assertRaises(SystemExit) as captured:
+            benchmark_cli.main(
+                [
+                    "project-discovery-test",
+                    "--benchmark-root",
+                    "benchmark",
+                    "--artifact-root",
+                    "artifacts",
+                    "--bundle-index",
+                    "index.json",
+                    "--bundle-index-sha256",
+                    "a" * 64,
+                    "--output-dir",
+                    "output",
+                    "--top-k",
+                    "65",
+                ]
+            )
+        self.assertEqual(captured.exception.code, 2)
+        self.assertIn("between 1 and 64", error.getvalue())
+
     def test_os_errors_do_not_echo_absolute_paths(self) -> None:
         secret = r"D:\sensitive\private\gold.jsonl"
         error = StringIO()

@@ -4,7 +4,11 @@ import unittest
 
 import vulngym_agent.benchmark as benchmark_api
 from tests.test_reviewer_contracts import _finalized, _review_input, _seal
-from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskResult
+from vulngym_agent.benchmark.discovery_contracts import (
+    DiscoveryLocation,
+    DiscoveryTaskInputV1,
+    DiscoveryTaskResult,
+)
 from vulngym_agent.benchmark.producer_contracts import (
     ProducerDeferredV1,
     ProducerDraftV1,
@@ -185,6 +189,56 @@ class ReviewerProjectionTests(unittest.TestCase):
         with self.assertRaises(ReviewerProjectionError) as captured:
             project_discovery_run_v1({}, None)  # type: ignore[arg-type]
         self.assertEqual("invalid_result", captured.exception.code)
+
+    def test_discovery_run_rejects_nested_d2_subclasses_without_callbacks(self) -> None:
+        serializer_calls: list[str] = []
+
+        class CountingLocation(DiscoveryLocation):
+            def to_dict(self):
+                serializer_calls.append("draft-location")
+                raise AssertionError("nested draft serializer was invoked")
+
+        draft = _finalized().review_input.producer_draft
+        entry = draft.candidates[0].entry_point
+        object.__setattr__(
+            draft.candidates[0],
+            "entry_point",
+            CountingLocation(
+                file=entry.file,
+                line_start=entry.line_start,
+                line_end=entry.line_end,
+                code_sha256=entry.code_sha256,
+            ),
+        )
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1(draft, None)
+        self.assertEqual("invalid_result", captured.exception.code)
+
+        class CountingTask(DiscoveryTaskInputV1):
+            def to_dict(self):
+                serializer_calls.append("deferred-task")
+                raise AssertionError("nested deferred serializer was invoked")
+
+        task = _review_input(0).producer_draft.task
+        nested_task = CountingTask(
+            task_id=task.task_id,
+            repo_url=task.repo_url,
+            commit=task.commit,
+            instruction_id=task.instruction_id,
+            snapshot_manifest_sha256=task.snapshot_manifest_sha256,
+            snapshot_content_root=task.snapshot_content_root,
+        )
+        deferred = ProducerDeferredV1(
+            task=task,
+            stage="SCOUT",
+            reason_code="model_error",
+            missing_information=("source evidence is incomplete",),
+        )
+        object.__setattr__(deferred, "task", nested_task)
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1(deferred, None)
+        self.assertEqual("invalid_result", captured.exception.code)
+        self.assertEqual(serializer_calls, [])
 
     def test_projection_strictly_rechecks_input_and_derived_fields(self) -> None:
         result = _finalized()
