@@ -332,8 +332,15 @@ class DiscoveryToolbox:
                 raise SealedTreeAccessError(
                     "access_claimed", "source usage is already claimed"
                 )
-            self._tree._claim_for_discovery(self._tree_claim_token)
-            self._source_claimed = True
+            try:
+                self._tree._claim_for_discovery(self._tree_claim_token)
+                self._source_claimed = True
+            except BaseException:
+                try:
+                    self._tree._abort(_claim_token=self._tree_claim_token)
+                except BaseException:
+                    pass
+                raise
 
     def _require_source_claimed(self) -> None:
         if not self._source_claimed:
