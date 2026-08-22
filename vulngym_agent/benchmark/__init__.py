@@ -55,12 +55,14 @@ from .harness import (
     ReplayProjectionSummary,
     TaskExportSummary,
     TrainingAggregate,
+    artifact_bundle_index_payload_v1,
     export_answer_free_tasks,
     load_artifact_bundle_index,
     load_answer_free_tasks,
     project_verified_discovery_bundles,
     project_verified_replay_bundles,
     validate_public_bundle,
+    write_artifact_bundle_index,
 )
 from .producer_contracts import (
     DEFAULT_PRODUCER_LIMITS,
@@ -293,6 +295,7 @@ __all__ = [
     "SourceUsageLedger",
     "TaskExportSummary",
     "TrainingAggregate",
+    "artifact_bundle_index_payload_v1",
     "ValidationReceiptV1",
     "VerifiedSealedSnapshot",
     "export_answer_free_tasks",
@@ -318,4 +321,5 @@ __all__ = [
     "validate_public_bundle",
     "verify_sealed_snapshot",
     "verify_snapshot_batch",
+    "write_artifact_bundle_index",
 ]

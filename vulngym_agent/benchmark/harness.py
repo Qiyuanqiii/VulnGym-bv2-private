@@ -62,6 +62,7 @@ from .discovery_projection import (
     DiscoveryProjectionError,
     project_discovery_result,
 )
+from .sealed_snapshot import SealedSnapshotError, _windows_assert_no_named_streams
 
 
 PROFILE_ID = "vulngym-50-20-v1"
@@ -274,7 +275,7 @@ class ArtifactBundleIndex:
         if type(self.split) is not str or self.split not in {"train", "test"}:
             raise ValueError("artifact index split must be train or test")
         bundles = tuple(self.bundles)
-        if any(not isinstance(item, ArtifactBundleDigest) for item in bundles):
+        if any(type(item) is not ArtifactBundleDigest for item in bundles):
             raise ValueError("artifact index bundles have an invalid type")
         expected_prefix = "VG-TRAIN-" if self.split == "train" else "VG-TEST-"
         if any(not item.task_id.startswith(expected_prefix) for item in bundles):
@@ -284,6 +285,40 @@ class ArtifactBundleIndex:
         if len(task_ids) != len(set(task_ids)) or len(digests) != len(set(digests)):
             raise ValueError("artifact index bundle identities must be unique")
         object.__setattr__(self, "bundles", bundles)
+
+
+def artifact_bundle_index_payload_v1(index: ArtifactBundleIndex) -> bytes:
+    """Return the exact canonical bytes hashed and published for index v1."""
+
+    if type(index) is not ArtifactBundleIndex:
+        raise ValueError("artifact index must have exact type")
+    canonical = ArtifactBundleIndex(
+        contract_version=index.contract_version,
+        profile_id=index.profile_id,
+        manifest_sha256=index.manifest_sha256,
+        split=index.split,
+        bundles=tuple(
+            ArtifactBundleDigest(
+                task_id=item.task_id,
+                dataset_sha256=item.dataset_sha256,
+            )
+            for item in index.bundles
+        ),
+    )
+    value = {
+        "bundles": [
+            {"dataset_sha256": item.dataset_sha256, "task_id": item.task_id}
+            for item in canonical.bundles
+        ],
+        "contract_version": canonical.contract_version,
+        "manifest_sha256": canonical.manifest_sha256,
+        "profile_id": canonical.profile_id,
+        "split": canonical.split,
+    }
+    payload = _canonical_json(value).encode("utf-8")
+    if len(payload) > MAX_ARTIFACT_INDEX_BYTES:
+        raise ValueError("artifact index exceeds its byte budget")
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1737,6 +1772,14 @@ def _read_bounded_index_file(path: Path) -> bytes:
         raise BenchmarkHarnessError(
             "artifact_index_too_large", "artifact index exceeds its byte budget"
         )
+    if os.name == "nt":
+        try:
+            _windows_assert_no_named_streams(path)
+        except SealedSnapshotError as error:
+            raise BenchmarkHarnessError(
+                "unsafe_artifact_index",
+                "artifact index must not contain alternate data streams",
+            ) from error
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(path, flags)
@@ -1774,9 +1817,327 @@ def _read_bounded_index_file(path: Path) -> bytes:
                 raise BenchmarkHarnessError(
                     "artifact_index_changed", "artifact index changed while reading"
                 )
+        if os.name == "nt":
+            _windows_assert_no_named_streams(path)
+    except SealedSnapshotError as error:
+        raise BenchmarkHarnessError(
+            "unsafe_artifact_index",
+            "artifact index must not contain alternate data streams",
+        ) from error
     except BenchmarkHarnessError:
         raise
     return payload
+
+
+def _exact_writer_path(
+    value: object, *, name: str, allow_root: bool = False
+) -> Path:
+    if type(value) not in {str, type(Path())}:
+        raise BenchmarkHarnessError(
+            "invalid_path", f"{name} must be an exact string or platform Path"
+        )
+    if type(value) is str and not value:
+        raise BenchmarkHarnessError("invalid_path", f"{name} must not be empty")
+    try:
+        path = Path(os.path.abspath(os.fspath(value)))
+    except (OSError, TypeError, ValueError):
+        raise BenchmarkHarnessError("invalid_path", f"{name} is invalid") from None
+    if (
+        (not path.name and not allow_root)
+        or path.name in {".", ".."}
+        or (os.name == "nt" and ":" in path.name)
+    ):
+        raise BenchmarkHarnessError("invalid_path", f"{name} is invalid")
+    return path
+
+
+def _publish_file_noreplace(output: Path, payload: bytes) -> None:
+    """Atomically publish one regular file without replacing any name."""
+
+    try:
+        os.lstat(output)
+    except FileNotFoundError:
+        pass
+    except OSError as error:
+        raise BenchmarkHarnessError(
+            "unsafe_output", "artifact index output state is unavailable"
+        ) from error
+    else:
+        raise BenchmarkHarnessError(
+            "output_exists", "artifact index output already exists; overwrite is forbidden"
+        )
+
+    checked_parent: list[tuple[Path, tuple[int, int]]] = []
+    try:
+        for component in _root_chain(output.parent):
+            state = _checked_lstat(component, directory=True)
+            checked_parent.append((component, (state.st_dev, state.st_ino)))
+    except BenchmarkHarnessError as error:
+        raise BenchmarkHarnessError(
+            "unsafe_output", "artifact index output parent is unsafe"
+        ) from error
+
+    parent_descriptor: int | None = None
+    staging_descriptor: int | None = None
+    staging: Path | None = None
+    staging_name: str | None = None
+    staging_identity: tuple[int, int] | None = None
+    renamed = False
+    try:
+        if os.name == "posix":
+            parent_flags = (
+                os.O_RDONLY
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            parent_descriptor = os.open(output.parent, parent_flags)
+            opened_parent = os.fstat(parent_descriptor)
+            if (
+                not stat.S_ISDIR(opened_parent.st_mode)
+                or _is_reparse(opened_parent)
+                or (opened_parent.st_dev, opened_parent.st_ino)
+                != checked_parent[-1][1]
+            ):
+                raise BenchmarkHarnessError(
+                    "output_parent_changed",
+                    "artifact index output parent changed during publication",
+                )
+            _parent_chain_unchanged(checked_parent)
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            for _ in range(128):
+                candidate = _random_staging_name(output.name)
+                try:
+                    staging_descriptor = os.open(
+                        candidate, flags, 0o600, dir_fd=parent_descriptor
+                    )
+                except FileExistsError:
+                    continue
+                staging_name = candidate
+                break
+            if staging_descriptor is None or staging_name is None:
+                raise OSError(errno.EEXIST, "could not allocate transaction file")
+            opened_staging = os.fstat(staging_descriptor)
+            if (
+                not stat.S_ISREG(opened_staging.st_mode)
+                or _is_reparse(opened_staging)
+                or opened_staging.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_staging_changed", "artifact index staging is unsafe"
+                )
+            staging_identity = (opened_staging.st_dev, opened_staging.st_ino)
+            _write_all(staging_descriptor, payload)
+            os.fsync(staging_descriptor)
+            finished_staging = os.fstat(staging_descriptor)
+            if (
+                (finished_staging.st_dev, finished_staging.st_ino) != staging_identity
+                or finished_staging.st_size != len(payload)
+                or finished_staging.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_staging_changed",
+                    "artifact index staging changed while writing",
+                )
+            os.close(staging_descriptor)
+            staging_descriptor = None
+            _parent_chain_unchanged(checked_parent)
+            named_staging = os.stat(
+                staging_name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(named_staging.st_mode)
+                or _is_reparse(named_staging)
+                or (named_staging.st_dev, named_staging.st_ino) != staging_identity
+                or named_staging.st_size != len(payload)
+                or named_staging.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_staging_changed",
+                    "artifact index staging changed before publication",
+                )
+            try:
+                _rename_directory_noreplace(
+                    Path(staging_name),
+                    Path(output.name),
+                    source_dir_fd=parent_descriptor,
+                    destination_dir_fd=parent_descriptor,
+                )
+            except BaseException as error:
+                try:
+                    destination_after_error = os.stat(
+                        output.name,
+                        dir_fd=parent_descriptor,
+                        follow_symlinks=False,
+                    )
+                    renamed = (
+                        stat.S_ISREG(destination_after_error.st_mode)
+                        and not _is_reparse(destination_after_error)
+                        and (
+                            destination_after_error.st_dev,
+                            destination_after_error.st_ino,
+                        )
+                        == staging_identity
+                        and destination_after_error.st_size == len(payload)
+                        and destination_after_error.st_nlink == 1
+                    )
+                except OSError:
+                    renamed = False
+                if renamed and isinstance(error, Exception):
+                    raise BenchmarkHarnessError(
+                        "output_publication_uncertain",
+                        "artifact index publication was interrupted at commit",
+                        committed=True,
+                    ) from error
+                if renamed:
+                    try:
+                        setattr(error, "committed", True)
+                    except BaseException:
+                        pass
+                raise
+            renamed = True
+            destination = os.stat(
+                output.name, dir_fd=parent_descriptor, follow_symlinks=False
+            )
+            if (
+                not stat.S_ISREG(destination.st_mode)
+                or _is_reparse(destination)
+                or (destination.st_dev, destination.st_ino) != staging_identity
+                or destination.st_size != len(payload)
+                or destination.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_publication_changed",
+                    "published artifact index does not match transaction staging",
+                    committed=True,
+                )
+            _parent_chain_unchanged(checked_parent)
+            os.fsync(parent_descriptor)
+        else:
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+            )
+            for _ in range(128):
+                candidate = output.parent / _random_staging_name(output.name)
+                try:
+                    staging_descriptor = os.open(candidate, flags, 0o600)
+                except FileExistsError:
+                    continue
+                staging = candidate
+                break
+            if staging_descriptor is None or staging is None:
+                raise OSError(errno.EEXIST, "could not allocate transaction file")
+            opened_staging = os.fstat(staging_descriptor)
+            if (
+                not stat.S_ISREG(opened_staging.st_mode)
+                or _is_reparse(opened_staging)
+                or opened_staging.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_staging_changed", "artifact index staging is unsafe"
+                )
+            staging_identity = (opened_staging.st_dev, opened_staging.st_ino)
+            _write_all(staging_descriptor, payload)
+            os.fsync(staging_descriptor)
+            finished_staging = os.fstat(staging_descriptor)
+            if (
+                (finished_staging.st_dev, finished_staging.st_ino) != staging_identity
+                or finished_staging.st_size != len(payload)
+                or finished_staging.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_staging_changed",
+                    "artifact index staging changed while writing",
+                )
+            os.close(staging_descriptor)
+            staging_descriptor = None
+            _parent_chain_unchanged(checked_parent)
+            named_staging = _checked_lstat(staging, directory=False)
+            if (
+                (named_staging.st_dev, named_staging.st_ino) != staging_identity
+                or named_staging.st_size != len(payload)
+                or named_staging.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_staging_changed",
+                    "artifact index staging changed before publication",
+                )
+            try:
+                _rename_directory_noreplace(staging, output)
+            except BaseException as error:
+                try:
+                    destination_after_error = _checked_lstat(
+                        output, directory=False
+                    )
+                    renamed = (
+                        (
+                            destination_after_error.st_dev,
+                            destination_after_error.st_ino,
+                        )
+                        == staging_identity
+                        and destination_after_error.st_size == len(payload)
+                        and destination_after_error.st_nlink == 1
+                    )
+                except (BenchmarkHarnessError, OSError):
+                    renamed = False
+                if renamed and isinstance(error, Exception):
+                    raise BenchmarkHarnessError(
+                        "output_publication_uncertain",
+                        "artifact index publication was interrupted at commit",
+                        committed=True,
+                    ) from error
+                if renamed:
+                    try:
+                        setattr(error, "committed", True)
+                    except BaseException:
+                        pass
+                raise
+            renamed = True
+            destination = _checked_lstat(output, directory=False)
+            if (
+                (destination.st_dev, destination.st_ino) != staging_identity
+                or destination.st_size != len(payload)
+                or destination.st_nlink != 1
+            ):
+                raise BenchmarkHarnessError(
+                    "output_publication_changed",
+                    "published artifact index does not match transaction staging",
+                    committed=True,
+                )
+            _parent_chain_unchanged(checked_parent)
+    except FileExistsError as error:
+        raise BenchmarkHarnessError(
+            "output_exists",
+            "artifact index output already exists; overwrite is forbidden",
+            committed=renamed,
+        ) from error
+    except BenchmarkHarnessError as error:
+        if renamed and not error.committed:
+            raise BenchmarkHarnessError(error.code, str(error), committed=True) from error
+        raise
+    except OSError as error:
+        raise BenchmarkHarnessError(
+            "output_transaction_failed",
+            "artifact index file transaction failed",
+            committed=renamed,
+        ) from error
+    finally:
+        # Conditional unlink is not safe: the staging name could be replaced
+        # between an identity check and deletion.  Retain unpublished staging
+        # for trusted cleanup, matching the directory transaction boundary.
+        if staging_descriptor is not None:
+            os.close(staging_descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
 
 
 def load_artifact_bundle_index(
@@ -1874,6 +2235,202 @@ def load_artifact_bundle_index(
         split=split,
         bundles=tuple(parsed),
     )
+
+
+def write_artifact_bundle_index(
+    output_file: str | os.PathLike[str],
+    *,
+    split: Literal["train", "test"],
+    tasks: Sequence[SnapshotTaskSpec],
+    bundles: Sequence[ArtifactBundleDigest],
+    protected_paths: Iterable[str | os.PathLike[str]] = (),
+) -> str:
+    """Canonicalize, atomically publish, and read back one bundle index."""
+
+    if type(split) is not str or split not in {"train", "test"}:
+        raise BenchmarkHarnessError(
+            "invalid_writer_argument", "artifact index split must be train or test"
+        )
+    maximum_members = PROFILE_TRAIN_TASKS + PROFILE_TEST_TASKS
+    if type(tasks) not in {list, tuple}:
+        raise BenchmarkHarnessError(
+            "invalid_writer_argument", "artifact index tasks must be a bounded exact sequence"
+        )
+    if type(bundles) not in {list, tuple}:
+        raise BenchmarkHarnessError(
+            "invalid_writer_argument", "artifact index bundles must be a bounded exact sequence"
+        )
+    if type(protected_paths) not in {list, tuple}:
+        raise BenchmarkHarnessError(
+            "invalid_writer_argument", "protected_paths must be an exact sequence"
+        )
+    task_values = tuple(tasks)
+    bundle_values = tuple(bundles)
+    protected_values = tuple(protected_paths)
+    if len(task_values) > maximum_members or len(bundle_values) > maximum_members:
+        raise BenchmarkHarnessError(
+            "invalid_writer_argument", "artifact index inputs exceed their member limit"
+        )
+    if len(protected_values) > 256:
+        raise BenchmarkHarnessError(
+            "invalid_writer_argument", "protected_paths exceeds its member limit"
+        )
+
+    canonical_tasks: list[SnapshotTaskSpec] = []
+    task_ids: list[str] = []
+    for task in task_values:
+        if type(task) is not SnapshotTaskSpec:
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index tasks must have exact type"
+            )
+        try:
+            fields = (
+                task.task_id,
+                task.repo_url,
+                task.commit,
+                task.split,
+                task.instruction_id,
+            )
+        except (AttributeError, TypeError):
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index task is malformed"
+            ) from None
+        if any(type(value) is not str for value in fields):
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index task is malformed"
+            )
+        task_id, repo_url, commit, task_split, instruction_id = fields
+        if task_split != split:
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index task does not match split"
+            )
+        try:
+            canonical = SnapshotTaskSpec(
+                task_id=task_id,
+                repo_url=repo_url,
+                commit=commit,
+                split=task_split,
+                instruction_id=instruction_id,
+            )
+        except (BenchmarkContractError, TypeError, ValueError):
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index task is malformed"
+            ) from None
+        canonical_tasks.append(canonical)
+        task_ids.append(canonical.task_id)
+    if len(task_ids) != len(set(task_ids)):
+        raise BenchmarkHarnessError("duplicate_task_id", "task list repeats a task ID")
+
+    by_task: dict[str, ArtifactBundleDigest] = {}
+    seen_digests: set[str] = set()
+    for bundle in bundle_values:
+        if type(bundle) is not ArtifactBundleDigest:
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index bundles must have exact type"
+            )
+        try:
+            task_id = bundle.task_id
+            digest = bundle.dataset_sha256
+        except (AttributeError, TypeError):
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index bundle is malformed"
+            ) from None
+        if (
+            type(task_id) is not str
+            or type(digest) is not str
+            or _SHA256_RE.fullmatch(digest) is None
+        ):
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index bundle is malformed"
+            )
+        if task_id in by_task:
+            raise BenchmarkHarnessError(
+                "duplicate_index_task", "artifact index repeats a task ID"
+            )
+        if digest in seen_digests:
+            raise BenchmarkHarnessError(
+                "duplicate_dataset_digest", "artifact index repeats a dataset digest"
+            )
+        try:
+            canonical = ArtifactBundleDigest(task_id=task_id, dataset_sha256=digest)
+        except ValueError:
+            raise BenchmarkHarnessError(
+                "invalid_writer_argument", "artifact index bundle is malformed"
+            ) from None
+        by_task[task_id] = canonical
+        seen_digests.add(digest)
+
+    if set(by_task) != set(task_ids):
+        raise BenchmarkHarnessError(
+            "artifact_index_membership_mismatch",
+            "artifact index has missing or extra benchmark tasks",
+        )
+    ordered_bundles = tuple(by_task[task_id] for task_id in task_ids)
+    index = ArtifactBundleIndex(
+        contract_version=ARTIFACT_INDEX_CONTRACT_VERSION,
+        profile_id=PROFILE_ID,
+        manifest_sha256=PROFILE_MANIFEST_SHA256,
+        split=split,
+        bundles=ordered_bundles,
+    )
+    try:
+        payload = artifact_bundle_index_payload_v1(index)
+    except ValueError as error:
+        raise BenchmarkHarnessError(
+            "artifact_index_too_large", "artifact index exceeds its byte budget"
+        ) from error
+
+    output = _exact_writer_path(output_file, name="output_file")
+    protected: list[Path] = []
+    for item in protected_values:
+        protected.append(
+            _exact_writer_path(item, name="protected path", allow_root=True)
+        )
+    try:
+        output_resolved = output.parent.resolve(strict=True) / output.name
+    except (OSError, RuntimeError):
+        raise BenchmarkHarnessError(
+            "invalid_path", "artifact index output parent is invalid"
+        ) from None
+    for item in protected:
+        try:
+            protected_resolved = item.resolve(strict=False)
+        except (OSError, RuntimeError):
+            raise BenchmarkHarnessError(
+                "invalid_path", "a protected path is invalid"
+            ) from None
+        if (
+            _path_relation(output, item)
+            or _path_relation(item, output)
+            or _path_relation(output_resolved, protected_resolved)
+            or _path_relation(protected_resolved, output_resolved)
+        ):
+            raise BenchmarkHarnessError(
+                "path_overlap", "artifact index output overlaps a protected path"
+            )
+
+    digest = _sha256(payload)
+    _publish_file_noreplace(output, payload)
+    try:
+        loaded = load_artifact_bundle_index(
+            output,
+            expected_sha256=digest,
+            split=split,
+            tasks=tuple(canonical_tasks),
+        )
+    except (BenchmarkHarnessError, OSError, TypeError, ValueError) as error:
+        raise BenchmarkHarnessError(
+            "artifact_index_readback_failed",
+            "published artifact index did not pass complete readback",
+            committed=True,
+        ) from error
+    if type(loaded) is not ArtifactBundleIndex or loaded != index:
+        raise BenchmarkHarnessError(
+            "artifact_index_readback_failed",
+            "published artifact index does not match its canonical value",
+            committed=True,
+        )
+    return digest
 
 
 def _output_files(
@@ -2859,6 +3416,7 @@ __all__ = [
     "ARTIFACT_INDEX_CONTRACT_VERSION",
     "ArtifactBundleDigest",
     "ArtifactBundleIndex",
+    "artifact_bundle_index_payload_v1",
     "BenchmarkHarnessError",
     "DEFAULT_DISCOVERY_TOP_K",
     "DEFAULT_TOP_K",
@@ -2880,4 +3438,5 @@ __all__ = [
     "project_verified_discovery_bundles",
     "project_verified_replay_bundles",
     "validate_public_bundle",
+    "write_artifact_bundle_index",
 ]
