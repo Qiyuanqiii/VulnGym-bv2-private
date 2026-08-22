@@ -28,6 +28,8 @@ from threading import RLock
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
+from vulngym_agent.runtime_scopes import validate_runtime_scope
+
 if TYPE_CHECKING:
     from vulngym_agent.orchestrator.budget import Budget, BudgetEvent
     from vulngym_agent.orchestrator.contracts import ToolCallRecord
@@ -622,7 +624,7 @@ class AttemptToolTranscript:
 
 
 class AttemptToolRuntime:
-    """A fixed-registry tool runner scoped to exactly one T2 attempt."""
+    """A fixed-registry tool runner scoped to one allowlisted attempt lane."""
 
     __slots__ = (
         "_allowlist",
@@ -661,13 +663,7 @@ class AttemptToolRuntime:
         self.policy_scope = _identifier(
             policy_scope, name="policy_scope", pattern=_SCOPE_RE
         )
-        expected_scope = (
-            "t2.initial"
-            if self.attempt == 0
-            else f"t2.repair-{self.attempt}"
-        )
-        if self.policy_scope != expected_scope:
-            raise ValueError("policy_scope does not match attempt")
+        validate_runtime_scope(self.attempt, self.policy_scope)
         # Import lazily to preserve the tools -> agents -> orchestrator import
         # boundary while still rejecting lookalike ledger objects at runtime.
         from vulngym_agent.orchestrator.budget import Budget as BudgetController

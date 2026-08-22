@@ -18,6 +18,10 @@ from typing import Any, Mapping
 
 from vulngym_agent.adapters import ENTRY_FIELDS, SchemaAdapter
 from vulngym_agent.models import EvidenceItem, JsonSerializable
+from vulngym_agent.runtime_scopes import (
+    is_t2_runtime_scope,
+    validate_runtime_scope,
+)
 
 
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -138,8 +142,7 @@ def _validate_call_scope(
         name="policy_scope",
         pattern=_TOOL_NAME_RE,
     )
-    if scope != _expected_policy_scope(attempt_value):
-        raise ValueError("policy_scope does not match attempt")
+    validate_runtime_scope(attempt_value, scope)
     return task, attempt_value, scope
 
 
@@ -826,6 +829,11 @@ class ProductionOutcome(JsonSerializable):
             model_calls_value=self.model_calls,
         )
         assumptions = _validate_assumptions(self.assumptions)
+        if any(
+            not is_t2_runtime_scope(item.attempt, item.policy_scope)
+            for item in (*tool_calls, *model_calls)
+        ):
+            raise ValueError("T2 outcome sidecars must use a T2 policy scope")
         for item in evidence:
             if item.report_id != formal_candidate["report_id"]:
                 raise ValueError(

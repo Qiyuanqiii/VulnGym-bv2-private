@@ -133,6 +133,49 @@ class T2ContractTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             record.status = "error"  # type: ignore[misc]
 
+    def test_t2_outcome_rejects_d3_review_sidecars(self) -> None:
+        request_sha256 = "c" * 64
+        d3_model = ModelCallRecord(
+            task_id=self.task.task_id,
+            attempt=0,
+            policy_scope="d3.review",
+            model_call_id="MODEL-D3-1",
+            stage="semantic_judge",
+            backend_id="local.openai",
+            model_id="gpt-5.6",
+            request_sha256=request_sha256,
+            operation=(
+                f"model:{self.task.task_id}:0:d3.review:semantic_judge:"
+                f"MODEL-D3-1:local.openai:gpt-5.6:{request_sha256}"
+            ),
+            budget_event_sequence=1,
+            status="success",
+            response_sha256="d" * 64,
+        )
+        d3_tool = ToolCallRecord(
+            task_id=self.task.task_id,
+            attempt=0,
+            policy_scope="d3.review",
+            tool_call_id="TOOL-D3-1",
+            tool_name="review.source",
+            arguments_sha256="a" * 64,
+            operation=(
+                f"tool:{self.task.task_id}:0:d3.review:"
+                "TOOL-D3-1:review.source"
+            ),
+            budget_event_sequence=1,
+            status="success",
+            result_sha256="b" * 64,
+        )
+        for sidecars in (
+            {"model_calls": (d3_model,)},
+            {"tool_calls": (d3_tool,)},
+        ):
+            with self.subTest(sidecars=tuple(sidecars)), self.assertRaisesRegex(
+                ValueError, "T2 outcome sidecars"
+            ):
+                ProductionOutcome(candidate=self.entry, **sidecars)
+
     def test_model_call_record_rejects_invalid_lifecycle_and_extra_content(self) -> None:
         with self.assertRaisesRegex(ValueError, "stage"):
             ModelCallRecord(
