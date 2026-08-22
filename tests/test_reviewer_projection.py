@@ -5,12 +5,17 @@ import unittest
 import vulngym_agent.benchmark as benchmark_api
 from tests.test_reviewer_contracts import _finalized, _review_input, _seal
 from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskResult
+from vulngym_agent.benchmark.producer_contracts import (
+    ProducerDeferredV1,
+    ProducerDraftV1,
+)
 from vulngym_agent.benchmark.reviewer_contracts import (
     ReviewerDeferredV1,
     ReviewerFinalizedV1,
 )
 from vulngym_agent.benchmark.reviewer_projection import (
     ReviewerProjectionError,
+    project_discovery_run_v1,
     project_reviewer_result_v1,
 )
 
@@ -76,6 +81,110 @@ class ReviewerProjectionTests(unittest.TestCase):
                 assert projected.deferred is not None
                 self.assertEqual(target_stage, projected.deferred.stage)
                 self.assertEqual(result.reason_code, projected.deferred.reason_code)
+
+    def test_discovery_run_maps_every_d2_deferred_stage_without_d3(self) -> None:
+        task = _review_input(0).producer_draft.task
+        for source_stage, target_stage in (
+            ("SCOUT", "d2.scout"),
+            ("ANALYZE", "d2.analyze"),
+            ("VALIDATE", "d2.validate"),
+            ("FINALIZE", "d2.finalize"),
+        ):
+            with self.subTest(stage=source_stage):
+                producer = ProducerDeferredV1(
+                    task=task,
+                    stage=source_stage,
+                    reason_code="model_error",
+                    missing_information=("source evidence is incomplete",),
+                )
+                projected = project_discovery_run_v1(producer, None)
+                self.assertEqual("deferred", projected.status)
+                self.assertEqual("unknown", projected.coverage_status)
+                self.assertEqual((), projected.candidates)
+                self.assertEqual((), projected.reviews)
+                self.assertIsNotNone(projected.deferred)
+                assert projected.deferred is not None
+                self.assertEqual(target_stage, projected.deferred.stage)
+                self.assertEqual(producer.reason_code, projected.deferred.reason_code)
+                self.assertEqual(
+                    producer.missing_information,
+                    projected.deferred.missing_information,
+                )
+                self.assertEqual(
+                    projected, DiscoveryTaskResult.from_dict(projected.to_dict())
+                )
+
+    def test_discovery_run_requires_exact_d2_d3_branch_closure(self) -> None:
+        reviewer = _finalized()
+        producer = reviewer.review_input.producer_draft
+        self.assertEqual(
+            project_reviewer_result_v1(reviewer),
+            project_discovery_run_v1(producer, reviewer),
+        )
+
+        review_input = _review_input(0)
+        reviewer_deferred = ReviewerDeferredV1(
+            review_input=review_input,
+            stage="REVIEW",
+            reason_code="runtime.model_failed",
+            missing_information=("model_response",),
+            attempt_seal=_seal(review_input, ()),
+        )
+        self.assertEqual(
+            project_reviewer_result_v1(reviewer_deferred),
+            project_discovery_run_v1(
+                review_input.producer_draft,
+                reviewer_deferred,
+            ),
+        )
+
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1(producer, None)
+        self.assertEqual("invalid_result", captured.exception.code)
+
+        deferred = ProducerDeferredV1(
+            task=producer.task,
+            stage="SCOUT",
+            reason_code="model_error",
+            missing_information=("source evidence is incomplete",),
+        )
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1(deferred, reviewer)
+        self.assertEqual("invalid_result", captured.exception.code)
+
+        mismatched = _finalized(2)
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1(
+                mismatched.review_input.producer_draft,
+                reviewer,
+            )
+        self.assertEqual("invalid_result", captured.exception.code)
+
+    def test_discovery_run_strictly_reparses_d2_and_rejects_polymorphism(self) -> None:
+        reviewer = _finalized()
+        producer = reviewer.review_input.producer_draft
+        object.__setattr__(producer, "candidates", ())
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1(producer, reviewer)
+        self.assertEqual("invalid_result", captured.exception.code)
+
+        fresh = _finalized().review_input.producer_draft
+
+        class DraftSubclass(ProducerDraftV1):
+            pass
+
+        subclass = DraftSubclass(
+            task=fresh.task,
+            candidates=fresh.candidates,
+            validation_receipts=fresh.validation_receipts,
+        )
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1(subclass, _finalized())
+        self.assertEqual("invalid_result", captured.exception.code)
+
+        with self.assertRaises(ReviewerProjectionError) as captured:
+            project_discovery_run_v1({}, None)  # type: ignore[arg-type]
+        self.assertEqual("invalid_result", captured.exception.code)
 
     def test_projection_strictly_rechecks_input_and_derived_fields(self) -> None:
         result = _finalized()

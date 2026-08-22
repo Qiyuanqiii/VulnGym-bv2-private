@@ -17,6 +17,11 @@ from .reviewer_contracts import (
     ReviewerResultV1,
     parse_reviewer_result_v1,
 )
+from .producer_contracts import (
+    ProducerDeferredV1,
+    ProducerDraftV1,
+    ProducerResultV1,
+)
 
 
 REVIEWER_PROJECTION_VERSION: Final[str] = "source-discovery-reviewer-d4-v1"
@@ -33,6 +38,12 @@ _DECISION_MAP: Final[dict[str, str]] = {
 _DEFERRED_STAGE_MAP: Final[dict[str, str]] = {
     "REVIEW": "d3.review",
     "FINALIZE": "d3.finalize",
+}
+_PRODUCER_DEFERRED_STAGE_MAP: Final[dict[str, str]] = {
+    "SCOUT": "d2.scout",
+    "ANALYZE": "d2.analyze",
+    "VALIDATE": "d2.validate",
+    "FINALIZE": "d2.finalize",
 }
 
 
@@ -67,6 +78,30 @@ def _canonical_result(value: object) -> ReviewerResultV1:
     ):
         raise ReviewerProjectionError(
             "invalid_result", "result did not pass strict D3 normalization"
+        ) from None
+
+
+def _canonical_producer_result(value: object) -> ProducerResultV1:
+    if type(value) is ProducerDraftV1:
+        parser = ProducerDraftV1.from_dict
+    elif type(value) is ProducerDeferredV1:
+        parser = ProducerDeferredV1.from_dict
+    else:
+        raise ReviewerProjectionError(
+            "invalid_result", "producer result must be an exact D2 result"
+        )
+    try:
+        return parser(value.to_dict())
+    except (
+        AttributeError,
+        KeyError,
+        RecursionError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
+        raise ReviewerProjectionError(
+            "invalid_result", "producer result did not pass strict D2 normalization"
         ) from None
 
 
@@ -129,9 +164,68 @@ def project_reviewer_result_v1(result: ReviewerResultV1) -> DiscoveryTaskResult:
         ) from None
 
 
+def project_discovery_run_v1(
+    producer_result: ProducerResultV1,
+    reviewer_result_or_none: ReviewerResultV1 | None,
+) -> DiscoveryTaskResult:
+    """Project one exact D2 -> optional D3 run into a strict D0 result.
+
+    A whole-task D2 deferral never enters D3.  A D2 draft, conversely, must
+    have one exact D3 result whose embedded producer draft is byte-equivalent
+    after both values have independently passed their full wire parsers.
+    """
+
+    producer = _canonical_producer_result(producer_result)
+    if type(producer) is ProducerDeferredV1:
+        if reviewer_result_or_none is not None:
+            raise ReviewerProjectionError(
+                "invalid_result", "a deferred D2 result cannot have a D3 result"
+            )
+        try:
+            projected = DiscoveryTaskResult(
+                task=producer.task,
+                status="deferred",
+                coverage_status="unknown",
+                candidates=(),
+                reviews=(),
+                deferred=DiscoveryDeferred(
+                    task_id=producer.task.task_id,
+                    snapshot_id=producer.task.snapshot_id,
+                    stage=_PRODUCER_DEFERRED_STAGE_MAP[producer.stage],
+                    reason_code=producer.reason_code,
+                    missing_information=producer.missing_information,
+                ),
+            )
+            return DiscoveryTaskResult.from_dict(projected.to_dict())
+        except (
+            AttributeError,
+            DiscoveryContractError,
+            KeyError,
+            RecursionError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+        ):
+            raise ReviewerProjectionError(
+                "invalid_result", "D2 deferral could not be projected into strict D0"
+            ) from None
+
+    if reviewer_result_or_none is None:
+        raise ReviewerProjectionError(
+            "invalid_result", "a D2 draft requires one exact D3 result"
+        )
+    reviewer = _canonical_result(reviewer_result_or_none)
+    if reviewer.review_input.producer_draft != producer:
+        raise ReviewerProjectionError(
+            "invalid_result", "D3 result does not bind the exact D2 draft"
+        )
+    return project_reviewer_result_v1(reviewer)
+
+
 __all__ = [
     "REVIEWER_PROJECTION_ERROR_TAXONOMY_VERSION",
     "REVIEWER_PROJECTION_VERSION",
     "ReviewerProjectionError",
+    "project_discovery_run_v1",
     "project_reviewer_result_v1",
 ]
