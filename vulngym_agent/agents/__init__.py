@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .discovery_toolbox import DiscoveryToolbox
     from .real_t2_producer import LocalStructuredT2Producer
     from .source_discovery_producer import SourceDiscoveryAttemptController
+    from .source_discovery_reviewer import SourceDiscoveryReviewerController
     from .t2_execution import LocalT2ContextFactory
 
 
@@ -60,6 +61,11 @@ def __getattr__(name: str) -> Any:
 
         globals()[name] = SourceDiscoveryAttemptController
         return SourceDiscoveryAttemptController
+    if name == "SourceDiscoveryReviewerController":
+        from .source_discovery_reviewer import SourceDiscoveryReviewerController
+
+        globals()[name] = SourceDiscoveryReviewerController
+        return SourceDiscoveryReviewerController
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 __all__ = [
@@ -74,6 +80,7 @@ __all__ = [
     "ReplayResponse",
     "ReplayStructuredModelBackend",
     "SourceDiscoveryAttemptController",
+    "SourceDiscoveryReviewerController",
     "StructuredModelBackend",
     "LOCAL_T2_TOOL_NAMES",
     "LocalStructuredT2Producer",
