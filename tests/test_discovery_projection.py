@@ -251,6 +251,129 @@ class DiscoveryProjectionTests(unittest.TestCase):
             project_discovery_result(raw_entry)  # type: ignore[arg-type]
         self.assertEqual("invalid_result", caught.exception.code)
 
+    def test_projection_rejects_result_subclass_with_overridden_emission(self) -> None:
+        task = _task()
+        candidate = _candidate(task, 1)
+
+        class ForgedResult(DiscoveryTaskResult):
+            @property
+            def emitted_candidates(self):
+                return (candidate,)
+
+        forged = ForgedResult(
+            task=task,
+            status="finalized",
+            coverage_status="unknown",
+            candidates=(),
+            reviews=(),
+        )
+        with self.assertRaises(DiscoveryProjectionError) as caught:
+            project_discovery_result(forged)
+        self.assertEqual("invalid_result", caught.exception.code)
+
+    def test_projection_rejects_nested_polymorphic_contract_nodes(self) -> None:
+        task = _task()
+        candidate = _candidate(task, 1)
+        review = _review(candidate, "reject")
+
+        class RewrittenReview(DiscoveryReview):
+            def to_dict(self):
+                value = super().to_dict()
+                value["decision"] = "emit"
+                return value
+
+        class RaisingReview(DiscoveryReview):
+            def to_dict(self):
+                raise RuntimeError("must not escape the projection boundary")
+
+        class RewrittenCandidate(DiscoveryCandidate):
+            def to_dict(self):
+                value = super().to_dict()
+                value["critical_operation"] = value["entry_point"]
+                return value
+
+        class RewrittenLocation(DiscoveryLocation):
+            def evaluator_location(self):
+                return {"file": "rewritten.py", "line": 1}
+
+        rewritten_review = RewrittenReview(
+            task_id=review.task_id,
+            snapshot_id=review.snapshot_id,
+            candidate_id=review.candidate_id,
+            candidate_sha256=review.candidate_sha256,
+            decision=review.decision,
+            reason_codes=review.reason_codes,
+        )
+        raising_review = RaisingReview(
+            task_id=review.task_id,
+            snapshot_id=review.snapshot_id,
+            candidate_id=review.candidate_id,
+            candidate_sha256=review.candidate_sha256,
+            decision=review.decision,
+            reason_codes=review.reason_codes,
+        )
+        rewritten_candidate = RewrittenCandidate(
+            task_id=candidate.task_id,
+            snapshot_id=candidate.snapshot_id,
+            repo_url=candidate.repo_url,
+            commit=candidate.commit,
+            entry_point=candidate.entry_point,
+            critical_operation=candidate.critical_operation,
+            trace=candidate.trace,
+            relationship_evidence_refs=candidate.relationship_evidence_refs,
+            source_evidence_refs=candidate.source_evidence_refs,
+        )
+        rewritten_location_candidate = DiscoveryCandidate(
+            task_id=candidate.task_id,
+            snapshot_id=candidate.snapshot_id,
+            repo_url=candidate.repo_url,
+            commit=candidate.commit,
+            entry_point=RewrittenLocation(**candidate.entry_point.to_dict()),
+            critical_operation=candidate.critical_operation,
+            trace=candidate.trace,
+            relationship_evidence_refs=candidate.relationship_evidence_refs,
+            source_evidence_refs=candidate.source_evidence_refs,
+        )
+
+        variants = (
+            DiscoveryTaskResult(
+                task=task,
+                status="finalized",
+                coverage_status="unknown",
+                candidates=(candidate,),
+                reviews=(rewritten_review,),
+            ),
+            DiscoveryTaskResult(
+                task=task,
+                status="finalized",
+                coverage_status="unknown",
+                candidates=(candidate,),
+                reviews=(raising_review,),
+            ),
+            DiscoveryTaskResult(
+                task=task,
+                status="finalized",
+                coverage_status="unknown",
+                candidates=(rewritten_candidate,),
+                reviews=(_review(rewritten_candidate, "reject"),),
+            ),
+            DiscoveryTaskResult(
+                task=task,
+                status="finalized",
+                coverage_status="unknown",
+                candidates=(rewritten_location_candidate,),
+                reviews=(
+                    _review(rewritten_location_candidate, "reject"),
+                ),
+            ),
+        )
+        for variant in variants:
+            with self.subTest(node=type(variant.candidates[0]).__name__), self.assertRaises(
+                DiscoveryProjectionError
+            ) as caught:
+                project_discovery_result(variant)
+            self.assertEqual("invalid_result", caught.exception.code)
+
     def test_projection_policy_and_error_taxonomy_are_versioned(self) -> None:
         self.assertEqual("source-discovery-projection-v1", DISCOVERY_PROJECTION_VERSION)
         self.assertEqual(
