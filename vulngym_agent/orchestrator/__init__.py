@@ -36,6 +36,7 @@ from .budget import (
 from .discovery_pipeline import (
     SOURCE_DISCOVERY_RUN_CONTRACT_VERSION,
     SOURCE_DISCOVERY_RUN_DIGEST_DOMAIN,
+    SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES,
     SourceDiscoveryRunV1,
     run_source_discovery_task_v1,
 )
@@ -158,6 +159,7 @@ __all__ = [
     "REVIEWER_SOURCE_LEDGER_DIGEST_DOMAIN",
     "SOURCE_DISCOVERY_RUN_CONTRACT_VERSION",
     "SOURCE_DISCOVERY_RUN_DIGEST_DOMAIN",
+    "SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES",
     "RepairInstruction",
     "RepairPlan",
     "ReviewerCandidateContext",

@@ -147,6 +147,7 @@ from .sealed_tree_access import (
     SourceReadUsage,
     SourceUsageLedger,
     bind_sealed_tree,
+    bind_worker_tree,
 )
 from .snapshot_batch import (
     BATCH_CONTRACT_VERSION,
@@ -157,6 +158,16 @@ from .snapshot_batch import (
     SnapshotBatchTask,
     prepare_snapshot_batch,
     verify_snapshot_batch,
+)
+from .worker_handoff import (
+    WORKER_HANDOFF_CONTRACT_VERSION,
+    WORKER_HANDOFF_DIGEST_DOMAIN,
+    WORKER_HANDOFF_KIND,
+    WORKER_HANDOFF_MAX_BYTES,
+    WORKER_HANDOFF_MAX_FILES,
+    WorkerHandoffError,
+    WorkerHandoffV1,
+    build_worker_handoff,
 )
 
 __all__ = [
@@ -194,6 +205,13 @@ __all__ = [
     "SnapshotTaskSpec",
     "TrainingAdvisory",
     "TrainingGold",
+    "WORKER_HANDOFF_CONTRACT_VERSION",
+    "WORKER_HANDOFF_DIGEST_DOMAIN",
+    "WORKER_HANDOFF_KIND",
+    "WORKER_HANDOFF_MAX_BYTES",
+    "WORKER_HANDOFF_MAX_FILES",
+    "WorkerHandoffError",
+    "WorkerHandoffV1",
     "ATTESTATION_ALGORITHM",
     "ARTIFACT_INDEX_CONTRACT_VERSION",
     "ArtifactBundleDigest",
@@ -279,6 +297,8 @@ __all__ = [
     "VerifiedSealedSnapshot",
     "export_answer_free_tasks",
     "bind_sealed_tree",
+    "bind_worker_tree",
+    "build_worker_handoff",
     "iter_evaluator_findings",
     "iter_public_benchmark_jsonl",
     "load_artifact_bundle_index",

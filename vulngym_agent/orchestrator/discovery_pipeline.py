@@ -46,8 +46,11 @@ SOURCE_DISCOVERY_RUN_CONTRACT_VERSION: Final[int] = 1
 SOURCE_DISCOVERY_RUN_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym source discovery offline run v1\0"
 )
+SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES: Final[int] = 6 * 1024 * 1024
+# Compatibility for the original D4 tests and any internal callers.  The
+# public name above is the stable E-stage boundary.
+_MAX_RUN_WIRE_BYTES: Final[int] = SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES
 
-_MAX_RUN_WIRE_BYTES: Final[int] = 6 * 1024 * 1024
 _RUN_KEYS: Final[frozenset[str]] = frozenset(
     {
         "contract_version",
@@ -259,7 +262,7 @@ class SourceDiscoveryRunV1:
                 + _canonical_json(self._digest_dict())
             ).hexdigest(),
         )
-        if len(self.to_wire()) > _MAX_RUN_WIRE_BYTES:
+        if len(self.to_wire()) > SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES:
             raise ValueError("source discovery run exceeds its wire limit")
 
     @property
@@ -319,7 +322,7 @@ class SourceDiscoveryRunV1:
     @classmethod
     def from_wire(cls, value: Any) -> "SourceDiscoveryRunV1":
         if type(value) is str:
-            if not value or len(value) > _MAX_RUN_WIRE_BYTES:
+            if not value or len(value) > SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES:
                 raise ValueError("source discovery run wire is empty or oversized")
             try:
                 raw = value.encode("utf-8")
@@ -327,12 +330,12 @@ class SourceDiscoveryRunV1:
                 raise ValueError("source discovery run wire is not UTF-8") from None
         elif type(value) in (bytes, bytearray, memoryview):
             wire_size = value.nbytes if type(value) is memoryview else len(value)
-            if wire_size > _MAX_RUN_WIRE_BYTES:
+            if wire_size > SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES:
                 raise ValueError("source discovery run wire is oversized")
             raw = bytes(value)
         else:
             raise ValueError("source discovery run wire must be text or bytes")
-        if not raw or len(raw) > _MAX_RUN_WIRE_BYTES:
+        if not raw or len(raw) > SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES:
             raise ValueError("source discovery run wire is empty or oversized")
 
         def object_from_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -471,6 +474,7 @@ def run_source_discovery_task_v1(
 __all__ = [
     "SOURCE_DISCOVERY_RUN_CONTRACT_VERSION",
     "SOURCE_DISCOVERY_RUN_DIGEST_DOMAIN",
+    "SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES",
     "SourceDiscoveryRunV1",
     "run_source_discovery_task_v1",
 ]

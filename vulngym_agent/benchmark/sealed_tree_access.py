@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 import stat
 import threading
-from typing import Callable, Final, Mapping
+from typing import Callable, Final, Mapping, Protocol
 
 from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskInputV1
 from vulngym_agent.benchmark.sealed_snapshot import (
@@ -31,9 +31,11 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     SealedSnapshotFile,
     SnapshotPolicy,
     VerifiedSealedSnapshot,
+    _scan_tree,
     _windows_assert_no_named_streams,
     verify_sealed_snapshot,
 )
+from vulngym_agent.benchmark.worker_handoff import WorkerHandoffError, WorkerHandoffV1
 
 
 SEALED_TREE_ACCESS_VERSION: Final[str] = "source-discovery-sealed-tree-v1"
@@ -108,6 +110,85 @@ class SealedTreeAccessLimits:
 DEFAULT_SEALED_TREE_ACCESS_LIMITS: Final[SealedTreeAccessLimits] = (
     SealedTreeAccessLimits()
 )
+
+
+def _canonical_access_limits(value: object) -> SealedTreeAccessLimits:
+    if type(value) is not SealedTreeAccessLimits:
+        raise SealedTreeAccessError(
+            "invalid_argument", "sealed-tree limits must have an exact type"
+        )
+    try:
+        fields = (
+            value.max_inventory_calls,
+            value.max_read_calls,
+            value.max_bytes_per_read,
+            value.max_total_bytes_read,
+            value.version,
+        )
+    except (AttributeError, TypeError):
+        raise SealedTreeAccessError(
+            "invalid_argument", "sealed-tree limits are incomplete"
+        ) from None
+    if any(
+        type(item) is not expected
+        for item, expected in zip(fields, (int, int, int, int, str), strict=True)
+    ):
+        raise SealedTreeAccessError(
+            "invalid_argument", "sealed-tree limit fields have invalid types"
+        )
+    try:
+        return SealedTreeAccessLimits(
+            max_inventory_calls=fields[0],
+            max_read_calls=fields[1],
+            max_bytes_per_read=fields[2],
+            max_total_bytes_read=fields[3],
+            version=fields[4],
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise SealedTreeAccessError(
+            "invalid_argument", "sealed-tree limits are invalid"
+        ) from None
+
+
+def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
+    if type(value) is not SnapshotPolicy:
+        raise SealedTreeAccessError(
+            "invalid_argument", "snapshot policy must have an exact type"
+        )
+    try:
+        fields = (
+            value.max_files,
+            value.max_file_bytes,
+            value.max_total_bytes,
+            value.max_path_bytes,
+            value.max_component_bytes,
+            value.max_depth,
+            value.max_tree_object_bytes,
+            value.max_manifest_bytes,
+        )
+    except (AttributeError, TypeError):
+        raise SealedTreeAccessError(
+            "invalid_argument", "snapshot policy is incomplete"
+        ) from None
+    if any(type(item) is not int for item in fields):
+        raise SealedTreeAccessError(
+            "invalid_argument", "snapshot policy fields must be exact integers"
+        )
+    try:
+        return SnapshotPolicy(
+            max_files=fields[0],
+            max_file_bytes=fields[1],
+            max_total_bytes=fields[2],
+            max_path_bytes=fields[3],
+            max_component_bytes=fields[4],
+            max_depth=fields[5],
+            max_tree_object_bytes=fields[6],
+            max_manifest_bytes=fields[7],
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise SealedTreeAccessError(
+            "invalid_argument", "snapshot policy is invalid"
+        ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +271,25 @@ class SourceUsageLedger:
 
 _DirectoryIdentity = tuple[int, int]
 _FileIdentity = tuple[int, int, int, int | None, int | None]
+
+
+class _TreeAuthority(Protocol):
+    """Private structural interface shared by authenticated and mounted trees."""
+
+    def read(self, record: SealedTreeFile) -> bytes: ...
+
+    def reverify(self, task: DiscoveryTaskInputV1) -> None: ...
+
+    def close(self) -> None: ...
+
+
+def _best_effort_close(authority: _TreeAuthority | None) -> None:
+    if authority is None:
+        return
+    try:
+        authority.close()
+    except BaseException:
+        pass
 
 
 def _is_reparse(result: os.stat_result) -> bool:
@@ -872,6 +972,195 @@ class _TrustedTreeAuthority:
         return data
 
 
+def _task_authority_fingerprint(task: DiscoveryTaskInputV1) -> tuple[str, ...]:
+    return (
+        task.task_id,
+        task.repo_url,
+        task.commit,
+        task.instruction_id,
+        task.snapshot_manifest_sha256,
+        task.snapshot_content_root,
+        task.snapshot_id,
+    )
+
+
+def _canonical_exact_task(task: object) -> DiscoveryTaskInputV1:
+    if type(task) is not DiscoveryTaskInputV1:
+        raise SealedTreeAccessError(
+            "invalid_argument", "task must be an exact DiscoveryTaskInputV1"
+        )
+    try:
+        values = (
+            task.task_id,
+            task.repo_url,
+            task.commit,
+            task.instruction_id,
+            task.snapshot_manifest_sha256,
+            task.snapshot_content_root,
+            task.snapshot_id,
+            task.contract_version,
+        )
+    except (AttributeError, TypeError):
+        raise SealedTreeAccessError(
+            "invalid_binding", "task fields are incomplete"
+        ) from None
+    if any(
+        type(value) is not expected
+        for value, expected in zip(
+            values,
+            (str, str, str, str, str, str, str, int),
+            strict=True,
+        )
+    ):
+        raise SealedTreeAccessError(
+            "invalid_binding", "task fields must have exact scalar types"
+        )
+    try:
+        canonical = DiscoveryTaskInputV1(
+            task_id=values[0],
+            repo_url=values[1],
+            commit=values[2],
+            instruction_id=values[3],
+            snapshot_manifest_sha256=values[4],
+            snapshot_content_root=values[5],
+            contract_version=values[7],
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise SealedTreeAccessError(
+            "invalid_binding", "task did not pass strict reconstruction"
+        ) from None
+    if canonical.snapshot_id != values[6]:
+        raise SealedTreeAccessError(
+            "invalid_binding", "task snapshot identity is invalid"
+        )
+    return canonical
+
+
+def _manifest_directories(files: tuple[SealedTreeFile, ...]) -> frozenset[str]:
+    directories: set[str] = set()
+    for record in files:
+        parts = record.path.split("/")
+        for depth in range(1, len(parts)):
+            directories.add("/".join(parts[:depth]))
+    return frozenset(directories)
+
+
+class _MountedTreeAuthority(_TrustedTreeAuthority):
+    """Key-free authority over one evaluator-verified read-only mount.
+
+    The handoff digest is an internal closure value, not an authentication
+    primitive.  Authenticity is established by the trusted evaluator before
+    launch; this authority independently checks the exact mounted bytes at
+    bind and finalize time.
+    """
+
+    __slots__ = ("_handoff_sha256", "_task_binding")
+
+    def __init__(
+        self,
+        *,
+        tree_root: Path,
+        handoff: WorkerHandoffV1,
+        files: tuple[SealedTreeFile, ...],
+    ) -> None:
+        self._snapshot_root = Path()
+        self._tree = tree_root
+        self._key_material = bytearray()
+        self._key_id = ""
+        self._policy = handoff.policy
+        self._expected_fingerprint = ()
+        self._files = files
+        self._base_chain = ()
+        self._directories = {}
+        self._file_identities = {}
+        self._tree_descriptor = None
+        self._windows_final_paths = {}
+        self._handoff_sha256 = handoff.handoff_sha256
+        self._task_binding = _task_authority_fingerprint(handoff.task)
+        try:
+            (
+                self._base_chain,
+                self._directories,
+                self._file_identities,
+            ) = _capture_identity_state(self._tree, files)
+            if os.name == "nt":
+                for record in files:
+                    path = self._tree.joinpath(*record.path.split("/"))
+                    _assert_no_named_streams(path)
+                    self._windows_final_paths[record.path] = (
+                        _windows_expected_final_path(
+                            path,
+                            expected_file=self._file_identities[record.path],
+                            expected_size=record.size,
+                        )
+                    )
+            else:
+                self._tree_descriptor = _posix_open_tree_descriptor(
+                    self._tree, expected=self._directories[""]
+                )
+            self.reverify(handoff.task)
+        except BaseException:
+            _best_effort_close(self)
+            raise
+
+    def close(self) -> None:
+        super().close()
+        self._handoff_sha256 = ""
+        self._task_binding = ()
+
+    def _assert_mounted_layout(self) -> None:
+        expected_files = frozenset(record.path for record in self._files)
+        expected_directories = _manifest_directories(self._files)
+        try:
+            files, directories = _scan_tree(
+                self._tree,
+                self._policy,
+                expected_files=expected_files,
+                expected_directories=expected_directories,
+            )
+        except SealedSnapshotError as error:
+            code = (
+                "unsafe_source_path"
+                if error.code
+                in {"unsafe_snapshot_path", "snapshot_path_collision"}
+                else "source_changed"
+            )
+            raise SealedTreeAccessError(
+                code, "the mounted source tree does not match its verified handoff"
+            ) from None
+        if set(files) != set(expected_files) or set(directories) != set(
+            expected_directories
+        ):
+            raise SealedTreeAccessError(
+                "source_changed", "the mounted source layout changed"
+            )
+        for path, identity in files.items():
+            if identity != self._file_identities[path]:
+                raise SealedTreeAccessError(
+                    "source_changed", "a mounted source file identity changed"
+                )
+        for path, identity in directories.items():
+            if (identity[0], identity[1]) != self._directories[path]:
+                raise SealedTreeAccessError(
+                    "source_changed", "a mounted source directory identity changed"
+                )
+        self.assert_identity_state()
+
+    def reverify(self, task: DiscoveryTaskInputV1) -> None:
+        if (
+            type(task) is not DiscoveryTaskInputV1
+            or _task_authority_fingerprint(task) != self._task_binding
+            or not self._handoff_sha256
+        ):
+            raise SealedTreeAccessError(
+                "invalid_binding", "mounted source task binding is invalid"
+            )
+        self._assert_mounted_layout()
+        for record in self._files:
+            self.read(record)
+        self._assert_mounted_layout()
+
+
 _CONSTRUCTION_TOKEN: Final[object] = object()
 
 
@@ -898,14 +1187,14 @@ class BoundSealedTree:
         token: object,
         *,
         task: DiscoveryTaskInputV1,
-        authority: _TrustedTreeAuthority,
+        authority: _TreeAuthority,
         files: tuple[SealedTreeFile, ...],
         limits: SealedTreeAccessLimits,
     ) -> None:
         if token is not _CONSTRUCTION_TOKEN:
             raise TypeError("BoundSealedTree values must be created by the trusted binder")
         self.__task = task
-        self.__authority: _TrustedTreeAuthority | None = authority
+        self.__authority: _TreeAuthority | None = authority
         self.__files = files
         self.__by_path = {item.path: item for item in files}
         self.__limits = limits
@@ -961,7 +1250,7 @@ class BoundSealedTree:
 
     def _require_active(
         self, claim_token: object | None = None
-    ) -> _TrustedTreeAuthority:
+    ) -> _TreeAuthority:
         if self.__finalized or self.__authority is None:
             raise SealedTreeAccessError(
                 "access_finalized", "the sealed source capability is finalized"
@@ -992,13 +1281,14 @@ class BoundSealedTree:
                 )
             self.__claim_token = claim_token
 
-    def _invalidate(self) -> None:
-        authority = self.__authority
+    def _invalidate(self, authority: _TreeAuthority | None = None) -> None:
+        authority = self.__authority if authority is None else authority
         self.__authority = None
         self.__finalized = True
         self.__verification_succeeded = False
-        if authority is not None:
-            authority.close()
+        # State is already one-way closed.  Cleanup must preserve the
+        # triggering interruption or verification failure.
+        _best_effort_close(authority)
 
     def inventory(
         self, *, _claim_token: object | None = None
@@ -1055,27 +1345,25 @@ class BoundSealedTree:
                 raise SealedTreeAccessError(
                     "source_limit_exceeded", "aggregate source byte budget is exhausted"
                 )
+            previous_bytes = self.__bytes_read
+            previous_reads = self.__reads
             try:
                 data = authority.read(record)
-            except SealedTreeAccessError as error:
-                if error.code in {
-                    "source_changed",
-                    "snapshot_verification_failed",
-                    "unsafe_source_path",
-                }:
-                    self._invalidate()
-                raise
-            self.__bytes_read += len(data)
-            self.__reads.append(
-                SourceReadUsage(
+                receipt = SourceReadUsage(
                     sequence=len(self.__reads) + 1,
                     path=record.path,
                     bytes_read=len(data),
                     sha256=record.sha256,
                     blob_oid=record.blob_oid,
                 )
-            )
-            return data
+                self.__reads = [*self.__reads, receipt]
+                self.__bytes_read = previous_bytes + len(data)
+                return data
+            except BaseException:
+                self.__reads = previous_reads
+                self.__bytes_read = previous_bytes
+                self._invalidate(authority)
+                raise
 
     def usage_snapshot(self) -> SourceUsageLedger:
         """Return a deeply immutable point-in-time usage ledger."""
@@ -1101,14 +1389,14 @@ class BoundSealedTree:
             authority = self._require_active(_claim_token)
             try:
                 authority.reverify(self.__task)
-            except SealedTreeAccessError:
-                self._invalidate()
+                authority.close()
+                self.__authority = None
+                self.__finalized = True
+                self.__verification_succeeded = True
+                return self.usage_snapshot()
+            except BaseException:
+                self._invalidate(authority)
                 raise
-            authority.close()
-            self.__authority = None
-            self.__finalized = True
-            self.__verification_succeeded = True
-            return self.usage_snapshot()
 
     def _abort(self, *, _claim_token: object | None = None) -> SourceUsageLedger:
         """Irreversibly close without claiming successful re-verification."""
@@ -1132,16 +1420,9 @@ def bind_sealed_tree(
 ) -> BoundSealedTree:
     """Verify, identity-bind, and hide one sealed snapshot behind a capability."""
 
-    if not isinstance(task, DiscoveryTaskInputV1):
-        raise SealedTreeAccessError(
-            "invalid_argument", "task must be a DiscoveryTaskInputV1 value"
-        )
-    if not isinstance(policy, SnapshotPolicy) or not isinstance(
-        limits, SealedTreeAccessLimits
-    ):
-        raise SealedTreeAccessError(
-            "invalid_argument", "sealed-tree policies have invalid types"
-        )
+    canonical_task = _canonical_exact_task(task)
+    canonical_policy = _canonical_snapshot_policy(policy)
+    canonical_limits = _canonical_access_limits(limits)
     if not isinstance(attestation_key, (bytes, bytearray, memoryview)):
         raise SealedTreeAccessError(
             "invalid_argument", "attestation material must be bytes-like"
@@ -1170,12 +1451,12 @@ def bind_sealed_tree(
         root = Path(os.path.abspath(os.fspath(snapshot_root)))
         verified = verify_sealed_snapshot(
             root,
-            expected_task_id=task.task_id,
-            expected_repo_url=task.repo_url,
-            expected_commit=task.commit,
+            expected_task_id=canonical_task.task_id,
+            expected_repo_url=canonical_task.repo_url,
+            expected_commit=canonical_task.commit,
             attestation_key=key_material,
             expected_key_id=expected_key_id,
-            policy=policy,
+            policy=canonical_policy,
         )
     except (SealedSnapshotError, OSError, ValueError, TypeError):
         for index in range(len(key_material)):
@@ -1186,11 +1467,11 @@ def bind_sealed_tree(
         ) from None
 
     if (
-        verified.task_id != task.task_id
-        or verified.repo_url != task.repo_url
-        or verified.commit != task.commit
-        or verified.manifest_sha256 != task.snapshot_manifest_sha256
-        or verified.content_root != task.snapshot_content_root
+        verified.task_id != canonical_task.task_id
+        or verified.repo_url != canonical_task.repo_url
+        or verified.commit != canonical_task.commit
+        or verified.manifest_sha256 != canonical_task.snapshot_manifest_sha256
+        or verified.content_root != canonical_task.snapshot_content_root
     ):
         for index in range(len(key_material)):
             key_material[index] = 0
@@ -1205,27 +1486,113 @@ def bind_sealed_tree(
             snapshot_root=root,
             key_material=key_material,
             key_id=expected_key_id,
-            policy=policy,
+            policy=canonical_policy,
             verified=verified,
             files=files,
         )
         # Bracket identity capture with another complete authenticated verify.
-        authority.reverify(task)
+        authority.reverify(canonical_task)
     except SealedTreeAccessError:
-        if authority is not None:
-            authority.close()
-        else:
+        if authority is None:
             for index in range(len(key_material)):
                 key_material[index] = 0
+        else:
+            _best_effort_close(authority)
+        raise
+    except BaseException:
+        if authority is None:
+            for index in range(len(key_material)):
+                key_material[index] = 0
+        else:
+            _best_effort_close(authority)
         raise
 
-    return BoundSealedTree(
-        _CONSTRUCTION_TOKEN,
-        task=task,
-        authority=authority,
-        files=files,
-        limits=limits,
+    try:
+        return BoundSealedTree(
+            _CONSTRUCTION_TOKEN,
+            task=canonical_task,
+            authority=authority,
+            files=files,
+            limits=canonical_limits,
+        )
+    except BaseException:
+        _best_effort_close(authority)
+        raise
+
+
+def bind_worker_tree(
+    task: DiscoveryTaskInputV1,
+    tree_root: str | os.PathLike[str],
+    handoff_payload: bytes,
+    *,
+    expected_handoff_sha256: str,
+    expected_handoff_wire_sha256: str,
+    limits: SealedTreeAccessLimits = DEFAULT_SEALED_TREE_ACCESS_LIMITS,
+) -> BoundSealedTree:
+    """Bind an evaluator-verified, read-only worker mount without secret state.
+
+    The caller is responsible for delivering ``handoff_payload`` and ``tree_root``
+    through an operating-system-enforced read-only boundary.  The handoff
+    semantic and wire digests close that delivery but are not an
+    authentication substitute.
+    """
+
+    canonical_task = _canonical_exact_task(task)
+    canonical_limits = _canonical_access_limits(limits)
+    if type(handoff_payload) is not bytes:
+        raise SealedTreeAccessError(
+            "invalid_argument", "worker tree inputs have invalid types"
+        )
+    try:
+        canonical_handoff = WorkerHandoffV1.from_bytes(
+            handoff_payload,
+            expected_sha256=expected_handoff_sha256,
+            expected_wire_sha256=expected_handoff_wire_sha256,
+        )
+    except (AttributeError, TypeError, ValueError, WorkerHandoffError):
+        raise SealedTreeAccessError(
+            "invalid_binding", "worker handoff did not pass strict verification"
+        ) from None
+    if _task_authority_fingerprint(canonical_task) != _task_authority_fingerprint(
+        canonical_handoff.task
+    ):
+        raise SealedTreeAccessError(
+            "invalid_binding", "worker handoff does not match the requested task"
+        )
+    try:
+        root = Path(os.path.abspath(os.fspath(tree_root)))
+    except (OSError, TypeError, ValueError):
+        raise SealedTreeAccessError(
+            "invalid_argument", "worker tree root is invalid"
+        ) from None
+    files = tuple(
+        SealedTreeFile._from_verified(item) for item in canonical_handoff.files
     )
+    authority: _MountedTreeAuthority | None = None
+    try:
+        authority = _MountedTreeAuthority(
+            tree_root=root,
+            handoff=canonical_handoff,
+            files=files,
+        )
+        return BoundSealedTree(
+            _CONSTRUCTION_TOKEN,
+            task=canonical_handoff.task,
+            authority=authority,
+            files=files,
+            limits=canonical_limits,
+        )
+    except SealedTreeAccessError:
+        _best_effort_close(authority)
+        raise
+    except (OSError, TypeError, ValueError):
+        _best_effort_close(authority)
+        raise SealedTreeAccessError(
+            "source_changed", "worker tree mount did not pass verification"
+        ) from None
+    except BaseException:
+        _best_effort_close(authority)
+        raise
 
 
 __all__ = [
@@ -1238,4 +1605,5 @@ __all__ = [
     "SourceReadUsage",
     "SourceUsageLedger",
     "bind_sealed_tree",
+    "bind_worker_tree",
 ]
