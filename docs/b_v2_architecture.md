@@ -1,6 +1,6 @@
 # VulnGym T1 × T2 自动化闭环：B-v2 首版设计
 
-> 状态：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact 纵切、benchmark 阶段 A/B 的公开契约与投影 harness，以及阶段 C 的 sealed source snapshot 准备/校验边界，2026-08-20。本文以考题、`SCHEMA.md` 和 B-v2 计划书为边界；“已实现”不表示 source-only multi-finding T2、独立语义 T1、在线模型接入或最终数据验收已经完成。
+> 状态（2026-08-23）：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact、benchmark 阶段 A/B、阶段 C sealed source snapshot，以及 D0–D4 的 source-only 多候选生产、独立复核、严格投影与三文件结果包均已实现。阶段 E 的逐题进程/网络/挂载隔离和 50/20 全量实跑仍未完成；在线模型接入与全字段确定性 verifier 也未完成，因此本文不声称最终数据验收已经通过。
 
 ## 1. 目标与总体架构
 
@@ -20,7 +20,7 @@ flowchart TD
     R -->|预算耗尽或无进展| M
 ```
 
-T1 只接收原始资料包和待审 Entry，不读取 T2 的推理或自报置信度。T2 的 Planner、Semantic Judge 与 Reflection 已有严格 JSON 模型调用边界，并只能引用受控工具签发的候选和证据；这仍不等于语义正确性已经得到证明。独立 T1 的完整语义正判、反证审查与全字段裁决仍待实现。
+传统 Entry 闭环中的 T1 只接收原始资料包和待审 Entry，不读取 T2 的推理或自报置信度。T2 的 Planner、Semantic Judge 与 Reflection 已有严格 JSON 模型调用边界，并只能引用受控工具签发的候选和证据；这仍不等于全部正式 Entry 字段的语义正确性已经得到证明。D3 已为 source-only 候选实现独立的四准则复核与反证检查，但传统 15 字段 Entry 的完整语义正判和全字段确定性裁决仍待补齐。
 
 ## 2. 核心契约
 
@@ -147,7 +147,7 @@ prompt/response、Producer assumptions、异常文本或配置的本机根目录
 发现，只允许读取固定 manifest、record schema、manifest schema、公开 train JSONL 和
 公开 test JSONL；profile、revision、artifact digest、Schema 或集合不一致时 fail closed。
 
-四个命令的职责与发布物如下：
+六个命令的职责与发布物如下：
 
 | 命令 | 行为 | 原子输出 |
 | --- | --- | --- |
@@ -155,6 +155,26 @@ prompt/response、Producer assumptions、异常文本或配置的本机根目录
 | `export-tasks --split train\|test --output-dir <new-dir>` | 导出仅含 task/repo/commit/split/instruction 的无答案源码快照任务 | `tasks.jsonl`、`manifest.json` |
 | `project-train --artifact-root ... --bundle-index ... --bundle-index-sha256 ... --output-dir <new-dir>` | 完整校验每题 replay、投影一对多 finding，最后调用公开训练 oracle | `findings.jsonl`、`task_results.jsonl`、`aggregate.json`、`manifest.json` |
 | `project-test --artifact-root ... --bundle-index ... --bundle-index-sha256 ... --output-dir <new-dir>` | 完整校验每题 replay 并形成盲测提交；不读 train 文件、不调用 oracle | `findings.jsonl`、`task_results.jsonl`、`manifest.json`；无分数与 `aggregate.json` |
+| `project-discovery-train --artifact-root ... --bundle-index ... --bundle-index-sha256 ... --output-dir <new-dir>` | 完整校验每题 D2/D3 三文件结果包，严格执行 D4 → D0，再调用公开训练汇总 | `findings.jsonl`、`task_results.jsonl`、`aggregate.json`、`manifest.json` |
+| `project-discovery-test --artifact-root ... --bundle-index ... --bundle-index-sha256 ... --output-dir <new-dir>` | 完整校验每题 D2/D3 三文件结果包并形成 D0 盲测提交；使用独立 test 读取面，不调用训练汇总 | `findings.jsonl`、`task_results.jsonl`、`manifest.json`；无分数与 `aggregate.json` |
+
+D0–D4 结果包的精简投影命令如下；两条命令都要求 index 精确字节的 digest pin：
+
+```bash
+python -m vulngym_agent.benchmark_cli project-discovery-train \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/discovery-results/train \
+  --bundle-index /srv/vulngym/attestations/discovery-train-index.json \
+  --bundle-index-sha256 <index-file-sha256> \
+  --output-dir /srv/vulngym/discovery-projections/train
+
+python -m vulngym_agent.benchmark_cli project-discovery-test \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/discovery-results/test \
+  --bundle-index /srv/vulngym/attestations/discovery-test-index.json \
+  --bundle-index-sha256 <index-file-sha256> \
+  --output-dir /srv/vulngym/discovery-projections/test
+```
 
 所有 `output-dir` 必须事先不存在，且不能与 benchmark、artifact root 或 index 重叠。
 发布使用 sibling staging 和 no-replace rename，失败时不暴露半成品。训练 oracle 的
@@ -170,24 +190,25 @@ Entry 身份或逐项匹配。test 专用 reader 只打开固定 manifest、两�
 ```
 
 `bundles` 必须与选定 split 的 task 集合精确相等：每题一次、不得缺少或增加，task ID
-与 `dataset_sha256` 都不得重复；每个 digest 绑定 `<artifact-root>/<task_id>` 下的一份
-完整 closed-loop replay 数据集。reader 会在投影前核对固定文件集合、引用拓扑、终态、
-计数、资源上限与预期 dataset digest；所有 replay 都完成后才允许训练 oracle 或发布。
+与 `dataset_sha256` 都不得重复。传统 Entry 命令的 digest 绑定
+`<artifact-root>/<task_id>` 下的一份完整 closed-loop replay 数据集；discovery 命令的 digest
+则绑定下节定义的逐题三文件结果包。reader 会在投影前核对对应固定文件集合、引用/分支
+闭合、计数、资源上限与预期 dataset digest；所有 bundle 都完成后才允许训练汇总或发布。
 这些 SHA 能证明“读到的字节与受信调用方给出的预期值一致”并发现损坏，却不是签名，
 不能证明源码快照、fixture、公告或模型判断的来源真实性。
 
-Entry 投影按 task 的 `repo_url + commit` 重新绑定，支持同一源码快照输出多个 finding，
-对等价端点稳定去重。每题默认保留 Top 64，`--top-k` 硬上限为 256；公开训练 oracle
-固定使用 official inclusive 行号容差 5。训练 gold 只在 finding 已跨过 Producer/投影
-边界后由 aggregate oracle 使用，绝不能转换成 `RunTask`、hint、fixture 或候选 Entry。
+传统 Entry 投影按 task 的 `repo_url + commit` 重新绑定，支持同一源码快照输出多个
+finding，对等价端点稳定去重；每题默认 Top 64，`--top-k` 硬上限为 256。discovery
+路径先以 D0 固定权限完整投影最多 64 个 finding，再做稳定的 `--top-k` 截取，因此该命令
+的取值只能是 1..64。公开训练 oracle 固定使用 official inclusive 行号容差 5。训练 gold
+只在 finding 已跨过 Producer/投影边界后由 aggregate oracle 使用，绝不能转换成
+`RunTask`、hint、fixture、D0 task 或候选。
 
-阶段 A/B 只解决“公开数据契约与结果投影”，没有解决“从纯源码发现漏洞”。阶段 C 已按
-下节实现源码交付边界，但现有 `LocalStructuredT2Producer` 仍依赖公告、fix commit 与
-显式 source hints，不能直接执行 source-only 题目。以下阶段仍是验收前置条件：
-
-- **D：source-only T2/T1** —— 新增 snapshot 级、一对多 finding T2，并以不共享其推理
-  的独立 semantic T1 完成正反证裁决。
-- **E：隔离 50/20 运行** —— 在逐题断网 sandbox 中执行并由独立 evaluator 汇总验收。
+阶段 A/B 解决公开离线数据契约与结果投影，阶段 C 解决源码交付边界。原有
+`LocalStructuredT2Producer` 仍是依赖公告、fix commit 与显式 source hints 的传统 Entry
+链路；D0–D4 则以独立的 source-discovery producer/reviewer 实现纯源码多候选路径。
+尚未跨过的最终验收前置条件是 **E：隔离 50/20 运行**——在逐题进程隔离、断网、严格
+只读挂载和 gold 物理隔离的环境中执行，再由独立 evaluator 汇总验收。
 
 ### 2.6 Sealed source snapshot（阶段 C）
 
@@ -246,12 +267,56 @@ identity 或 durability 无法确认，会返回 `publication_commit_uncertain`�
 只再提供一条无答案 task 和有界输出位置，并关闭网络。`control/`、HMAC key、source repo、
 其他 task tree、benchmark 仓库、训练 split、生成器输入、评测日志与 gold 都不可见。
 因此阶段 C 证明的是“Agent 读取到的 source-only 字节与受信 preparer 所选 Git 对象一致”，
-并不提供发现或语义正确性结论；后者属于阶段 D。
+并不提供发现或语义正确性结论；后者由独立的 D0–D4 组件链路承接。
 
 最终盲测的评分真值必须物理隔离在独立评测端存储中。每个 Producer sandbox 只挂载一条
 无答案任务、该题 sealed tree 与有界输出位置；不得挂载 benchmark 仓库、训练 split、
 原始数据/生成器输入、评测日志或评分材料。trusted evaluator 在 Producer 退出后再读取
 公开 test 契约和已闭合 replay 进行投影，评分进程与 Producer 也必须分离。
+
+### 2.7 Source-only D0–D4 组件链路
+
+D0–D4 已在进程内组件层贯通，但不代替阶段 E 的运行环境隔离：
+
+1. **D0 契约与投影**：`DiscoveryTaskInputV1`、`DiscoveryCandidate`、
+   `DiscoveryReview` 与 `DiscoveryTaskResult` 是严格 canonical、无宿主机路径的公开边界。
+   `project_discovery_result` 只输出经 review 标记为 `emit` 的候选，固定权限为每题最多
+   64 个 finding。
+2. **D1 只读工具面**：`DiscoveryToolbox` 只持有一题的 `BoundSealedTree`，不暴露树的
+   宿主机路径、HMAC key、Git 仓库/历史、shell 或网络。inventory/read/search/structure/link/
+   source-validate 均受固定预算约束，产生的 artifact/node capability 与 task、snapshot、
+   上游 digest 闭合。
+3. **D2 多候选 Producer**：`SourceDiscoveryAttemptController` 让模型只选择 runtime 签发的
+   不透明 ID；controller 机械构造 D0 candidate、复验源码位置和 evidence closure，并为每个
+   candidate 生成 validation receipt。D2 的固定上限是 32 个候选；无法形成完整 draft 时
+   输出整题 `ProducerDeferredV1`。
+4. **D3 独立 Reviewer**：只有 D2 形成 draft 才会延迟创建 D3。Reviewer 使用重新获取的
+   tree、budget 与 context，由编排层单独注入 D3 backend，不读取 D2 推理，并对
+   `entry_role`、`critical_role`、`trace_continuity`、`counterevidence_status` 四项分别
+   给出 `supported/contradicted/insufficient`。D2 与 D3 的 tree/budget capability 必须为
+   不同实例，且各自在边界处闭合。
+5. **D4 严格适配**：`project_discovery_run_v1` 要求 D2 task、D3 内嵌 draft 与最终结果逐字节
+   规范化后精确绑定；D2 defer 不得带 D3，D2 draft 必须恰好带一个 D3 结果。只有 D3
+   `accept` 映射为 D0 `emit`；`reject/defer` 保持对应决策，整题 defer 不携带部分候选。
+   `SourceDiscoveryRunV1` 同时保存 D2、可选 D3 与唯一可重算的 D0 结果。
+
+每题离线结果包固定只有 `producer.jsonl`、`reviewer.jsonl`、`manifest.jsonl` 三个文件。
+writer 在 sibling staging 内写入、fsync、完整读回校验后，以 no-replace rename 提交；reader
+核对固定布局、canonical JSONL、资源上限、task/dataset digest 与分支形状，并重新执行 D4，
+不信任持久化的派生结论。提交前失败时，所有平台都保守保留私有 staging，绝不执行
+name-based unlink/rmdir：即便 POSIX descriptor-relative 的 stat-then-unlink 也存在成员名
+替换窗口。提交点后任何 identity、durability 或最终读回失败统一返回
+`publication_uncertain` 且标记 committed；调用方必须把正式目标视为可能已提交，以预期
+task ID 和 dataset digest 调用 `read_discovery_result_bundle` 复核，不能按路径名回滚。
+
+reader 返回的是与本次实际读取字节闭合的内存快照，不是对路径永久不变的承诺；有限次
+stat/readback 也不能替代操作系统级写排他。受信 evaluator 必须在校验/投影期间提供独占
+读取或只读 mount/ACL；把该边界强制到其他进程正是阶段 E 的职责。
+
+benchmark harness 的 discovery 路径会先校验所有已索引任务包，再对每题按固定 64 上限
+完成 D0 投影，最后才按 1..64 的 `--top-k` 稳定截取和一次性发布。训练路径随后调用只返回
+总量/recall 的 aggregate；测试路径使用独立 test reader，不加载公开训练答案、不调用训练
+aggregate，也不输出分数或 `aggregate.json`。
 
 ## 3. 交付边界与实施状态
 
@@ -261,7 +326,7 @@ B-v2 的 Standard 包含：T1 全核心字段三态、可读证据、多源与�
 
 Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归因、复杂 merge/backport、完整 taint 与自动发布。Standard 不建设第三个 Repair Agent、通用平台或远程 Artifact Store。
 
-### 当前已实现：受控编排与本地结构化 T2 Producer 纵切
+### 当前已实现：传统闭环、隔离源码交付与 D0–D4 组件链路
 
 - 三份严格机器契约：Entry、Validation、Evidence Schema；`additionalProperties=false`，并有 `EvidenceItem`、`FieldValidation`、`ValidationReport` 可序列化模型。
 - `SchemaAdapter` 覆盖 15 个正式字段、额外/缺失字段、行范围、GHSA URL 与 `report_id` 一致性、ID 大写/去重/CVE-before-GHSA 排序及正式 T2 的 `verify=0`；它不会补造内容字段。
@@ -284,14 +349,18 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - replay writer 已以单次 staging 事务发布正式 Entry/Validation、全套 attempt sidecar 与 manifest；reader 会核对固定文件集合、canonical JSONL、引用拓扑、计数、digest、路径和资源上限，`verify_closed_loop_artifacts` 还可与调用方提供的期望事件流做逐文件精确对比。
 - `benchmark_cli` 已完成阶段 A/B：固定 public manifest/revision 的外部只读 bundle 校验、无答案 snapshot task 导出、严格 attested replay index、正式 Entry 到一对多 finding 的 Top-K 投影、train-only aggregate oracle 与 test 无评分发布。test 投影有独立 read surface，不加载公开训练答案。
 - `snapshot_cli prepare|verify-batch` 已完成阶段 C：按精确 source identity 从受信 Git 对象生成不含历史面的单题 tree，以逐文件 Git OID/SHA-256、canonical manifest 和 HMAC 绑定，再通过两轮逐题复验与一次外层事务发布/复验形成 sealed batch。Agent 消费端的只读单题 mount/ACL 与断网仍由阶段 E 的运行环境强制。
+- D0/D1 已完成严格 source-discovery 契约、固定 64 finding 权限、确定性投影，以及只在单题 `BoundSealedTree` 上工作的有界工具面；宿主机路径、密钥、Git 历史、shell 与网络均不进入该能力面。
+- D2/D3/D4 已完成 source-only 多候选 Producer、重新获取独立 tree/budget/context 的四准则 Reviewer、惰性分支编排与严格适配。D2 draft 上限为 32；D2 defer 不启动 D3；只有精确绑定的 D3 `accept` 才进入 D0 `emit`。
+- discovery replay 已以固定三文件结果包闭合 D2/D3 与可重算 D4；提交前失败保守留下私有 staging，提交后不确定统一以 `publication_uncertain` 交由 digest 复核。`project-discovery-train|test` 已接入 harness：先完整 D0(64) 再稳定截取，test 使用独立读取面且不调用训练汇总。
 
-代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立，模型提出的标题、分类和语义选择仍受严格输出契约约束，并等待独立 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
+代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立。source-discovery 候选已由 D3 独立复核；传统 Entry 链路中模型提出的标题、分类和其他未覆盖语义仍受严格输出契约约束，且不能冒充完整 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：阶段 D 的 source-only multi-finding T2 和独立 semantic T1；阶段 E 的 50/20 隔离运行；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B harness 与阶段 C snapshot 边界已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
+尚未完成：阶段 E 的逐题进程/网络/挂载隔离与 50/20 全量实跑；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C 与 D0–D4 组件均已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
 
 ### 下一阶段
 
-下一阶段按 D → E 推进：先让 source-only multi-finding T2 在单题 sealed tree 上工作，
-并由独立 semantic T1 完成裁决；再在逐题断网、gold 物理隔离的环境中完成 50/20 端到端
-运行。同时补 closed-loop replay 的独立 verify CLI、可显式选择的在线模型 backend 和
-全字段 `required_check` verifier；完整 trace、AST/数据流与更多语言增强继续作为后续能力。
+下一阶段直接进入 E：把当前进程内 D0–D4 链路放入逐题独立进程，只读挂载一题 sealed
+tree 与一条无答案 task，限制输出并关闭网络；Producer 退出后由独立 evaluator 校验结果
+包、执行 train 汇总或 blind test 投影，并在 gold 物理隔离的环境中完成 50/20 端到端实跑。
+同时补 closed-loop replay 的独立 verify CLI、可显式选择的在线模型 backend 和全字段
+`required_check` verifier；完整 trace、AST/数据流与更多语言增强继续作为后续能力。

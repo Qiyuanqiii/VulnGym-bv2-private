@@ -436,6 +436,24 @@ python -m vulngym_agent.benchmark_cli project-test \
   --bundle-index /srv/vulngym/attestations/test-index.json \
   --bundle-index-sha256 <64-lower-case-index-file-sha256> \
   --output-dir /srv/vulngym/projections/test
+
+# Verify the D2/D3 three-file result bundle for every training task, apply the
+# strict D4 -> D0 projection, and run the aggregate-only training oracle.
+python -m vulngym_agent.benchmark_cli project-discovery-train \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/discovery-results/train \
+  --bundle-index /srv/vulngym/attestations/discovery-train-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/discovery-projections/train
+
+# Create the discovery blind-test submission without reading the training
+# surface or calling the training aggregate.
+python -m vulngym_agent.benchmark_cli project-discovery-test \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/discovery-results/test \
+  --bundle-index /srv/vulngym/attestations/discovery-test-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/discovery-projections/test
 ```
 
 The angle-bracket digest is documentation notation; a real projection must
@@ -447,30 +465,32 @@ channel. The index is strict JSON with no additional keys and has this shape:
 ```
 
 It must contain exactly one entry for every task in the selected split, with
-no missing, extra, or repeated task IDs and no repeated dataset digests. Each
-`dataset_sha256` binds the corresponding fully verified closed-loop replay
-directory under `<artifact-root>/<task_id>`. The index-file digest and replay
-dataset digests detect substitution or corruption relative to values supplied
-by the trusted evaluator; they do **not** prove that a source tree, fixture, or
-model conclusion is authentic.
+no missing, extra, or repeated task IDs and no repeated dataset digests. For
+`project-train` / `project-test`, each `dataset_sha256` binds the corresponding
+fully verified closed-loop replay directory under
+`<artifact-root>/<task_id>`. For the two discovery commands it instead binds
+the task's verified three-file discovery result bundle described below. The
+index-file and dataset digests detect substitution or corruption relative to
+values supplied by the trusted evaluator; they do **not** prove that a source
+tree, fixture, or model conclusion is authentic.
 
-Both projection commands publish `findings.jsonl`, `task_results.jsonl`, and
-`manifest.json` in one no-overwrite transaction. `project-train` additionally
-publishes `aggregate.json`; the training oracle exposes totals and recall only,
-never task/advisory/Entry identities or per-item matches. `project-test` does
-not read the public training file, does not call the oracle, and does not
-publish a score or `aggregate.json`. Projection emits at most 64 findings per
-task by default; `--top-k` has a hard maximum of 256. The fixed public-training
-matcher uses the official inclusive line tolerance of 5.
+The two formal-Entry projection commands publish `findings.jsonl`,
+`task_results.jsonl`, and `manifest.json` in one no-overwrite transaction.
+`project-train` additionally publishes `aggregate.json`; the training oracle
+exposes totals and recall only, never task/advisory/Entry identities or
+per-item matches. `project-test` does not read the public training file, call
+the oracle, or publish a score or `aggregate.json`. This legacy projection
+defaults to 64 findings per task and permits `--top-k` up to 256. The fixed
+public-training matcher uses the official inclusive line tolerance of 5.
 
 Phases A/B provide strict public contracts, answer-free task export, replay
-verification, bounded multi-finding projection, and the train-only aggregate
-oracle. Phase C, described below, now closes the source-delivery boundary. It
-does **not** make the current advisory/fix-anchored
-`LocalStructuredT2Producer` a source-only multi-finding producer. Phase D (that
-producer plus an independent semantic T1) and phase E (the isolated 50/20 run)
-remain pending, as do the online-model backend and full-field required-check
-verifiers.
+verification, bounded projection, and the train-only aggregate oracle. Phase
+C, described below, closes the source-delivery boundary. D0-D4 are also
+implemented as a separate source-only discovery lane; the older
+advisory/fix-anchored `LocalStructuredT2Producer` remains available but is not
+used to claim that capability. Phase E—the per-task isolated 50/20 execution—
+remains pending, as do an explicitly configured online-model backend and the
+deterministic `required_check` verifiers for every formal Entry field.
 
 #### Sealed source-snapshot preparation (phase C)
 
@@ -543,14 +563,73 @@ material, or network access. Phase C proves the delivered bytes and their
 binding to the preparer's selected Git objects; it does not perform source-only
 finding discovery or semantic validation.
 
-For the eventual blind run, scoring truth must remain physically isolated in
+#### Source-only discovery and independent review (D0-D4)
+
+The D0-D4 component lane is implemented end to end for one authenticated
+snapshot task:
+
+- **D0** defines a strict, path-free source-discovery task/result contract and
+  a deterministic finding projection. Its authority is fixed at no more than 64
+  findings per task.
+- **D1** exposes a bounded `DiscoveryToolbox` over one `BoundSealedTree`. It
+  exposes neither the host path nor the attestation key, Git history, shell, or
+  network capability; source and relationship artifacts remain bound to the
+  task, snapshot, and upstream digests.
+- **D2** runs `SourceDiscoveryAttemptController` as a source-only,
+  multi-candidate producer. The model selects only controller-issued opaque
+  artifact/node IDs; the controller constructs and source-validates complete
+  candidates and receipts. D2 deliberately has the narrower cap of 32
+  candidates and defers the whole task when it cannot close the draft.
+- **D3** reacquires a fresh tree, budget, and context through
+  `SourceDiscoveryReviewerController` and receives its backend separately from
+  D2 orchestration. It receives the closed D2 draft but not D2 reasoning, and
+  independently assesses entry role, critical role, trace continuity, and
+  counterevidence as supported, contradicted, or insufficient. A D2 deferral
+  never acquires D3 capabilities.
+- **D4** requires exact D2/D3 task and draft binding, reparses the complete wire
+  graph, maps only D3 `accept` to D0 `emit`, and fails closed on a whole-task
+  deferral. `SourceDiscoveryRunV1` binds the private D2/D3 sidecars to that
+  exact public D0 projection.
+
+`write_discovery_result_bundle` publishes exactly `producer.jsonl`,
+`reviewer.jsonl`, and `manifest.jsonl`; `read_discovery_result_bundle` checks
+the fixed layout, canonical JSONL, byte limits, task/dataset digests, exact
+D2/D3 branch shape, and recomputes D4 rather than trusting a persisted derived
+decision. Publication uses a sibling no-replace transaction. Before the commit
+point, failures conservatively retain the private staging directory on every
+platform: no name-based unlink or rmdir is attempted because even a
+descriptor-relative stat-then-unlink sequence has a member-name replacement
+window. After the commit point, an identity, durability, or final readback
+failure is reported as `publication_uncertain`; treat the destination as
+possibly committed and re-open it with the expected task and dataset digest
+instead of rolling it back by path name.
+
+These readers bind the returned in-memory result to the exact bytes observed
+during verification; they do not create an operating-system writer lease or
+make the pathname permanently immutable. The trusted evaluator must give the
+verification/projection phase exclusive or read-only access. Enforcing that
+mount/ACL boundary against another process belongs to phase E.
+
+The `project-discovery-train` and `project-discovery-test` commands first verify
+every indexed three-file bundle and apply the complete fixed D0 projection at
+64 before taking a stable `--top-k` slice; discovery `--top-k` is therefore
+restricted to 1..64. Both publish `findings.jsonl`, `task_results.jsonl`, and
+`manifest.json`; only training publishes `aggregate.json`. The test path uses
+its dedicated test read surface, never invokes the training aggregate, and
+does not load the public training answers.
+
+Phase E is still an execution-environment deliverable. For the eventual blind
+run, scoring truth must remain physically isolated in
 separate evaluator storage and must never be used to prepare tasks, fixtures,
 or model responses. Each producer sandbox must be offline and receive only one
 answer-free task, its sealed source tree, and a bounded output location. Do not
 mount the benchmark repository, the training split, raw data/generator inputs,
 evaluation logs, or scoring material into that sandbox. The trusted evaluator
 may validate and project outputs after the producer exits; this repository does
-not yet claim that the 50/20 acceptance has passed.
+not yet implement that per-task process/network/mount isolation, has not run the
+full 50/20 workflow, and does not claim final acceptance. The online-model
+backend and deterministic verifier coverage for all formal Entry fields also
+remain incomplete.
 
 The deterministic T1 CLI writes separate validation, evidence, and
 run-manifest files:

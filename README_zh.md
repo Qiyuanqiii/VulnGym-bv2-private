@@ -396,6 +396,22 @@ python -m vulngym_agent.benchmark_cli project-test \
   --bundle-index /srv/vulngym/attestations/test-index.json \
   --bundle-index-sha256 <64-lower-case-index-file-sha256> \
   --output-dir /srv/vulngym/projections/test
+
+# 逐题校验 D2/D3 三文件结果包，执行严格 D4 → D0 投影，再调用仅汇总的训练 oracle。
+python -m vulngym_agent.benchmark_cli project-discovery-train \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/discovery-results/train \
+  --bundle-index /srv/vulngym/attestations/discovery-train-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/discovery-projections/train
+
+# 生成 discovery 盲测提交；不读取训练数据面，也不调用训练汇总。
+python -m vulngym_agent.benchmark_cli project-discovery-test \
+  --benchmark-root /srv/vulngym/benchmark-public \
+  --artifact-root /srv/vulngym/discovery-results/test \
+  --bundle-index /srv/vulngym/attestations/discovery-test-index.json \
+  --bundle-index-sha256 <64-lower-case-index-file-sha256> \
+  --output-dir /srv/vulngym/discovery-projections/test
 ```
 
 尖括号内是文档占位符；真实投影必须从受信通道取得 index 文件精确字节的 64 位小写
@@ -406,23 +422,25 @@ SHA-256。index 是不允许额外键的严格 JSON，结构如下：
 ```
 
 它必须为所选 split 中每个 task 恰好列出一项，不能缺少、增加或重复 task ID，也不能
-重复 dataset digest。每个 `dataset_sha256` 绑定
-`<artifact-root>/<task_id>` 下已完整校验的 closed-loop replay 目录。index 文件 digest
-与 replay dataset digest 能依据受信评测端提供的预期值发现替换或损坏，但**不能**证明
-源码树、fixture 或模型结论的来源真实性。
+重复 dataset digest。对于 `project-train` / `project-test`，每个
+`dataset_sha256` 绑定 `<artifact-root>/<task_id>` 下已完整校验的 closed-loop replay
+目录；对于两个 discovery 命令，它绑定下文所述的逐题三文件结果包。index 文件与 dataset
+digest 能依据受信评测端提供的预期值发现替换或损坏，但**不能**证明源码树、fixture 或
+模型结论的来源真实性。
 
-两个投影命令都会在一次禁止覆盖的事务中发布 `findings.jsonl`、
+两个正式 Entry 投影命令都会在一次禁止覆盖的事务中发布 `findings.jsonl`、
 `task_results.jsonl` 和 `manifest.json`。`project-train` 额外发布
 `aggregate.json`；训练 oracle 只公开总数与 recall，不公开 task/advisory/Entry 身份或
 逐项匹配。`project-test` 不读取公开 train 文件、不调用 oracle，也不产生分数或
-`aggregate.json`。每题默认最多投影 Top 64 finding，`--top-k` 硬上限为 256；固定公开
-训练 matcher 的 official inclusive 行号容差为 5。
+`aggregate.json`。这条旧投影路径每题默认 Top 64，`--top-k` 可到 256；固定公开训练
+matcher 的 official inclusive 行号容差为 5。
 
-阶段 A/B 已提供严格公开契约、无答案任务导出、replay 校验、有界一对多 finding 投影，
-以及 train-only aggregate oracle。下文的阶段 C 已补齐源码交付边界，但并不表示当前依赖
-公告/fix 锚点的 `LocalStructuredT2Producer` 已成为 source-only multi-finding Producer。
-阶段 D（该 Producer 与独立 semantic T1）和阶段 E（50/20 隔离运行）仍待完成；显式在线
-模型 backend 与全字段 required-check verifier 也尚未完成。
+阶段 A/B 已提供严格公开契约、无答案任务导出、replay 校验、有界投影，以及 train-only
+aggregate oracle；下文的阶段 C 已补齐源码交付边界。D0–D4 也已作为一条独立的
+source-only discovery 链路实现；原有依赖公告/fix 锚点的
+`LocalStructuredT2Producer` 仍保留，但不再用它声称这项能力。阶段 E 的逐题隔离 50/20
+执行仍待完成；可显式配置的在线模型 backend 与覆盖全部正式 Entry 字段的确定性
+`required_check` verifier 也尚未完成。
 
 #### Sealed 源码快照准备（阶段 C）
 
@@ -481,11 +499,52 @@ task 与有界输出位置；sandbox 不得暴露 key、control、源 Git 仓库
 benchmark 仓库、评测日志、评分材料或网络。阶段 C 只证明交付字节及其与 preparer 所选
 Git 对象的绑定，不负责 source-only finding 发现或语义裁决。
 
-最终盲测时，评分真值必须物理隔离在独立评测端存储中，绝不能用于准备 task、fixture
-或模型响应。每个 Producer sandbox 必须断网，只接收一条无答案任务、对应 sealed 源码
+#### Source-only 多候选生产与独立复核（D0–D4）
+
+D0–D4 的逐题组件链路已经贯通：
+
+- **D0** 提供严格、无本机路径的 source-discovery task/result 契约和确定性 finding 投影；
+  每题权限固定为最多 64 个 finding。
+- **D1** 在单个 `BoundSealedTree` 上提供有界 `DiscoveryToolbox`，不暴露宿主机路径、
+  attestation key、Git 历史、shell 或网络能力；源码与关系 artifact 均绑定 task、snapshot
+  和上游 digest。
+- **D2** 由 `SourceDiscoveryAttemptController` 执行 source-only 多候选生产。模型只能选择
+  controller 签发的不透明 artifact/node ID；controller 机械构造完整候选、执行源码校验并
+  闭合 receipt。D2 使用更窄的 32 候选上限，无法闭合 draft 时整题 defer。
+- **D3** 通过 `SourceDiscoveryReviewerController` 重新取得独立的 tree、budget 与
+  context，并由编排层单独注入 backend；它接收已闭合 D2 draft，但不读取 D2 推理，独立
+  复核 entry role、critical role、trace continuity 与 counterevidence，结论限定为
+  supported、contradicted 或 insufficient。D2 defer 时不会获取任何 D3 capability。
+- **D4** 要求 D2/D3 的 task 与 draft 精确绑定，重解析完整 wire graph，只有 D3 `accept`
+  才映射为 D0 `emit`，整题 defer 均保持 fail closed。`SourceDiscoveryRunV1` 将私有 D2/D3
+  sidecar 与这一份精确公开 D0 投影闭合。
+
+`write_discovery_result_bundle` 固定发布 `producer.jsonl`、`reviewer.jsonl` 和
+`manifest.jsonl`；`read_discovery_result_bundle` 会校验固定文件集合、canonical JSONL、
+字节上限、task/dataset digest、D2/D3 分支形状，并重新计算 D4，而不是相信落盘的派生
+结论。发布采用 sibling no-replace 事务。提交点之前如失败，所有平台都会保守保留私有
+staging；不会执行基于名称的 unlink/rmdir，因为即使 descriptor-relative 的
+stat-then-unlink 也存在成员名替换窗口。提交点之后若 identity、durability 或最终读回失败，
+则报告 `publication_uncertain`；调用方应把目标视为可能已提交，按预期 task 与 dataset
+digest 重新打开复核，不能按路径名回滚。
+
+这些 reader 保证返回的内存结果绑定本次校验实际读到的精确字节，但不会自行取得操作系统
+级写排他权，也不承诺路径之后永久不变。受信 evaluator 必须让校验/投影阶段独占读取，
+或只读挂载对应目录；对其他进程强制这一 mount/ACL 边界属于阶段 E。
+
+`project-discovery-train` 与 `project-discovery-test` 会先完整校验每个已索引三文件包，
+以固定 64 上限执行完整 D0 投影，再做稳定的 `--top-k` 截取，因此 discovery 的
+`--top-k` 只能取 1..64。两者都发布 `findings.jsonl`、`task_results.jsonl` 和
+`manifest.json`，仅训练路径额外发布 `aggregate.json`。测试路径使用独立 test 读取面，
+既不调用训练汇总，也不加载公开训练答案。
+
+阶段 E 仍属于运行环境交付。最终盲测时，评分真值必须物理隔离在独立评测端存储中，
+绝不能用于准备 task、fixture 或模型响应。每个 Producer sandbox 必须断网，只接收一条
+无答案任务、对应 sealed 源码
 树和有界输出目录；不得挂载 benchmark 仓库、训练 split、原始数据/生成器输入、评测
 日志或评分材料。受信 evaluator 可在 Producer 退出后校验并投影输出；当前仓库仍不声称
-已经通过 50/20 最终验收。
+已经实现逐题进程/网络/挂载隔离，也尚未完成 50/20 全量实跑，因此不声称通过最终验收。
+在线模型 backend 与覆盖全部正式 Entry 字段的确定性 verifier 同样仍未完成。
 
 确定性 T1 CLI 的验证报告、证据和运行清单继续严格分开落盘：
 
