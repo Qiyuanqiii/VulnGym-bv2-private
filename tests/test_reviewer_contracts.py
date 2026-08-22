@@ -39,6 +39,7 @@ from vulngym_agent.benchmark.reviewer_contracts import (
     ReviewerFinalizedV1,
     ReviewerInputV1,
     parse_reviewer_result_v1,
+    reviewer_selection_digest_v1,
 )
 
 
@@ -473,6 +474,17 @@ class ReviewerContractTests(unittest.TestCase):
         self.assertIsNot(finalized, parse_reviewer_result_v1(finalized))
         self.assertEqual(
             _used_artifacts(finalized.verdicts), finalized.attempt_seal.used_artifacts
+        )
+        verdict = finalized.verdicts[0]
+        self.assertEqual(
+            verdict.selection_digest,
+            reviewer_selection_digest_v1(
+                candidate_id=verdict.candidate_id,
+                candidate_sha256=verdict.candidate_sha256,
+                context_sha256=verdict.context_sha256,
+                criteria=verdict.criteria,
+                review_input_sha256=verdict.review_input_sha256,
+            ),
         )
 
     def test_finalized_rejects_missing_extra_duplicate_or_wrong_input_verdicts(self) -> None:

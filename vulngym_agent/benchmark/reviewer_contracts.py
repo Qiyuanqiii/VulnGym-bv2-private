@@ -70,6 +70,21 @@ REVIEWER_ATTEMPT_SEAL_DIGEST_DOMAIN: Final[bytes] = (
 REVIEWER_RESULT_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym D3 reviewer result v1\0"
 )
+REVIEWER_CONTEXT_DIGEST_DOMAIN: Final[bytes] = (
+    b"VulnGym D3 reviewer context v1\0"
+)
+REVIEWER_MODEL_RECORD_DIGEST_DOMAIN: Final[bytes] = (
+    b"VulnGym D3 reviewer model record v1\0"
+)
+REVIEWER_ARTIFACT_CATALOG_DIGEST_DOMAIN: Final[bytes] = (
+    b"VulnGym D3 reviewer artifact catalog v1\0"
+)
+REVIEWER_SOURCE_LEDGER_DIGEST_DOMAIN: Final[bytes] = (
+    b"VulnGym D3 reviewer source ledger v1\0"
+)
+REVIEWER_BUDGET_LEDGER_DIGEST_DOMAIN: Final[bytes] = (
+    b"VulnGym D3 reviewer budget ledger v1\0"
+)
 
 REVIEWER_CRITERIA: Final[tuple[str, ...]] = (
     "entry_role",
@@ -966,6 +981,49 @@ def _derive_decision(criteria: tuple[ReviewerCriterionV1, ...]) -> str:
     return "defer"
 
 
+def reviewer_selection_digest_v1(
+    *,
+    candidate_id: str,
+    candidate_sha256: str,
+    context_sha256: str,
+    criteria: tuple[ReviewerCriterionV1, ...],
+    review_input_sha256: str,
+) -> str:
+    """Return the sole D3 selection digest for one exact criterion set."""
+
+    _identifier(candidate_id, pattern=_CANDIDATE_ID_RE, name="candidate_id")
+    _identifier(
+        candidate_sha256, pattern=_SHA256_RE, name="candidate_sha256"
+    )
+    _identifier(context_sha256, pattern=_SHA256_RE, name="context_sha256")
+    _identifier(
+        review_input_sha256,
+        pattern=_SHA256_RE,
+        name="review_input_sha256",
+    )
+    if type(criteria) is not tuple:
+        raise ReviewerContractError(
+            "invalid_type", "criteria must be an exact tuple"
+        )
+    canonical = tuple(_canonical_criterion(item) for item in criteria)
+    rank = {name: index for index, name in enumerate(REVIEWER_CRITERIA)}
+    canonical = tuple(sorted(canonical, key=lambda item: rank[item.criterion]))
+    if tuple(item.criterion for item in canonical) != REVIEWER_CRITERIA:
+        raise ReviewerContractError(
+            "invalid_state", "selection digest requires every fixed criterion"
+        )
+    return _digest(
+        REVIEWER_SELECTION_DIGEST_DOMAIN,
+        {
+            "candidate_id": candidate_id,
+            "candidate_sha256": candidate_sha256,
+            "context_sha256": context_sha256,
+            "criteria": [item.to_dict() for item in canonical],
+            "review_input_sha256": review_input_sha256,
+        },
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ReviewerCandidateVerdictV1:
     """Controller-derived verdict for one exact producer candidate."""
@@ -1062,15 +1120,12 @@ class ReviewerCandidateVerdictV1:
                 "invalid_state", "conclusive criteria require a model record binding"
             )
         object.__setattr__(self, "decision", decision)
-        selection_digest = _digest(
-            REVIEWER_SELECTION_DIGEST_DOMAIN,
-            {
-                "candidate_id": self.candidate_id,
-                "candidate_sha256": self.candidate_sha256,
-                "context_sha256": self.context_sha256,
-                "criteria": [item.to_dict() for item in criteria],
-                "review_input_sha256": self.review_input_sha256,
-            },
+        selection_digest = reviewer_selection_digest_v1(
+            candidate_id=self.candidate_id,
+            candidate_sha256=self.candidate_sha256,
+            context_sha256=self.context_sha256,
+            criteria=criteria,
+            review_input_sha256=self.review_input_sha256,
         )
         object.__setattr__(self, "selection_digest", selection_digest)
         object.__setattr__(
@@ -2089,19 +2144,24 @@ def parse_reviewer_result_v1(value: Any) -> ReviewerResultV1:
 __all__ = [
     "DEFAULT_REVIEWER_LIMITS",
     "REVIEWER_ASSESSMENTS",
+    "REVIEWER_ARTIFACT_CATALOG_DIGEST_DOMAIN",
     "REVIEWER_ATTEMPT_SEAL_DIGEST_DOMAIN",
+    "REVIEWER_BUDGET_LEDGER_DIGEST_DOMAIN",
     "REVIEWER_CONTRACT_VERSION",
     "REVIEWER_CRITERIA",
+    "REVIEWER_CONTEXT_DIGEST_DOMAIN",
     "REVIEWER_DECISIONS",
     "REVIEWER_ERROR_TAXONOMY_VERSION",
     "REVIEWER_INPUT_DIGEST_DOMAIN",
     "REVIEWER_INSTRUCTION_ID",
     "REVIEWER_INSTRUCTION_V1",
     "REVIEWER_LIMITS_VERSION",
+    "REVIEWER_MODEL_RECORD_DIGEST_DOMAIN",
     "REVIEWER_POLICY_VERSION",
     "REVIEWER_RESULT_DIGEST_DOMAIN",
     "REVIEWER_SCOPE",
     "REVIEWER_SELECTION_DIGEST_DOMAIN",
+    "REVIEWER_SOURCE_LEDGER_DIGEST_DOMAIN",
     "REVIEWER_VERDICT_DIGEST_DOMAIN",
     "REVIEWER_VALIDATION_ARTIFACT_KIND",
     "REVIEWER_VALIDATION_CONTRACT_ID",
@@ -2117,4 +2177,5 @@ __all__ = [
     "ReviewerInputV1",
     "ReviewerResultV1",
     "parse_reviewer_result_v1",
+    "reviewer_selection_digest_v1",
 ]
