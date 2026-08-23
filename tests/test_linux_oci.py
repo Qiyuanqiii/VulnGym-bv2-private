@@ -483,10 +483,29 @@ class LinuxOciTests(unittest.TestCase):
     def test_inspect_binds_all_pinned_base_image_labels(self) -> None:
         base_labels = self.image["Config"]["Labels"]
         base_labels["runner.example/build"] = "fixed-build-metadata"
+        base_labels["desktop.docker.io/ports.scheme"] = "base-metadata"
         runtime = self._runtime()
         name = "vulngym-e3-" + "1" * 32
         execution_label = "vulngym-e3-" + "2" * 32
         execution_image_id = "sha256:" + "b" * 64
+
+        materializer_observed = self._inspect(runtime, mode="materialize")
+        materializer_observed["Config"]["Labels"].update(
+            {
+                "desktop.docker.io/ports.scheme": "base-metadata",
+                "runner.example/build": "fixed-build-metadata",
+            }
+        )
+        materializer_normalized = linux_oci.normalized_container_inspect_v1(
+            _json(materializer_observed),
+            runtime=runtime,
+            container_name=name,
+            mode="materialize",
+            source_root=_FIXTURE_SOURCE_ROOT,
+            runtime_input_root=_FIXTURE_RUNTIME_ROOT,
+        )
+        self.assertEqual(materializer_normalized["container_id"], "3" * 64)
+
         observed = self._inspect(runtime)
         observed["Config"]["Labels"]["runner.example/build"] = (
             "fixed-build-metadata"

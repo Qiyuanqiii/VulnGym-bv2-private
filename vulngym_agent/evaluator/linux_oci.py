@@ -1386,14 +1386,21 @@ def normalized_container_inspect_v1(
         raise LinuxOciProviderError(
             "invalid_runtime", "pinned image labels cannot bind a container"
         )
-    expected_labels = dict(base_labels)
-    expected_labels["vulngym.e3.container"] = container
-    expected_label_shapes = (expected_labels,)
-    if mode == "execute":
-        expected_labels["vulngym.e3.execution"] = execution_image_label
-        native_labels = dict(expected_labels)
+    if mode == "materialize":
+        expected_labels = dict(base_labels)
+        expected_labels["vulngym.e3.container"] = container
+        expected_label_shapes = (expected_labels,)
+    else:
+        portable_labels = {
+            key: item
+            for key, item in base_labels.items()
+            if key not in _SCRUBBED_DERIVED_IMAGE_LABELS
+        }
+        portable_labels["vulngym.e3.container"] = container
+        portable_labels["vulngym.e3.execution"] = execution_image_label
+        native_labels = dict(portable_labels)
         native_labels.update(_SCRUBBED_DERIVED_IMAGE_LABELS)
-        expected_label_shapes = (expected_labels, native_labels)
+        expected_label_shapes = (portable_labels, native_labels)
     expected_env = base_config.get("Env")
     if expected_env is not None and (
         type(expected_env) is not list
