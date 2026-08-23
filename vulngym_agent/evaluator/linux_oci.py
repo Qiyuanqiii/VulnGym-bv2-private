@@ -1370,14 +1370,26 @@ def normalized_container_inspect_v1(
     expected_hostname = (
         "vulngym-materializer" if mode == "materialize" else "vulngym-worker"
     )
-    expected_labels = {
-        "org.opencontainers.image.title": "VulnGym isolated evaluator worker",
-        "org.opencontainers.image.version": "source-discovery-isolated-worker-v1",
-        "vulngym.e3.container": container,
-    }
+    base_config = runtime._base_image_config()
+    base_labels = base_config.get("Labels")
+    if base_labels is None:
+        base_labels = {}
+    if (
+        type(base_labels) is not dict
+        or any(
+            type(key) is not str or type(item) is not str
+            for key, item in base_labels.items()
+        )
+        or "vulngym.e3.container" in base_labels
+        or "vulngym.e3.execution" in base_labels
+    ):
+        raise LinuxOciProviderError(
+            "invalid_runtime", "pinned image labels cannot bind a container"
+        )
+    expected_labels = dict(base_labels)
+    expected_labels["vulngym.e3.container"] = container
     if mode == "execute":
         expected_labels["vulngym.e3.execution"] = execution_image_label
-    base_config = runtime._base_image_config()
     expected_env = base_config.get("Env")
     if expected_env is not None and (
         type(expected_env) is not list

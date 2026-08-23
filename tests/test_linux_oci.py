@@ -480,6 +480,41 @@ class LinuxOciTests(unittest.TestCase):
                 execution_image_label=execution_label,
             )
 
+    def test_inspect_binds_all_pinned_base_image_labels(self) -> None:
+        base_labels = self.image["Config"]["Labels"]
+        base_labels["runner.example/build"] = "fixed-build-metadata"
+        runtime = self._runtime()
+        name = "vulngym-e3-" + "1" * 32
+        execution_label = "vulngym-e3-" + "2" * 32
+        execution_image_id = "sha256:" + "b" * 64
+        observed = self._inspect(runtime)
+        observed["Config"]["Labels"]["runner.example/build"] = (
+            "fixed-build-metadata"
+        )
+        normalized = linux_oci.normalized_container_inspect_v1(
+            _json(observed),
+            runtime=runtime,
+            container_name=name,
+            mode="execute",
+            execution_image_id=execution_image_id,
+            execution_image_label=execution_label,
+        )
+        self.assertEqual(normalized["container_id"], "3" * 64)
+
+        observed["Config"]["Labels"]["runner.example/build"] = "changed"
+        with self.assertRaises(linux_oci.LinuxOciProviderError) as captured:
+            linux_oci.normalized_container_inspect_v1(
+                _json(observed),
+                runtime=runtime,
+                container_name=name,
+                mode="execute",
+                execution_image_id=execution_image_id,
+                execution_image_label=execution_label,
+            )
+        self.assertEqual(
+            str(captured.exception), "container labels configuration drifted"
+        )
+
     def test_materializer_mounts_bind_exact_sources_and_force_recursive_readonly(
         self,
     ) -> None:
