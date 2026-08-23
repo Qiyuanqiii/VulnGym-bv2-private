@@ -1388,8 +1388,12 @@ def normalized_container_inspect_v1(
         )
     expected_labels = dict(base_labels)
     expected_labels["vulngym.e3.container"] = container
+    expected_label_shapes = (expected_labels,)
     if mode == "execute":
         expected_labels["vulngym.e3.execution"] = execution_image_label
+        native_labels = dict(expected_labels)
+        native_labels.update(_SCRUBBED_DERIVED_IMAGE_LABELS)
+        expected_label_shapes = (expected_labels, native_labels)
     expected_env = base_config.get("Env")
     if expected_env is not None and (
         type(expected_env) is not list
@@ -1410,7 +1414,7 @@ def normalized_container_inspect_v1(
             == [OCI_PYTHON, "-I", "-B", "-m", OCI_WORKER_MODULE],
         ),
         ("command", config.get("Cmd") == [mode]),
-        ("labels", config.get("Labels") == expected_labels),
+        ("labels", config.get("Labels") in expected_label_shapes),
         ("environment", config.get("Env") == expected_env),
         ("attach_stdin", config.get("AttachStdin") is False),
         ("attach_stdout", config.get("AttachStdout") is True),

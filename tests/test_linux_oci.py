@@ -501,6 +501,36 @@ class LinuxOciTests(unittest.TestCase):
         )
         self.assertEqual(normalized["container_id"], "3" * 64)
 
+        native_observed = json.loads(json.dumps(observed))
+        native_observed["Config"]["Labels"].update(
+            linux_oci._SCRUBBED_DERIVED_IMAGE_LABELS
+        )
+        native_normalized = linux_oci.normalized_container_inspect_v1(
+            _json(native_observed),
+            runtime=runtime,
+            container_name=name,
+            mode="execute",
+            execution_image_id=execution_image_id,
+            execution_image_label=execution_label,
+        )
+        self.assertEqual(native_normalized, normalized)
+
+        native_observed["Config"]["Labels"][
+            "desktop.docker.io/ports.scheme"
+        ] = "unexpected"
+        with self.assertRaises(linux_oci.LinuxOciProviderError) as captured:
+            linux_oci.normalized_container_inspect_v1(
+                _json(native_observed),
+                runtime=runtime,
+                container_name=name,
+                mode="execute",
+                execution_image_id=execution_image_id,
+                execution_image_label=execution_label,
+            )
+        self.assertEqual(
+            str(captured.exception), "container labels configuration drifted"
+        )
+
         observed["Config"]["Labels"]["runner.example/build"] = "changed"
         with self.assertRaises(linux_oci.LinuxOciProviderError) as captured:
             linux_oci.normalized_container_inspect_v1(
