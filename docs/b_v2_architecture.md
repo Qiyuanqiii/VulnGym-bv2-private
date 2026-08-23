@@ -1,6 +1,6 @@
 # VulnGym T1 × T2 自动化闭环：B-v2 首版设计
 
-> 状态（2026-08-23）：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact、benchmark 阶段 A/B、阶段 C sealed source snapshot，以及 D0–D4 的 source-only 多候选生产、独立复核、严格投影与三文件结果包均已实现。阶段 E 的逐题进程/网络/挂载隔离和 50/20 全量实跑仍未完成；在线模型接入与全字段确定性 verifier 也未完成，因此本文不声称最终数据验收已经通过。
+> 状态（2026-08-23）：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact、benchmark 阶段 A/B、阶段 C sealed source snapshot、D0–D4 source-only 生产/独立复核，以及阶段 E3/E4 的隔离执行、固定批次调度、严格投影和 test-first 20+50 final gate 均已实现。专用 native Linux 上的真实 20+50 全量实跑、在线模型接入与全字段确定性 verifier 仍未完成，因此本文不声称最终数据验收已经通过。
 
 ## 1. 目标与总体架构
 
@@ -366,9 +366,9 @@ Docker Desktop 仅用于可信单用户开发烟测；Windows `chmod` 不被视�
 cgroup/namespace/seccomp、POSIX staging 权限与异常清理路径。在 native Linux 50/20 门禁
 完成前，仓库不声称通过最终 50+20 验收。
 
-### 2.9 E4 固定批次调度内核
+### 2.9 E4 固定批次调度与 test-first final gate
 
-E4 已完成第一层可信调度内核，但尚未完成正式 50+20 实跑。batch-wide execution policy
+E4 的可信调度与交付面已经闭合，但尚未完成正式 20+50 实跑。batch-wide execution policy
 只绑定共同的 backend/model、预算、隔离、资源和 runtime；每题 D2/D3 replay 的 semantic
 SHA 与 exact wire SHA 则直接进入 `DiscoveryTaskExecutionPlanV1`。batch plan 按 sealed batch
 顺序内嵌全部 task plan 并整体哈希，因此它本身是唯一执行授权索引，不依赖第二份可漂移的
@@ -396,8 +396,24 @@ generation 与 runtime-config 身份不得复用。
 run wire、D0 result 与 dataset digest；首尾还复核整棵物化 identity 和父链。旧的 D0-only
 bundle reader 保持兼容，但由 richer reader 的同一次读取结果内存降级，不会二次读取路径。
 
-仍缺的是独立 E4 CLI、test-first 的 train/test 外层事务、projection/final gate receipt，以及
-专用 native Linux 上真实 20 test + 50 train mandatory gate。
+单 split driver 与 CLI 固定接受 20 test 或 50 train，不暴露 backend/model、资源、并行度、
+attempt 次数或 top-k 调节面；它们先完整验证 sealed batch、replay manifest 与 prepared plan，
+再允许探测 OCI runtime。外层 final-gate plan 把 test/train 两组 sealed/replay/key pins、固定
+execution policy、`top_k=64` 与 `test execution → test projection → train execution → train
+projection` 顺序整体哈希。
+
+final-gate runner 只在最终输出同一父目录的 0700 隐藏 staging 中产出两个 split。test 的 E4
+committed reader 和无 oracle projection reader 全部闭合后才创建 train 子树；随后 training
+projection 必须用受信 benchmark root 重算 aggregate。成功树固定为顶层 plan/receipt 与
+`test|train/{execution,projection}`，最终只有一次 no-replace root rename。发布前、rename 紧邻
+前及最终名独立读回后，会比较控制文件、root/split 结构和四个有界 inner tree 的物化身份；
+实际 task plan 还会反向重建 ordered replay manifest 并核对 semantic/wire 双 pin。提交点后的
+任何 durability、identity 或读回失败只会报告 committed uncertainty，绝不按名字回滚。
+
+独立 final-gate reader 必须由调用方提供 receipt semantic/wire 双 pin；它严格按 test-first 顺序
+重跑两个 E4 committed reader 和两个 projection reader，test 明确不接触 benchmark oracle，
+train 明确重算 aggregate。这里的 `status="closed"` 只表示机械绑定闭合，不代表质量阈值或
+盲测成绩通过。仍缺的是专用 native Linux 上真实 20 test + 50 train mandatory gate。
 
 ## 3. 交付边界与实施状态
 
@@ -407,7 +423,7 @@ B-v2 的 Standard 包含：T1 全核心字段三态、可读证据、多源与�
 
 Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归因、复杂 merge/backport、完整 taint 与自动发布。Standard 不建设第三个 Repair Agent、通用平台或远程 Artifact Store。
 
-### 当前已实现：传统闭环、隔离源码交付、D0–D4、E3 与 E4 调度内核
+### 当前已实现：传统闭环、隔离源码交付、D0–D4、E3 与 E4 final gate
 
 - 三份严格机器契约：Entry、Validation、Evidence Schema；`additionalProperties=false`，并有 `EvidenceItem`、`FieldValidation`、`ValidationReport` 可序列化模型。
 - `SchemaAdapter` 覆盖 15 个正式字段、额外/缺失字段、行范围、GHSA URL 与 `report_id` 一致性、ID 大写/去重/CVE-before-GHSA 排序及正式 T2 的 `verify=0`；它不会补造内容字段。
@@ -434,16 +450,15 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - D2/D3/D4 已完成 source-only 多候选 Producer、重新获取独立 tree/budget/context 的四准则 Reviewer、惰性分支编排与严格适配。D2 draft 上限为 32；D2 defer 不启动 D3；只有精确绑定的 D3 `accept` 才进入 D0 `emit`。
 - discovery replay 已以固定三文件结果包闭合 D2/D3 与可重算 D4；提交前失败保守留下私有 staging，提交后不确定统一以 `publication_uncertain` 交由 digest 复核。`project-discovery-train|test` 已接入 harness：先完整 D0(64) 再稳定截取，test 使用独立读取面且不调用训练汇总。
 - E3 已完成固定离线 replay 的 Linux OCI 单题竖切：原始 sealed tree 保持 0700/0600 不变，evaluator 在私有父目录中生成并双向核验只读 source/runtime staging；生成内容通过 materializer 容器层提交为内容寻址派生镜像，execute 无 source/runtime/volume mount、只读 rootfs、断网、非 root、drop-all capabilities、no-new-privileges、seccomp 与固定资源上限；provider 对 create/inspect/terminal/diff/image/cleanup 全链路签发 success-only evidence，再由 supervisor 内嵌进 receipt。Docker Desktop 的真实单题烟测不能替代 native Linux 发布门禁。
-- E4 调度内核已把逐题 replay semantic/wire pins 从 batch policy 移入 task plan，加入严格 replay input manifest/loader、supervisor/provider 双层一次性串行 launch、clean-failure allowlist、失败后 runtime/source reverify、runtime-poisoned 停批、非发布 attempt report 与跨题 runtime identity 闭合；全量成功还必须以一次性 authority 在同一事务写入 E4 scheduler receipt，独立 committed-output reader 会用外部双 pin 和 richer bundle reader 重建并核对完整证据链。
+- E4 已把逐题 replay semantic/wire pins 从 batch policy 移入 task plan，加入严格 replay input manifest/loader、supervisor/provider 双层一次性串行 launch、clean-failure allowlist、失败后 runtime/source reverify、runtime-poisoned 停批、非发布 attempt report 与跨题 runtime identity 闭合；全量成功还必须以一次性 authority 在同一事务写入 E4 scheduler receipt。固定 split driver/CLI、test-first 20+50 外层事务、projection/final-gate receipt 及两层独立 committed reader 已接入，最终 reader 会从实际 task plans 重建 replay manifest，并用外部双 pin 核对完整证据链。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立。source-discovery 候选已由 D3 独立复核；传统 Entry 链路中模型提出的标题、分类和其他未覆盖语义仍受严格输出契约约束，且不能冒充完整 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：阶段 E4 的独立 CLI、train/test 外层原子收据、projection/final gate receipt 与 native Linux 50+20 全量发布门禁；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C、D0–D4、E3 与 E4 调度/发布读回内核均已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
+尚未完成：专用 native Linux 上的真实 20+50 全量发布门禁；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C、D0–D4、E3 以及 E4 调度、投影、final-gate 发布与读回均已接入，但本仓库当前仍不声称已完成最终 20+50 数据验收。
 
 ### 下一阶段
 
-下一步闭合 E4 交付面：为现有调度/发布读回内核增加独立 CLI，以 test-first 外层事务连接
-blind test projection、train aggregate 与 final gate receipt，再在 gold 物理隔离
-的专用 native Linux 环境中完成 20 test + 50 train 端到端 mandatory gate。
+下一步是在 gold 物理隔离的专用 native Linux 环境中，用固定 final-gate CLI 完成
+20 test + 50 train 端到端 mandatory gate，并保存外部 receipt semantic/wire pins。
 同时补 closed-loop replay 的独立 verify CLI、可显式选择的在线模型 backend 和全字段
 `required_check` verifier；完整 trace、AST/数据流与更多语言增强继续作为后续能力。

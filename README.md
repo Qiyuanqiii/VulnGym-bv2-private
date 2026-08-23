@@ -618,18 +618,59 @@ restricted to 1..64. Both publish `findings.jsonl`, `task_results.jsonl`, and
 its dedicated test read surface, never invokes the training aggregate, and
 does not load the public training answers.
 
-Phase E is still an execution-environment deliverable. For the eventual blind
-run, scoring truth must remain physically isolated in
+Phase E now includes the fixed offline Linux OCI single-task boundary, the
+serial E4 split scheduler, committed execution/projection readers, and one
+test-first 20+50 final-gate transaction. The outer coordinator completes and
+independently reads the blind test execution and answer-free projection before
+it creates the training subtree. Only after the 50-task training execution and
+aggregate projection also close does one no-replace rename publish the exact
+root. The final reader requires caller-held receipt semantic and wire pins,
+reconstructs each ordered replay manifest from the actual task plans, never
+passes a benchmark root to the test projection, and recomputes the training
+aggregate from a trusted benchmark root. A `closed` receipt proves this
+mechanical binding only; it is not a quality score or an acceptance result.
+
+For the real blind run, scoring truth must remain physically isolated in
 separate evaluator storage and must never be used to prepare tasks, fixtures,
 or model responses. Each producer sandbox must be offline and receive only one
-answer-free task, its sealed source tree, and a bounded output location. Do not
-mount the benchmark repository, the training split, raw data/generator inputs,
-evaluation logs, or scoring material into that sandbox. The trusted evaluator
-may validate and project outputs after the producer exits; this repository does
-not yet implement that per-task process/network/mount isolation, has not run the
-full 50/20 workflow, and does not claim final acceptance. The online-model
-backend and deterministic verifier coverage for all formal Entry fields also
-remain incomplete.
+answer-free task and its sealed source tree. Do not mount the benchmark
+repository, the other split, raw data/generator inputs, evaluation logs, or
+scoring material into that sandbox. The implementation has not yet completed
+the mandatory native-Linux run over all 20 test and 50 training tasks and does
+not claim final acceptance. The online-model backend and deterministic verifier
+coverage for all formal Entry fields also remain incomplete.
+
+The fixed outer command takes a separately published, semantic-and-wire pinned
+plan and two distinct private key files. It has no CLI options for changing the
+model, backend, resource policy, task counts, stage order, or projection cap:
+
+```bash
+python -m vulngym_agent.final_gate_cli run \
+  --benchmark-root /srv/vulngym/benchmark \
+  --output-root /srv/vulngym/final-gates/gate-001 \
+  --docker-executable /usr/bin/docker \
+  --runtime-image-id sha256:<64-lowercase-hex> \
+  --plan-file /srv/vulngym/control/final-gate-plan.json \
+  --expected-plan-sha256 <64-lowercase-hex> \
+  --expected-plan-wire-sha256 <64-lowercase-hex> \
+  --test-sealed-batch-root /srv/vulngym/inputs/test-sealed \
+  --test-replay-config-root /srv/vulngym/inputs/test-replay \
+  --train-sealed-batch-root /srv/vulngym/inputs/train-sealed \
+  --train-replay-config-root /srv/vulngym/inputs/train-replay \
+  --test-key-file /srv/vulngym/secrets/test.key \
+  --train-key-file /srv/vulngym/secrets/train.key
+
+python -m vulngym_agent.final_gate_cli verify-output \
+  --output-root /srv/vulngym/final-gates/gate-001 \
+  --benchmark-root /srv/vulngym/benchmark \
+  --expected-receipt-sha256 <64-lowercase-hex> \
+  --expected-wire-sha256 <64-lowercase-hex>
+```
+
+The run command writes a path-free canonical summary on success. A clean but
+non-publishable batch attempt is emitted verbatim with exit code 10; a state
+that may already have crossed a publication point uses exit code 11. Keep the
+test/training key files owner-only and outside every input/output tree.
 
 The deterministic T1 CLI writes separate validation, evidence, and
 run-manifest files:
