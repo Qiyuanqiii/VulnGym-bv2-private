@@ -24,6 +24,11 @@ def _json(value: object) -> bytes:
     return json.dumps(value, separators=(",", ":")).encode() + b"\n"
 
 
+_FIXTURE_SOURCE_ROOT = Path(os.path.abspath("e3-fixture-source"))
+_FIXTURE_RUNTIME_ROOT = Path(os.path.abspath("e3-fixture-runtime"))
+_FIXTURE_WRONG_SOURCE_ROOT = Path(os.path.abspath("e3-fixture-wrong-source"))
+
+
 class LinuxOciTests(unittest.TestCase):
     def setUp(self) -> None:
         self.policy = ExecutionPolicyBindingV1(
@@ -179,8 +184,8 @@ class LinuxOciTests(unittest.TestCase):
             runtime,
             container_name=name,
             mode="materialize",
-            source_root=Path("C:/fixed/source"),
-            runtime_input_root=Path("C:/fixed/runtime"),
+            source_root=_FIXTURE_SOURCE_ROOT,
+            runtime_input_root=_FIXTURE_RUNTIME_ROOT,
         )
         self.assertEqual(materialize[-1], "materialize")
         self.assertIn("--user=65532:65532", materialize)
@@ -205,7 +210,7 @@ class LinuxOciTests(unittest.TestCase):
             [
                 {
                     "Type": "bind",
-                    "Source": "C:\\secret\\source",
+                    "Source": os.fspath(_FIXTURE_SOURCE_ROOT),
                     "Destination": "/input-source",
                     "Mode": "",
                     "RW": False,
@@ -213,7 +218,7 @@ class LinuxOciTests(unittest.TestCase):
                 },
                 {
                     "Type": "bind",
-                    "Source": "C:\\secret\\runtime",
+                    "Source": os.fspath(_FIXTURE_RUNTIME_ROOT),
                     "Destination": "/input-runtime",
                     "Mode": "",
                     "RW": False,
@@ -227,7 +232,7 @@ class LinuxOciTests(unittest.TestCase):
             [
                 {
                     "Type": "bind",
-                    "Source": "C:\\secret\\source",
+                    "Source": os.fspath(_FIXTURE_SOURCE_ROOT),
                     "Target": "/input-source",
                     "ReadOnly": True,
                     "BindOptions": {
@@ -237,7 +242,7 @@ class LinuxOciTests(unittest.TestCase):
                 },
                 {
                     "Type": "bind",
-                    "Source": "C:\\secret\\runtime",
+                    "Source": os.fspath(_FIXTURE_RUNTIME_ROOT),
                     "Target": "/input-runtime",
                     "ReadOnly": True,
                     "BindOptions": {
@@ -464,8 +469,8 @@ class LinuxOciTests(unittest.TestCase):
     ) -> None:
         runtime = self._runtime()
         name = "vulngym-e3-" + "1" * 32
-        source_root = Path("C:/secret/source")
-        runtime_root = Path("C:/secret/runtime")
+        source_root = _FIXTURE_SOURCE_ROOT
+        runtime_root = _FIXTURE_RUNTIME_ROOT
         normalized = linux_oci.normalized_container_inspect_v1(
             _json(self._inspect(runtime, mode="materialize")),
             runtime=runtime,
@@ -475,11 +480,14 @@ class LinuxOciTests(unittest.TestCase):
             runtime_input_root=runtime_root,
         )
         self.assertTrue(normalized["recursive_readonly_bind"])
-        self.assertNotIn("C:\\secret", json.dumps(normalized))
+        normalized_json = json.dumps(normalized)
+        for host_path in (source_root, runtime_root):
+            escaped_host_path = json.dumps(os.fspath(host_path))[1:-1]
+            self.assertNotIn(escaped_host_path, normalized_json)
 
         for location, index, field, replacement in (
-            ("Mounts", 0, "Source", "C:\\wrong\\source"),
-            ("HostConfig", 0, "Source", "C:\\wrong\\source"),
+            ("Mounts", 0, "Source", os.fspath(_FIXTURE_WRONG_SOURCE_ROOT)),
+            ("HostConfig", 0, "Source", os.fspath(_FIXTURE_WRONG_SOURCE_ROOT)),
             (
                 "HostConfig",
                 0,
@@ -505,6 +513,63 @@ class LinuxOciTests(unittest.TestCase):
                         runtime_input_root=runtime_root,
                     )
                 self.assertEqual(caught.exception.code, "invalid_container")
+
+    def test_inspect_accepts_exact_legacy_empty_network_shape(self) -> None:
+        runtime = self._runtime()
+        name = "vulngym-e3-" + "1" * 32
+        execution_label = "vulngym-e3-" + "2" * 32
+        execution_image_id = "sha256:" + "b" * 64
+        legacy = self._inspect(runtime)
+        network = legacy["NetworkSettings"]
+        network.update(
+            {
+                "Bridge": "",
+                "EndpointID": "",
+                "Gateway": "",
+                "GlobalIPv6Address": "",
+                "GlobalIPv6PrefixLen": 0,
+                "HairpinMode": False,
+                "IPAddress": "",
+                "IPPrefixLen": 0,
+                "IPv6Gateway": "",
+                "LinkLocalIPv6Address": "",
+                "LinkLocalIPv6PrefixLen": 0,
+                "MacAddress": "",
+                "SecondaryIPAddresses": None,
+                "SecondaryIPv6Addresses": None,
+            }
+        )
+        legacy["HostConfig"]["MaskedPaths"].reverse()
+        normalized = linux_oci.normalized_container_inspect_v1(
+            _json(legacy),
+            runtime=runtime,
+            container_name=name,
+            mode="execute",
+            execution_image_id=execution_image_id,
+            execution_image_label=execution_label,
+        )
+        self.assertEqual(normalized["network_mode"], "none")
+
+        for field_name, replacement in (
+            ("HairpinMode", True),
+            ("SecondaryIPAddresses", []),
+            ("Bridge", "docker0"),
+        ):
+            with self.subTest(field_name=field_name):
+                drifted = json.loads(json.dumps(legacy))
+                drifted["NetworkSettings"][field_name] = replacement
+                with self.assertRaisesRegex(
+                    linux_oci.LinuxOciProviderError,
+                    "network policy drifted",
+                ):
+                    linux_oci.normalized_container_inspect_v1(
+                        _json(drifted),
+                        runtime=runtime,
+                        container_name=name,
+                        mode="execute",
+                        execution_image_id=execution_image_id,
+                        execution_image_label=execution_label,
+                    )
 
     def _derived_image(self) -> dict[str, object]:
         labels = dict(self.image["Config"]["Labels"])  # type: ignore[index]
@@ -596,8 +661,8 @@ class LinuxOciTests(unittest.TestCase):
             runtime=runtime,
             container_name="vulngym-e3-" + "1" * 32,
             mode="materialize",
-            source_root=Path("C:/secret/source"),
-            runtime_input_root=Path("C:/secret/runtime"),
+            source_root=_FIXTURE_SOURCE_ROOT,
+            runtime_input_root=_FIXTURE_RUNTIME_ROOT,
         )
         materializer = linux_oci._WorkerContainerV1(
             linux_oci._RUNTIME_TOKEN,
@@ -607,8 +672,8 @@ class LinuxOciTests(unittest.TestCase):
             mode="materialize",
             execution_image_id=self.policy.runtime_image_id,
             execution_image_label=None,
-            source_root=Path("C:/secret/source"),
-            runtime_input_root=Path("C:/secret/runtime"),
+            source_root=_FIXTURE_SOURCE_ROOT,
+            runtime_input_root=_FIXTURE_RUNTIME_ROOT,
             pre_inspect=materializer_pre,
         )
         clean = BoundedProcessResultV1(
@@ -681,8 +746,8 @@ class LinuxOciTests(unittest.TestCase):
                 "materialize",
                 self.policy.runtime_image_id,
                 None,
-                Path("C:/secret/source"),
-                Path("C:/secret/runtime"),
+                _FIXTURE_SOURCE_ROOT,
+                _FIXTURE_RUNTIME_ROOT,
             ),
             ("execute", "sha256:" + "b" * 64, "vulngym-e3-" + "2" * 32, None, None),
         )
@@ -749,8 +814,8 @@ class LinuxOciTests(unittest.TestCase):
                 linux_oci._create_worker_container_v1(
                     runtime,
                     mode="materialize",
-                    source_root=Path("C:/secret/source"),
-                    runtime_input_root=Path("C:/secret/runtime"),
+                    source_root=_FIXTURE_SOURCE_ROOT,
+                    runtime_input_root=_FIXTURE_RUNTIME_ROOT,
                 )
         self.assertEqual(caught.exception.code, "invalid_container")
         lookup = command.call_args_list[2].args[1]
@@ -786,8 +851,8 @@ class LinuxOciTests(unittest.TestCase):
                 linux_oci._create_worker_container_v1(
                     runtime,
                     mode="materialize",
-                    source_root=Path("C:/secret/source"),
-                    runtime_input_root=Path("C:/secret/runtime"),
+                    source_root=_FIXTURE_SOURCE_ROOT,
+                    runtime_input_root=_FIXTURE_RUNTIME_ROOT,
                 )
         self.assertEqual(caught.exception.code, "cleanup_uncertain")
         self.assertTrue(caught.exception.runtime_uncertain)

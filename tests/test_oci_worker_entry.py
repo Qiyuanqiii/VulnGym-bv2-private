@@ -446,8 +446,16 @@ class OciWorkerEntryTests(unittest.TestCase):
 
         source_mount = PurePosixPath("/vulngym/source")
         runtime_mount = PurePosixPath("/vulngym/runtime")
+        posix_os = SimpleNamespace(
+            name="posix",
+            fspath=os.fspath,
+            getuid=lambda: 65532,
+            geteuid=lambda: 65532,
+            getgid=lambda: 65532,
+            getegid=lambda: 65532,
+        )
         with (
-            mock.patch.object(entry_module.os, "name", "posix"),
+            mock.patch.object(entry_module, "os", posix_os),
             mock.patch.object(
                 entry_module, "_read_fixed_kernel_file", side_effect=kernel_file
             ),
@@ -457,10 +465,6 @@ class OciWorkerEntryTests(unittest.TestCase):
                 entry_module, "_assert_empty_root_owned_directory"
             ) as empty_mountpoint,
             mock.patch.object(entry_module, "_assert_literal_network_blocked") as network,
-            mock.patch.object(entry_module.os, "getuid", return_value=65532, create=True),
-            mock.patch.object(entry_module.os, "geteuid", return_value=65532, create=True),
-            mock.patch.object(entry_module.os, "getgid", return_value=65532, create=True),
-            mock.patch.object(entry_module.os, "getegid", return_value=65532, create=True),
         ):
             entry_module._runtime_self_check(
                 source_mount,
@@ -482,7 +486,7 @@ class OciWorkerEntryTests(unittest.TestCase):
             return bad_status if path.endswith("status") else mountinfo
 
         with (
-            mock.patch.object(entry_module.os, "name", "posix"),
+            mock.patch.object(entry_module, "os", posix_os),
             mock.patch.object(
                 entry_module,
                 "_read_fixed_kernel_file",

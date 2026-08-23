@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import os
 from pathlib import Path
 import pickle
 import subprocess
@@ -321,6 +322,52 @@ class EvaluatorSupervisorTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             pickle.dumps(launch)
         session.abort()
+
+    def test_prepare_binds_the_verifiers_canonical_root(self) -> None:
+        supplied_alias = self.root / "batch-alias-spelling"
+        verifier, builder = self._prepare(self.summary)
+        with mock.patch.object(
+            supervisor_module,
+            "_canonical_existing_path",
+            return_value=self.summary.batch_root,
+        ) as canonicalize, verifier as verify_call, builder:
+            session = prepare_discovery_execution_plan_v1(
+                supplied_alias,
+                expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+                execution_policy=self.execution_policy,
+            )
+        canonicalize.assert_called_once_with(
+            Path(os.path.abspath(os.fspath(supplied_alias))),
+            directory=True,
+            status=4,
+        )
+        self.assertEqual(
+            verify_call.call_args.args[0],
+            Path(os.path.abspath(os.fspath(supplied_alias))),
+        )
+        session.abort()
+
+        forged = replace(
+            self.summary,
+            batch_root=self.root / "forged-different-batch-root",
+        )
+        verifier, builder = self._prepare(forged)
+        with mock.patch.object(
+            supervisor_module,
+            "_canonical_existing_path",
+            return_value=self.summary.batch_root,
+        ), verifier, builder:
+            with self.assertRaises(EvaluatorSupervisorError) as captured:
+                prepare_discovery_execution_plan_v1(
+                    supplied_alias,
+                    expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                    attestation_key=KEY,
+                    expected_key_id=KEY_ID,
+                    execution_policy=self.execution_policy,
+                )
+        self.assertEqual(captured.exception.code, "batch_binding_mismatch")
 
     def test_handoff_swap_is_rejected_during_prepare(self) -> None:
         wrong = self.handoffs[self.members[1].task_id]

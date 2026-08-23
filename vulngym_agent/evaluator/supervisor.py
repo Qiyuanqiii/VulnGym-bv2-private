@@ -48,6 +48,7 @@ from vulngym_agent.benchmark.snapshot_batch import (
     SnapshotBatchError,
     SnapshotBatchSummary,
     SnapshotBatchTask,
+    _canonical_existing_path,
     verify_snapshot_batch,
 )
 from vulngym_agent.benchmark.worker_handoff import (
@@ -931,9 +932,12 @@ def prepare_discovery_execution_plan_v1(
             d3_budget_limits=d3_limits,
             tree_limits=source_limits,
         )
-        root = Path(os.path.abspath(os.fspath(batch_root)))
+        supplied_root = Path(os.path.abspath(os.fspath(batch_root)))
+        expected_root = _canonical_existing_path(
+            supplied_root, directory=True, status=4
+        )
         summary = verify_snapshot_batch(
-            root,
+            supplied_root,
             expected_manifest_sha256=expected_batch_manifest_sha256,
             attestation_key=key,
             expected_key_id=expected_key_id,
@@ -943,7 +947,10 @@ def prepare_discovery_execution_plan_v1(
             raise EvaluatorSupervisorError(
                 "batch_verification_failed", "batch verifier returned an invalid summary"
             )
-        if type(summary.batch_root) is not type(Path()) or summary.batch_root != root:
+        if (
+            type(summary.batch_root) is not type(Path())
+            or summary.batch_root != expected_root
+        ):
             raise EvaluatorSupervisorError(
                 "batch_binding_mismatch", "batch verifier returned a different root"
             )

@@ -107,6 +107,28 @@ _NONE_NETWORK_KEYS_V1: Final[frozenset[str]] = frozenset(
         "NetworkID",
     }
 )
+_LEGACY_NONE_NETWORK_ROOT_KEYS_V1: Final[frozenset[str]] = frozenset(
+    {
+        "Bridge",
+        "EndpointID",
+        "Gateway",
+        "GlobalIPv6Address",
+        "GlobalIPv6PrefixLen",
+        "HairpinMode",
+        "IPAddress",
+        "IPPrefixLen",
+        "IPv6Gateway",
+        "LinkLocalIPv6Address",
+        "LinkLocalIPv6PrefixLen",
+        "MacAddress",
+        "Networks",
+        "Ports",
+        "SandboxID",
+        "SandboxKey",
+        "SecondaryIPAddresses",
+        "SecondaryIPv6Addresses",
+    }
+)
 
 _RUNTIME_TOKEN: Final[object] = object()
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
@@ -1176,16 +1198,38 @@ def build_worker_container_create_argv_v1(
 
 
 def _none_network_settings_valid_v1(value: object) -> bool:
-    if type(value) is not dict or set(value) != {
-        "SandboxID",
-        "SandboxKey",
-        "Ports",
-        "Networks",
-    }:
+    if type(value) is not dict:
+        return False
+    keys = frozenset(value)
+    modern_keys = frozenset({"SandboxID", "SandboxKey", "Ports", "Networks"})
+    if keys == modern_keys:
+        legacy_valid = True
+    elif keys == _LEGACY_NONE_NETWORK_ROOT_KEYS_V1:
+        legacy_valid = (
+            value.get("Bridge") == ""
+            and value.get("EndpointID") == ""
+            and value.get("Gateway") == ""
+            and value.get("GlobalIPv6Address") == ""
+            and type(value.get("GlobalIPv6PrefixLen")) is int
+            and value.get("GlobalIPv6PrefixLen") == 0
+            and value.get("HairpinMode") is False
+            and value.get("IPAddress") == ""
+            and type(value.get("IPPrefixLen")) is int
+            and value.get("IPPrefixLen") == 0
+            and value.get("IPv6Gateway") == ""
+            and value.get("LinkLocalIPv6Address") == ""
+            and type(value.get("LinkLocalIPv6PrefixLen")) is int
+            and value.get("LinkLocalIPv6PrefixLen") == 0
+            and value.get("MacAddress") == ""
+            and value.get("SecondaryIPAddresses") is None
+            and value.get("SecondaryIPv6Addresses") is None
+        )
+    else:
         return False
     networks = value.get("Networks")
     if (
-        value.get("SandboxID") != ""
+        not legacy_valid
+        or value.get("SandboxID") != ""
         or value.get("SandboxKey") != ""
         or value.get("Ports") != {}
         or type(networks) is not dict
@@ -1216,6 +1260,15 @@ def _none_network_settings_valid_v1(value: object) -> bool:
         and type(none.get("GlobalIPv6PrefixLen")) is int
         and none.get("GlobalIPv6PrefixLen") == 0
         and none.get("DNSNames") is None
+    )
+
+
+def _exact_path_members_v1(value: object, expected: tuple[str, ...]) -> bool:
+    return (
+        type(value) is list
+        and len(value) == len(expected)
+        and all(type(item) is str for item in value)
+        and frozenset(value) == frozenset(expected)
     )
 
 
@@ -1407,6 +1460,21 @@ def normalized_container_inspect_v1(
         host_mounts_valid
         and observed_host_mount_targets == expected_host_mount_targets
     )
+    if not host_mounts_valid:
+        raise LinuxOciProviderError(
+            "invalid_container", "container mount policy drifted"
+        )
+    if not (
+        _exact_path_members_v1(host.get("MaskedPaths"), _MASKED_PATHS_V1)
+        and _exact_path_members_v1(host.get("ReadonlyPaths"), _READONLY_PATHS_V1)
+    ):
+        raise LinuxOciProviderError(
+            "invalid_container", "container procfs protection policy drifted"
+        )
+    if not _none_network_settings_valid_v1(network_settings):
+        raise LinuxOciProviderError(
+            "invalid_container", "container network policy drifted"
+        )
     expected_quota = policy.cpu_millis * 100
     if (
         host.get("NetworkMode") != "none"
@@ -1431,8 +1499,6 @@ def normalized_container_inspect_v1(
         or host.get("OomKillDisable") not in (None, False)
         or host.get("Init") not in (None, False)
         or host.get("CgroupParent") not in (None, "")
-        or host.get("MaskedPaths") != list(_MASKED_PATHS_V1)
-        or host.get("ReadonlyPaths") != list(_READONLY_PATHS_V1)
         or security_options != ["no-new-privileges=true"]
         or host.get("PidsLimit") != policy.pids_limit
         or host.get("Memory") != policy.memory_bytes
@@ -1458,8 +1524,6 @@ def normalized_container_inspect_v1(
         ]
         or host.get("Devices") not in (None, (), [])
         or not tmpfs_valid
-        or not host_mounts_valid
-        or not _none_network_settings_valid_v1(network_settings)
     ):
         raise LinuxOciProviderError(
             "invalid_container", "container isolation or resource policy drifted"
