@@ -37,6 +37,23 @@ FINAL_GATE_STAGE_ORDER: Final[tuple[str, ...]] = (
     "train_execution",
     "train_projection",
 )
+FINAL_GATE_PLAN_FILENAME: Final[str] = "final-gate-plan.json"
+FINAL_GATE_RECEIPT_FILENAME: Final[str] = "final-gate-receipt.json"
+FINAL_GATE_TEST_DIRECTORY: Final[str] = "test"
+FINAL_GATE_TRAIN_DIRECTORY: Final[str] = "train"
+FINAL_GATE_EXECUTION_DIRECTORY: Final[str] = "execution"
+FINAL_GATE_PROJECTION_DIRECTORY: Final[str] = "projection"
+FINAL_GATE_ROOT_MEMBERS: Final[frozenset[str]] = frozenset(
+    {
+        FINAL_GATE_PLAN_FILENAME,
+        FINAL_GATE_RECEIPT_FILENAME,
+        FINAL_GATE_TEST_DIRECTORY,
+        FINAL_GATE_TRAIN_DIRECTORY,
+    }
+)
+FINAL_GATE_SPLIT_MEMBERS: Final[frozenset[str]] = frozenset(
+    {FINAL_GATE_EXECUTION_DIRECTORY, FINAL_GATE_PROJECTION_DIRECTORY}
+)
 
 FINAL_GATE_SPLIT_PLAN_KIND: Final[str] = (
     "vulngym.discovery-e4-final-gate-split-plan.v1"
@@ -999,13 +1016,21 @@ __all__ = [
     "FINAL_GATE_MAX_JSON_DEPTH",
     "FINAL_GATE_MAX_JSON_NODES",
     "FINAL_GATE_MAX_WIRE_BYTES",
+    "FINAL_GATE_EXECUTION_DIRECTORY",
+    "FINAL_GATE_PLAN_FILENAME",
     "FINAL_GATE_PLAN_KIND",
+    "FINAL_GATE_PROJECTION_DIRECTORY",
+    "FINAL_GATE_RECEIPT_FILENAME",
     "FINAL_GATE_RECEIPT_KIND",
+    "FINAL_GATE_ROOT_MEMBERS",
+    "FINAL_GATE_SPLIT_MEMBERS",
     "FINAL_GATE_SPLIT_PLAN_KIND",
     "FINAL_GATE_SPLIT_RECEIPT_CLOSURE_KIND",
     "FINAL_GATE_STAGE_ORDER",
     "FINAL_GATE_STATUS",
+    "FINAL_GATE_TEST_DIRECTORY",
     "FINAL_GATE_TOP_K",
+    "FINAL_GATE_TRAIN_DIRECTORY",
     "FinalGateContractError",
     "FinalGatePlanV1",
     "FinalGateReceiptV1",
