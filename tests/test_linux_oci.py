@@ -8,6 +8,7 @@ import pickle
 import shutil
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -736,6 +737,108 @@ class LinuxOciTests(unittest.TestCase):
         ):
             _digest, empty = linux_oci._container_diff_v1(execute)
         self.assertTrue(empty)
+
+    def test_worker_protocol_error_is_exact_and_path_free(self) -> None:
+        payload = {
+            "code": "runtime_mount_probe_failed",
+            "contract_version": 1,
+            "kind": "vulngym.oci-worker-error.v1",
+            "mode": "materialize",
+        }
+        result = BoundedProcessResultV1(
+            2, b"", _json(payload), False, False, False
+        )
+        self.assertEqual(
+            linux_oci._worker_protocol_error_code_v1(
+                result, mode="materialize"
+            ),
+            "runtime_mount_probe_failed",
+        )
+        for stderr in (
+            json.dumps(payload).encode() + b"\n",
+            _json({**payload, "host_path": "C:\\secret"}),
+            _json({**payload, "contract_version": True}),
+            _json({**payload, "mode": "execute"}),
+        ):
+            with self.subTest(stderr=stderr):
+                changed = BoundedProcessResultV1(
+                    2, b"", stderr, False, False, False
+                )
+                self.assertIsNone(
+                    linux_oci._worker_protocol_error_code_v1(
+                        changed, mode="materialize"
+                    )
+                )
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX openat semantics")
+    def test_posix_source_copy_rejects_swapped_ancestor(self) -> None:
+        payload = b"pinned-source\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "source"
+            target_root = root / "target"
+            outside = root / "outside"
+            for directory in (source_root / "src", target_root / "src", outside):
+                directory.mkdir(parents=True)
+            (source_root / "src" / "app.py").write_bytes(payload)
+            outside_payload = b"external-source\n"
+            (outside / "app.py").write_bytes(outside_payload)
+            record = SimpleNamespace(
+                path="src/app.py",
+                size=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+            source_directory = source_root / "src"
+            held_directory = source_root / "src-held"
+            original_open = linux_oci._open_posix_directory_chain_v1
+            attacked = False
+
+            def swap_before_open(path: Path, components: tuple[str, ...]):
+                nonlocal attacked
+                if path == source_root and components == ("src",) and not attacked:
+                    attacked = True
+                    source_directory.rename(held_directory)
+                    source_directory.symlink_to(outside, target_is_directory=True)
+                    try:
+                        return original_open(path, components)
+                    finally:
+                        source_directory.unlink()
+                        held_directory.rename(source_directory)
+                return original_open(path, components)
+
+            with mock.patch.object(
+                linux_oci,
+                "_open_posix_directory_chain_v1",
+                side_effect=swap_before_open,
+            ):
+                with self.assertRaises(
+                    linux_oci.LinuxOciProviderError
+                ) as captured:
+                    linux_oci._copy_source_record_v1(
+                        source_root, target_root, record
+                    )
+            self.assertTrue(attacked)
+            self.assertEqual(captured.exception.code, "runtime_input_failed")
+            self.assertFalse((target_root / "src" / "app.py").exists())
+            self.assertEqual((outside / "app.py").read_bytes(), outside_payload)
+
+    def test_staging_cleanup_failure_is_runtime_uncertain(self) -> None:
+        cleanup = mock.Mock(side_effect=OSError("cleanup failed"))
+        context = SimpleNamespace(cleanup=cleanup)
+        primary = RuntimeError("primary failure")
+        with self.assertRaises(linux_oci.LinuxOciProviderError) as captured:
+            linux_oci._close_materializer_staging_v1(context, primary)
+        self.assertEqual(captured.exception.code, "cleanup_uncertain")
+        self.assertTrue(captured.exception.runtime_uncertain)
+        self.assertIs(captured.exception.__cause__, primary)
+        cleanup.assert_called_once_with()
+
+        successful_cleanup = mock.Mock()
+        context = SimpleNamespace(cleanup=successful_cleanup)
+        with self.assertRaises(RuntimeError) as propagated:
+            linux_oci._close_materializer_staging_v1(context, primary)
+        self.assertIs(propagated.exception, primary)
+        successful_cleanup.assert_called_once_with()
 
     def test_attached_start_uses_exact_policy_wall_time_for_both_modes(self) -> None:
         runtime = self._runtime()

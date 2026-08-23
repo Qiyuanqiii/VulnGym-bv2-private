@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -15,8 +16,19 @@ from unittest import mock
 from vulngym_agent.agents.model_runtime import ReplayResponse
 from vulngym_agent.benchmark.contracts import INSTRUCTION_ID
 from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskInputV1
-from vulngym_agent.benchmark.sealed_snapshot import prepare_sealed_snapshot
+from vulngym_agent.benchmark.sealed_snapshot import (
+    DEFAULT_SNAPSHOT_POLICY,
+    prepare_sealed_snapshot,
+)
+from vulngym_agent.benchmark.sealed_tree_access import (
+    DEFAULT_SEALED_TREE_ACCESS_LIMITS,
+)
 from vulngym_agent.benchmark.worker_handoff import build_worker_handoff
+from vulngym_agent.evaluator.contracts import (
+    DiscoveryTaskExecutionPlanV1,
+    ExecutionPolicyBindingV1,
+    snapshot_policy_sha256_v1,
+)
 import vulngym_agent.evaluator.oci_worker_entry as entry_module
 from vulngym_agent.evaluator.oci_worker_entry import (
     D2_REPLAY_FILENAME,
@@ -28,7 +40,18 @@ from vulngym_agent.evaluator.oci_worker_entry import (
     OciWorkerRequestV1,
     REQUEST_FILENAME,
 )
-from vulngym_agent.evaluator.worker import execute_discovery_worker_v1
+import vulngym_agent.evaluator.linux_oci as linux_oci
+import vulngym_agent.evaluator.supervisor as supervisor_module
+from vulngym_agent.evaluator.supervisor import (
+    WorkerTaskLaunchV1,
+    budget_limits_sha256_v1,
+    tree_limits_sha256_v1,
+)
+from vulngym_agent.evaluator.worker import (
+    DEFAULT_D2_WORKER_BUDGET_LIMITS,
+    DEFAULT_D3_WORKER_BUDGET_LIMITS,
+    execute_discovery_worker_v1,
+)
 from vulngym_agent.orchestrator.discovery_pipeline import SourceDiscoveryRunV1
 from vulngym_agent.tools.git.repository import GitRepository
 
@@ -191,12 +214,586 @@ class OciWorkerEntryTests(unittest.TestCase):
         (root / D2_REPLAY_FILENAME).write_bytes(self.d2_config.to_bytes())
         (root / D3_REPLAY_FILENAME).write_bytes(self.d3_config.to_bytes())
 
+    def _runtime_wires(self) -> dict[str, bytes]:
+        return {
+            REQUEST_FILENAME: self.request.to_bytes(),
+            HANDOFF_FILENAME: self.handoff_wire,
+            D2_REPLAY_FILENAME: self.d2_config.to_bytes(),
+            D3_REPLAY_FILENAME: self.d3_config.to_bytes(),
+        }
+
+    def _source_observation(self) -> tuple[tuple[object, ...], ...]:
+        tree = self.snapshot_root / "tree"
+        records: list[tuple[object, ...]] = []
+        for path in (tree, tree / "src", tree / SOURCE_PATH):
+            value = os.lstat(path)
+            payload_sha256 = (
+                hashlib.sha256(path.read_bytes()).hexdigest()
+                if stat.S_ISREG(value.st_mode)
+                else None
+            )
+            records.append(
+                (
+                    path.relative_to(tree).as_posix(),
+                    value.st_dev,
+                    value.st_ino,
+                    value.st_size,
+                    stat.S_IMODE(value.st_mode),
+                    getattr(value, "st_mtime_ns", None),
+                    getattr(value, "st_ctime_ns", None),
+                    payload_sha256,
+                )
+            )
+        return tuple(records)
+
     def _materialize(self) -> bytes:
         return entry_module._materialize_generation_at(
             self.snapshot_root / "tree",
             self.input_runtime,
             self.generation,
         )
+
+    def _provider_flow_fixture(
+        self,
+    ) -> tuple[
+        linux_oci.VerifiedLinuxOciRuntimeV1,
+        WorkerTaskLaunchV1,
+    ]:
+        policy = ExecutionPolicyBindingV1(
+            runtime_image_id="sha256:" + "a" * 64,
+            d2_backend_id=self.d2_config.backend_id,
+            d2_model_id=self.d2_config.model_id,
+            d2_config_sha256=self.d2_config.config_sha256,
+            d3_backend_id=self.d3_config.backend_id,
+            d3_model_id=self.d3_config.model_id,
+            d3_config_sha256=self.d3_config.config_sha256,
+            snapshot_policy_sha256=snapshot_policy_sha256_v1(
+                DEFAULT_SNAPSHOT_POLICY
+            ),
+            d2_budget_sha256=budget_limits_sha256_v1(
+                DEFAULT_D2_WORKER_BUDGET_LIMITS
+            ),
+            d3_budget_sha256=budget_limits_sha256_v1(
+                DEFAULT_D3_WORKER_BUDGET_LIMITS
+            ),
+            tree_limits_sha256=tree_limits_sha256_v1(
+                DEFAULT_SEALED_TREE_ACCESS_LIMITS
+            ),
+        )
+        plan = DiscoveryTaskExecutionPlanV1(
+            batch_binding_sha256="b" * 64,
+            execution_policy_sha256=policy.policy_sha256,
+            task_id=self.task.task_id,
+            snapshot_id=self.task.snapshot_id,
+            snapshot_manifest_sha256=self.task.snapshot_manifest_sha256,
+            snapshot_content_root=self.task.snapshot_content_root,
+            handoff_sha256=self.handoff.handoff_sha256,
+            handoff_wire_sha256=self.handoff.wire_sha256,
+        )
+        launch = WorkerTaskLaunchV1(
+            supervisor_module._SESSION_TOKEN,
+            task_plan=plan,
+            handoff=self.handoff,
+            tree_root=self.snapshot_root / "tree",
+        )
+        server = {
+            "Version": "29.6.2",
+            "ApiVersion": "1.55",
+            "Os": "linux",
+            "Arch": "amd64",
+        }
+        runtime = linux_oci.VerifiedLinuxOciRuntimeV1(
+            linux_oci._RUNTIME_TOKEN,
+            executable=linux_oci._ExecutableBinding(
+                os.path.abspath("docker"),
+                "7" * 64,
+                (1, 2, 3, 4, 5),
+            ),
+            env={},
+            endpoint="npipe:////./pipe/docker_engine",
+            server=server,
+            server_sha256=hashlib.sha256(
+                linux_oci._canonical_json(server)
+            ).hexdigest(),
+            image_config={},
+            image_inspect_sha256="8" * 64,
+            policy=policy,
+        )
+        return runtime, launch
+
+    @staticmethod
+    def _materializer_step(payload: bytes) -> linux_oci._CompletedContainerStepV1:
+        return linux_oci._CompletedContainerStepV1(
+            stdout=payload,
+            stderr=b"",
+            pre_inspect_sha256="1" * 64,
+            post_inspect_sha256="2" * 64,
+            container_identity_sha256="3" * 64,
+            diff_sha256="4" * 64,
+            diff_empty=False,
+        )
+
+    def test_materializer_staging_is_private_readonly_and_detached(self) -> None:
+        original = self._source_observation()
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            private_root = Path(temporary)
+            inputs = linux_oci._stage_materializer_inputs_v1(
+                private_root,
+                self.snapshot_root / "tree",
+                self._runtime_wires(),
+            )
+            try:
+                linux_oci._verify_materializer_inputs_v1(
+                    inputs, self._runtime_wires()
+                )
+                self.assertEqual(inputs.source_root.parent, private_root)
+                self.assertEqual(inputs.runtime_root.parent, private_root)
+                self.assertNotEqual(inputs.source_root, self.snapshot_root / "tree")
+                self.assertEqual(
+                    (inputs.source_root / SOURCE_PATH).read_bytes(), SOURCE
+                )
+                if os.name == "posix":
+                    self.assertEqual(
+                        stat.S_IMODE(os.lstat(private_root).st_mode), 0o700
+                    )
+                    for directory in (
+                        inputs.source_root,
+                        inputs.source_root / "src",
+                        inputs.runtime_root,
+                    ):
+                        self.assertEqual(
+                            stat.S_IMODE(os.lstat(directory).st_mode), 0o555
+                        )
+                    for path in (
+                        inputs.source_root / SOURCE_PATH,
+                        *(inputs.runtime_root / name for name in self._runtime_wires()),
+                    ):
+                        self.assertEqual(
+                            stat.S_IMODE(os.lstat(path).st_mode), 0o444
+                        )
+                self.assertEqual(self._source_observation(), original)
+            finally:
+                linux_oci._restore_materializer_input_permissions_v1(inputs)
+
+    def test_materializer_staging_detects_source_and_runtime_drift(self) -> None:
+        for drift_target in ("source", "runtime"):
+            with self.subTest(drift_target=drift_target), tempfile.TemporaryDirectory(
+                dir=self.root
+            ) as temporary:
+                inputs = linux_oci._stage_materializer_inputs_v1(
+                    Path(temporary),
+                    self.snapshot_root / "tree",
+                    self._runtime_wires(),
+                )
+                try:
+                    target = (
+                        inputs.source_root / SOURCE_PATH
+                        if drift_target == "source"
+                        else inputs.runtime_root / REQUEST_FILENAME
+                    )
+                    linux_oci._chmod_input_node_v1(
+                        target, 0o600, directory=False
+                    )
+                    original = target.read_bytes()
+                    target.write_bytes(b"X" * len(original))
+                    linux_oci._chmod_input_node_v1(
+                        target, 0o444, directory=False
+                    )
+                    with self.assertRaises(
+                        linux_oci.LinuxOciProviderError
+                    ) as captured:
+                        linux_oci._verify_materializer_inputs_v1(
+                            inputs, self._runtime_wires()
+                        )
+                    self.assertEqual(captured.exception.code, "runtime_input_failed")
+                finally:
+                    linux_oci._restore_materializer_input_permissions_v1(inputs)
+
+    def test_materializer_staging_rejects_original_copy_window_change(self) -> None:
+        source = self.snapshot_root / "tree" / SOURCE_PATH
+        original_copy = linux_oci._copy_source_record_v1
+
+        def copy_then_change(source_root, target_root, record) -> None:
+            original_copy(source_root, target_root, record)
+            source.write_bytes(b"Y" * len(SOURCE))
+
+        try:
+            with tempfile.TemporaryDirectory(dir=self.root) as temporary, mock.patch.object(
+                linux_oci,
+                "_copy_source_record_v1",
+                side_effect=copy_then_change,
+            ):
+                with self.assertRaises(
+                    linux_oci.LinuxOciProviderError
+                ) as captured:
+                    linux_oci._stage_materializer_inputs_v1(
+                        Path(temporary),
+                        self.snapshot_root / "tree",
+                        self._runtime_wires(),
+                    )
+            self.assertEqual(captured.exception.code, "runtime_input_failed")
+        finally:
+            source.write_bytes(SOURCE)
+
+    def test_materializer_staging_rejects_hardlinked_source(self) -> None:
+        source = self.snapshot_root / "tree" / SOURCE_PATH
+        alias = self.root / "source-hardlink"
+        try:
+            os.link(source, alias)
+        except (NotImplementedError, OSError):
+            self.skipTest("hard links are unavailable on this filesystem")
+        try:
+            with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+                with self.assertRaises(
+                    linux_oci.LinuxOciProviderError
+                ) as captured:
+                    linux_oci._stage_materializer_inputs_v1(
+                        Path(temporary),
+                        self.snapshot_root / "tree",
+                        self._runtime_wires(),
+                    )
+            self.assertEqual(captured.exception.code, "runtime_input_failed")
+        finally:
+            alias.unlink()
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX openat semantics")
+    def test_materializer_staging_rejects_swapped_source_ancestor(self) -> None:
+        source_root = self.snapshot_root / "tree"
+        source_directory = source_root / "src"
+        held_directory = source_root / "src-held"
+        outside = self.root / "outside-source"
+        outside.mkdir()
+        (outside / "app.py").write_bytes(b"external-content\n")
+        original_open = linux_oci._open_posix_directory_chain_v1
+        attacked = False
+
+        def swap_before_open(root: Path, components: tuple[str, ...]):
+            nonlocal attacked
+            if root == source_root and components == ("src",) and not attacked:
+                attacked = True
+                source_directory.rename(held_directory)
+                source_directory.symlink_to(outside, target_is_directory=True)
+                try:
+                    return original_open(root, components)
+                finally:
+                    source_directory.unlink()
+                    held_directory.rename(source_directory)
+            return original_open(root, components)
+
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary, mock.patch.object(
+            linux_oci,
+            "_open_posix_directory_chain_v1",
+            side_effect=swap_before_open,
+        ):
+            with self.assertRaises(linux_oci.LinuxOciProviderError) as captured:
+                linux_oci._stage_materializer_inputs_v1(
+                    Path(temporary), source_root, self._runtime_wires()
+                )
+        self.assertTrue(attacked)
+        self.assertEqual(captured.exception.code, "runtime_input_failed")
+        self.assertEqual((outside / "app.py").read_bytes(), b"external-content\n")
+
+    def test_materializer_restore_rejects_replaced_inode(self) -> None:
+        with tempfile.TemporaryDirectory(dir=self.root) as temporary:
+            inputs = linux_oci._stage_materializer_inputs_v1(
+                Path(temporary),
+                self.snapshot_root / "tree",
+                self._runtime_wires(),
+            )
+            target = inputs.source_root / SOURCE_PATH
+            held = target.with_name("app-held.py")
+            linux_oci._chmod_input_node_v1(
+                inputs.source_root, 0o700, directory=True
+            )
+            linux_oci._chmod_input_node_v1(
+                inputs.source_root / "src", 0o700, directory=True
+            )
+            target.rename(held)
+            target.write_bytes(SOURCE)
+            try:
+                with self.assertRaises(
+                    linux_oci.LinuxOciProviderError
+                ) as captured:
+                    linux_oci._restore_materializer_input_permissions_v1(inputs)
+                self.assertEqual(captured.exception.code, "cleanup_uncertain")
+                self.assertTrue(captured.exception.runtime_uncertain)
+            finally:
+                target.unlink()
+                held.rename(target)
+                linux_oci._restore_materializer_input_permissions_v1(inputs)
+
+    def test_provider_cross_binds_generation_receipt_closure_fields(self) -> None:
+        receipt = GenerationReceiptV1.from_bytes(self._materialize())
+        launch = SimpleNamespace(
+            task=self.task,
+            handoff_sha256=self.handoff.handoff_sha256,
+            handoff_wire_sha256=self.handoff.wire_sha256,
+        )
+        wires = self._runtime_wires()
+        self.assertEqual(
+            linux_oci._validate_generation_receipt_v1(
+                receipt.to_bytes(),
+                request=self.request,
+                launch=launch,
+                handoff=self.handoff,
+                wires=wires,
+                d2_replay=self.d2_config,
+                d3_replay=self.d3_config,
+            ),
+            receipt,
+        )
+        for changed in (
+            replace(receipt, runtime_set_sha256="f" * 64),
+            replace(receipt, file_count=receipt.file_count + 1),
+            replace(receipt, total_bytes=receipt.total_bytes + 1),
+        ):
+            with self.subTest(changed=changed):
+                with self.assertRaises(
+                    linux_oci.LinuxOciProviderError
+                ) as captured:
+                    linux_oci._validate_generation_receipt_v1(
+                        changed.to_bytes(),
+                        request=self.request,
+                        launch=launch,
+                        handoff=self.handoff,
+                        wires=wires,
+                        d2_replay=self.d2_config,
+                        d3_replay=self.d3_config,
+                    )
+                self.assertEqual(captured.exception.code, "generation_failed")
+
+    def test_post_verify_failure_blocks_commit_and_completion(self) -> None:
+        runtime, launch = self._provider_flow_fixture()
+        source_before = self._source_observation()
+        staging_roots: list[Path] = []
+        original_stage = linux_oci._stage_materializer_inputs_v1
+        original_verify = linux_oci._verify_materializer_inputs_v1
+        verify_count = 0
+
+        def stage(private_root: Path, source_root: Path, wires: dict[str, bytes]):
+            staging_roots.append(private_root)
+            return original_stage(private_root, source_root, wires)
+
+        def verify(inputs, wires):
+            nonlocal verify_count
+            verify_count += 1
+            if verify_count == 2:
+                raise linux_oci.LinuxOciProviderError(
+                    "runtime_input_failed",
+                    "materializer input changed after execution",
+                )
+            return original_verify(inputs, wires)
+
+        materializer = object()
+        with (
+            mock.patch.object(
+                linux_oci,
+                "_stage_materializer_inputs_v1",
+                side_effect=stage,
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_verify_materializer_inputs_v1",
+                side_effect=verify,
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_create_worker_container_v1",
+                return_value=materializer,
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_run_container_step_v1",
+                return_value=self._materializer_step(b"unused\n"),
+            ),
+            mock.patch.object(
+                linux_oci, "_remove_worker_container_v1"
+            ) as remove_container,
+            mock.patch.object(
+                linux_oci,
+                "_restore_materializer_input_permissions_v1",
+                wraps=linux_oci._restore_materializer_input_permissions_v1,
+            ) as restore_permissions,
+            mock.patch.object(
+                linux_oci, "_validate_generation_receipt_v1"
+            ) as validate_receipt,
+            mock.patch.object(
+                linux_oci, "_commit_execution_image_v1"
+            ) as commit_image,
+            mock.patch.object(
+                linux_oci, "_issue_completed_worker_execution_v1"
+            ) as issue_completion,
+        ):
+            with self.assertRaises(
+                linux_oci.LinuxOciProviderError
+            ) as captured:
+                linux_oci.run_discovery_worker_linux_oci_v1(
+                    runtime,
+                    launch,
+                    d2_replay=self.d2_config,
+                    d3_replay=self.d3_config,
+                )
+        self.assertEqual(captured.exception.code, "runtime_input_failed")
+        self.assertEqual(verify_count, 2)
+        remove_container.assert_called_once_with(materializer)
+        restore_permissions.assert_called_once()
+        validate_receipt.assert_not_called()
+        commit_image.assert_not_called()
+        issue_completion.assert_not_called()
+        self.assertEqual(len(staging_roots), 1)
+        self.assertFalse(staging_roots[0].exists())
+        self.assertEqual(self._source_observation(), source_before)
+
+    def test_receipt_failure_blocks_commit_and_completion(self) -> None:
+        runtime, launch = self._provider_flow_fixture()
+        source_before = self._source_observation()
+        staging_roots: list[Path] = []
+        original_stage = linux_oci._stage_materializer_inputs_v1
+        receipt = GenerationReceiptV1.from_bytes(self._materialize())
+        forged_receipt = replace(
+            receipt, total_bytes=receipt.total_bytes + 1
+        ).to_bytes()
+
+        def stage(private_root: Path, source_root: Path, wires: dict[str, bytes]):
+            staging_roots.append(private_root)
+            return original_stage(private_root, source_root, wires)
+
+        materializer = object()
+        with (
+            mock.patch.object(
+                linux_oci,
+                "_stage_materializer_inputs_v1",
+                side_effect=stage,
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_create_worker_container_v1",
+                return_value=materializer,
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_run_container_step_v1",
+                return_value=self._materializer_step(forged_receipt),
+            ),
+            mock.patch.object(
+                linux_oci, "_remove_worker_container_v1"
+            ) as remove_container,
+            mock.patch.object(
+                linux_oci,
+                "_restore_materializer_input_permissions_v1",
+                wraps=linux_oci._restore_materializer_input_permissions_v1,
+            ) as restore_permissions,
+            mock.patch.object(
+                linux_oci, "_commit_execution_image_v1"
+            ) as commit_image,
+            mock.patch.object(
+                linux_oci, "_issue_completed_worker_execution_v1"
+            ) as issue_completion,
+        ):
+            with self.assertRaises(
+                linux_oci.LinuxOciProviderError
+            ) as captured:
+                linux_oci.run_discovery_worker_linux_oci_v1(
+                    runtime,
+                    launch,
+                    d2_replay=self.d2_config,
+                    d3_replay=self.d3_config,
+                )
+        self.assertEqual(captured.exception.code, "generation_failed")
+        remove_container.assert_called_once_with(materializer)
+        restore_permissions.assert_called_once()
+        commit_image.assert_not_called()
+        issue_completion.assert_not_called()
+        self.assertEqual(len(staging_roots), 1)
+        self.assertFalse(staging_roots[0].exists())
+        self.assertEqual(self._source_observation(), source_before)
+
+    def test_post_commit_cleanup_failure_reclaims_image_and_blocks_completion(
+        self,
+    ) -> None:
+        runtime, launch = self._provider_flow_fixture()
+        source_before = self._source_observation()
+        staging_roots: list[Path] = []
+        original_stage = linux_oci._stage_materializer_inputs_v1
+        receipt_wire = self._materialize()
+        materializer = object()
+        execution_image = linux_oci._DerivedExecutionImageV1(
+            linux_oci._RUNTIME_TOKEN,
+            runtime=runtime,
+            image_id="sha256:" + "c" * 64,
+            label="vulngym-e3-" + "d" * 32,
+            inspect_sha256="e" * 64,
+            materializer_container_id="f" * 64,
+            materializer_name="vulngym-e3-" + "1" * 32,
+        )
+        cleanup_failure = linux_oci.LinuxOciProviderError(
+            "cleanup_uncertain",
+            "materializer container cleanup did not close",
+            runtime_uncertain=True,
+        )
+
+        def stage(private_root: Path, source_root: Path, wires: dict[str, bytes]):
+            staging_roots.append(private_root)
+            return original_stage(private_root, source_root, wires)
+
+        with (
+            mock.patch.object(
+                linux_oci,
+                "_stage_materializer_inputs_v1",
+                side_effect=stage,
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_create_worker_container_v1",
+                return_value=materializer,
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_run_container_step_v1",
+                return_value=self._materializer_step(receipt_wire),
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_commit_execution_image_v1",
+                return_value=execution_image,
+            ) as commit_image,
+            mock.patch.object(
+                linux_oci,
+                "_remove_worker_container_v1",
+                side_effect=cleanup_failure,
+            ) as remove_container,
+            mock.patch.object(
+                linux_oci,
+                "_restore_materializer_input_permissions_v1",
+                wraps=linux_oci._restore_materializer_input_permissions_v1,
+            ) as restore_permissions,
+            mock.patch.object(
+                linux_oci, "_remove_execution_image_v1"
+            ) as remove_image,
+            mock.patch.object(
+                linux_oci, "_issue_completed_worker_execution_v1"
+            ) as issue_completion,
+        ):
+            with self.assertRaises(
+                linux_oci.LinuxOciProviderError
+            ) as captured:
+                linux_oci.run_discovery_worker_linux_oci_v1(
+                    runtime,
+                    launch,
+                    d2_replay=self.d2_config,
+                    d3_replay=self.d3_config,
+                )
+        self.assertEqual(captured.exception.code, "cleanup_uncertain")
+        self.assertTrue(captured.exception.runtime_uncertain)
+        self.assertIs(captured.exception.__cause__, cleanup_failure)
+        commit_image.assert_called_once_with(materializer)
+        remove_container.assert_called_once_with(materializer)
+        restore_permissions.assert_called_once()
+        remove_image.assert_called_once_with(execution_image)
+        issue_completion.assert_not_called()
+        self.assertEqual(len(staging_roots), 1)
+        self.assertFalse(staging_roots[0].exists())
+        self.assertEqual(self._source_observation(), source_before)
 
     def test_request_and_replay_contracts_are_canonical_and_digest_bound(self) -> None:
         self.assertEqual(

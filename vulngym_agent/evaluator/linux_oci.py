@@ -35,13 +35,20 @@ from vulngym_agent.evaluator.oci_worker_entry import (
     D2_REPLAY_FILENAME,
     D3_REPLAY_FILENAME,
     HANDOFF_FILENAME,
+    PROTOCOL_VERSION,
     REQUEST_FILENAME,
+    WORKER_ERROR_KIND,
     GenerationReceiptV1,
     OciReplayConfigV1,
     OciWorkerEntryError,
     OciWorkerRequestV1,
+    _inventory_source,
     _load_runtime_bundle,
+    _manifest_directories,
+    _read_source_record,
+    _runtime_set_sha256,
 )
+from vulngym_agent.benchmark.worker_handoff import WorkerHandoffV1
 from vulngym_agent.evaluator.runtime_evidence import (
     DockerServerIdentityV1,
     RuntimeEvidenceError,
@@ -132,6 +139,9 @@ _LEGACY_NONE_NETWORK_ROOT_KEYS_V1: Final[frozenset[str]] = frozenset(
 
 _RUNTIME_TOKEN: Final[object] = object()
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
+_WORKER_ERROR_CODE_RE: Final[re.Pattern[str]] = re.compile(
+    r"[a-z][a-z0-9_]{0,63}\Z"
+)
 _IMAGE_ID_RE: Final[re.Pattern[str]] = re.compile(r"sha256:[0-9a-f]{64}\Z")
 _CONTAINER_ID_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _NAME_RE: Final[re.Pattern[str]] = re.compile(r"vulngym-e3-[0-9a-f]{32}\Z")
@@ -2850,12 +2860,54 @@ class _CompletedContainerStepV1:
     diff_empty: bool
 
 
+def _worker_protocol_error_code_v1(result: object, *, mode: str) -> str | None:
+    try:
+        if (
+            type(mode) is not str
+            or mode not in {"materialize", "execute"}
+            or result.exit_code != 2
+            or result.timed_out
+            or result.stdout_overflow
+            or result.stderr_overflow
+            or result.stdout != b""
+            or type(result.stderr) is not bytes
+        ):
+            return None
+        value = _strict_json_document(result.stderr, name="worker error")
+    except (AttributeError, LinuxOciProviderError, TypeError, ValueError):
+        return None
+    if (
+        type(value) is not dict
+        or set(value) != {"code", "contract_version", "kind", "mode"}
+        or type(value.get("contract_version")) is not int
+        or value.get("contract_version") != PROTOCOL_VERSION
+        or type(value.get("kind")) is not str
+        or value.get("kind") != WORKER_ERROR_KIND
+        or type(value.get("mode")) is not str
+        or value.get("mode") != mode
+        or type(value.get("code")) is not str
+        or _WORKER_ERROR_CODE_RE.fullmatch(value["code"]) is None
+        or result.stderr != _canonical_json(value) + b"\n"
+    ):
+        return None
+    return value["code"]
+
+
 def _run_container_step_v1(
     container: _WorkerContainerV1,
 ) -> _CompletedContainerStepV1:
     """Start and verify one container while retaining it for explicit cleanup."""
 
     result = _start_worker_container_v1(container)
+    worker_error_code = _worker_protocol_error_code_v1(
+        result, mode=container.mode
+    )
+    if worker_error_code is not None:
+        raise LinuxOciProviderError(
+            "worker_failed",
+            f"worker container rejected its {container.mode} boundary "
+            f"({worker_error_code})",
+        )
     if (
         result.exit_code != 0
         or result.timed_out
@@ -3067,14 +3119,758 @@ def _write_runtime_input_directory_v1(
         )
 
 
+def _plain_input_node_v1(path: Path, *, directory: bool) -> os.stat_result:
+    if type(path) is not type(Path()):
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input path is invalid"
+        )
+    try:
+        value = os.lstat(path)
+    except OSError:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input is unavailable"
+        ) from None
+    attributes = getattr(value, "st_file_attributes", 0)
+    reparse = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    invalid = (
+        stat.S_ISLNK(value.st_mode)
+        or bool(attributes & reparse)
+        or (directory and not stat.S_ISDIR(value.st_mode))
+        or (
+            not directory
+            and (not stat.S_ISREG(value.st_mode) or value.st_nlink != 1)
+        )
+    )
+    if invalid:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input identity is unsafe"
+        )
+    return value
+
+
+def _stable_input_identity_v1(value: os.stat_result) -> tuple[object, ...]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        getattr(value, "st_mtime_ns", None),
+        getattr(value, "st_ctime_ns", None),
+        stat.S_IMODE(value.st_mode),
+    )
+
+
+def _make_private_input_directory_v1(path: Path) -> None:
+    try:
+        path.mkdir(mode=0o700)
+    except OSError as error:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input directory could not be created"
+        ) from error
+    state = _plain_input_node_v1(path, directory=True)
+    if os.name == "posix" and stat.S_IMODE(state.st_mode) != 0o700:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input directory is not private"
+        )
+
+
+def _chmod_input_node_v1(path: Path, mode: int, *, directory: bool) -> None:
+    before = _plain_input_node_v1(path, directory=directory)
+    expected_identity = (before.st_dev, before.st_ino)
+    if os.name == "posix":
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+            os, "O_NOFOLLOW", 0
+        )
+        if directory:
+            flags |= getattr(os, "O_DIRECTORY", 0)
+        descriptor = -1
+        try:
+            descriptor = os.open(path, flags)
+            opened = os.fstat(descriptor)
+            if (
+                (opened.st_dev, opened.st_ino) != expected_identity
+                or (directory and not stat.S_ISDIR(opened.st_mode))
+                or (
+                    not directory
+                    and (not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1)
+                )
+            ):
+                raise OSError("materializer input changed before chmod")
+            os.fchmod(descriptor, mode)
+            finished = os.fstat(descriptor)
+            if (
+                (finished.st_dev, finished.st_ino) != expected_identity
+                or stat.S_IMODE(finished.st_mode) != mode
+            ):
+                raise OSError("materializer input chmod did not close")
+        except OSError as error:
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer input mode could not be fixed"
+            ) from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+    else:
+        try:
+            os.chmod(path, mode)
+        except OSError as error:
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer input mode could not be fixed"
+            ) from error
+    after = _plain_input_node_v1(path, directory=directory)
+    if (after.st_dev, after.st_ino) != expected_identity:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input changed during chmod"
+        )
+
+
+def _sync_input_directory_v1(path: Path) -> None:
+    if os.name != "posix":
+        return
+    before = _plain_input_node_v1(path, directory=True)
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_DIRECTORY", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("materializer input directory changed before sync")
+        os.fsync(descriptor)
+        finished = os.fstat(descriptor)
+        if (finished.st_dev, finished.st_ino) != (before.st_dev, before.st_ino):
+            raise OSError("materializer input directory changed during sync")
+    except OSError as error:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input directory did not sync"
+        ) from error
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _source_tree_identity_v1(
+    root: Path,
+    handoff: WorkerHandoffV1,
+    *,
+    require_container_readable: bool,
+) -> tuple[tuple[object, ...], ...]:
+    if type(root) is not type(Path()) or type(handoff) is not WorkerHandoffV1:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer source binding is invalid"
+        )
+    try:
+        _inventory_source(root, handoff)
+    except (OciWorkerEntryError, OSError, TypeError, ValueError) as error:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer source inventory did not verify"
+        ) from error
+    records: list[tuple[object, ...]] = []
+    directories = tuple(
+        sorted(_manifest_directories(handoff), key=lambda item: (item.count("/"), item))
+    )
+    for relative in ("", *directories):
+        path = root if not relative else root.joinpath(*relative.split("/"))
+        state = _plain_input_node_v1(path, directory=True)
+        if (
+            require_container_readable
+            and os.name == "posix"
+            and stat.S_IMODE(state.st_mode) != 0o555
+        ):
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer source directory is not read-only"
+            )
+        records.append(("D", relative, *_stable_input_identity_v1(state)))
+    for record in handoff.files:
+        path = root.joinpath(*record.path.split("/"))
+        state = _plain_input_node_v1(path, directory=False)
+        if (
+            state.st_size != record.size
+            or (
+                require_container_readable
+                and os.name == "posix"
+                and stat.S_IMODE(state.st_mode) != 0o444
+            )
+        ):
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer source file state is invalid"
+            )
+        records.append(("F", record.path, *_stable_input_identity_v1(state)))
+    return tuple(records)
+
+
+def _open_posix_directory_chain_v1(
+    root: Path, components: tuple[str, ...]
+) -> tuple[int, ...]:
+    if os.name != "posix" or type(root) is not type(Path()):
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "descriptor-relative source access is unavailable"
+        )
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "descriptor-relative source access is unavailable"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | nofollow | directory
+    guards: list[int] = []
+    try:
+        root_before = _plain_input_node_v1(root, directory=True)
+        root_descriptor = os.open(root, flags)
+        guards.append(root_descriptor)
+        root_opened = os.fstat(root_descriptor)
+        if (
+            not stat.S_ISDIR(root_opened.st_mode)
+            or (root_opened.st_dev, root_opened.st_ino)
+            != (root_before.st_dev, root_before.st_ino)
+        ):
+            raise OSError("materializer input root changed before binding")
+        for component in components:
+            if (
+                type(component) is not str
+                or not component
+                or component in {".", ".."}
+                or "/" in component
+                or "\\" in component
+            ):
+                raise OSError("materializer input path component is invalid")
+            descriptor = -1
+            try:
+                descriptor = os.open(component, flags, dir_fd=guards[-1])
+                opened = os.fstat(descriptor)
+                if not stat.S_ISDIR(opened.st_mode):
+                    raise OSError("materializer input ancestor is not a directory")
+                guards.append(descriptor)
+                descriptor = -1
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        return tuple(guards)
+    except (LinuxOciProviderError, OSError) as error:
+        for descriptor in reversed(guards):
+            os.close(descriptor)
+        if isinstance(error, LinuxOciProviderError):
+            raise
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input directory chain is unsafe"
+        ) from error
+
+
+def _copy_source_record_v1(source_root: Path, target_root: Path, record) -> None:
+    relative = record.path
+    source_root_before = _plain_input_node_v1(source_root, directory=True)
+    source_directories: list[tuple[Path, tuple[object, ...]]] = []
+    current = source_root
+    for component in relative.split("/")[:-1]:
+        current = current / component
+        source_directories.append(
+            (
+                current,
+                _stable_input_identity_v1(
+                    _plain_input_node_v1(current, directory=True)
+                ),
+            )
+        )
+    source = source_root.joinpath(*relative.split("/"))
+    target = target_root.joinpath(*relative.split("/"))
+    source_before = _plain_input_node_v1(source, directory=False)
+    if source_before.st_size != record.size:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer source file size changed"
+        )
+    source_descriptor = -1
+    target_descriptor = -1
+    source_guards: tuple[int, ...] = ()
+    target_guards: tuple[int, ...] = ()
+    digest = hashlib.sha256()
+    consumed = 0
+    try:
+        source_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        target_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        components = tuple(relative.split("/"))
+        if os.name == "posix":
+            source_guards = _open_posix_directory_chain_v1(
+                source_root, components[:-1]
+            )
+            target_guards = _open_posix_directory_chain_v1(
+                target_root, components[:-1]
+            )
+            source_descriptor = os.open(
+                components[-1], source_flags, dir_fd=source_guards[-1]
+            )
+            target_descriptor = os.open(
+                components[-1],
+                target_flags,
+                0o600,
+                dir_fd=target_guards[-1],
+            )
+        else:
+            source_descriptor = os.open(source, source_flags)
+            target_descriptor = os.open(target, target_flags, 0o600)
+        source_opened = os.fstat(source_descriptor)
+        if (
+            not stat.S_ISREG(source_opened.st_mode)
+            or source_opened.st_nlink != 1
+            or (source_opened.st_dev, source_opened.st_ino)
+            != (source_before.st_dev, source_before.st_ino)
+            or source_opened.st_size != record.size
+        ):
+            raise OSError("materializer source changed before copy")
+        target_opened = os.fstat(target_descriptor)
+        if not stat.S_ISREG(target_opened.st_mode) or target_opened.st_nlink != 1:
+            raise OSError("materializer source copy target is unsafe")
+        while consumed < record.size:
+            chunk = os.read(
+                source_descriptor, min(64 * 1024, record.size - consumed)
+            )
+            if not chunk:
+                raise OSError("materializer source ended before its pinned size")
+            digest.update(chunk)
+            pending = memoryview(chunk)
+            while pending:
+                written = os.write(target_descriptor, pending)
+                if written < 1:
+                    raise OSError("materializer source copy write was incomplete")
+                pending = pending[written:]
+            consumed += len(chunk)
+        if os.read(source_descriptor, 1):
+            raise OSError("materializer source exceeds its pinned size")
+        os.fsync(target_descriptor)
+        source_finished = os.fstat(source_descriptor)
+        target_finished = os.fstat(target_descriptor)
+        if (
+            _stable_input_identity_v1(source_finished)
+            != _stable_input_identity_v1(source_opened)
+            or (target_finished.st_dev, target_finished.st_ino)
+            != (target_opened.st_dev, target_opened.st_ino)
+            or target_finished.st_size != record.size
+            or digest.hexdigest() != record.sha256
+        ):
+            raise OSError("materializer source copy did not verify")
+    except OSError as error:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer source could not be copied"
+        ) from error
+    finally:
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+        if source_descriptor >= 0:
+            os.close(source_descriptor)
+        for descriptor in reversed(target_guards):
+            os.close(descriptor)
+        for descriptor in reversed(source_guards):
+            os.close(descriptor)
+    source_after = _plain_input_node_v1(source, directory=False)
+    target_after = _plain_input_node_v1(target, directory=False)
+    if (
+        _stable_input_identity_v1(source_after)
+        != _stable_input_identity_v1(source_before)
+        or (target_after.st_dev, target_after.st_ino)
+        != (target_opened.st_dev, target_opened.st_ino)
+        or target_after.st_size != record.size
+        or _stable_input_identity_v1(
+            _plain_input_node_v1(source_root, directory=True)
+        )
+        != _stable_input_identity_v1(source_root_before)
+        or any(
+            _stable_input_identity_v1(_plain_input_node_v1(path, directory=True))
+            != identity
+            for path, identity in source_directories
+        )
+    ):
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer source changed during copy"
+        )
+
+
+def _runtime_wires_from_bundle_v1(bundle) -> dict[str, bytes]:
+    return {
+        REQUEST_FILENAME: bundle.request_wire,
+        HANDOFF_FILENAME: bundle.handoff_wire,
+        D2_REPLAY_FILENAME: bundle.d2_wire,
+        D3_REPLAY_FILENAME: bundle.d3_wire,
+    }
+
+
+def _materializer_input_identity_v1(
+    source_root: Path,
+    runtime_root: Path,
+    handoff: WorkerHandoffV1,
+) -> tuple[tuple[object, ...], ...]:
+    records = list(
+        _source_tree_identity_v1(
+            source_root, handoff, require_container_readable=True
+        )
+    )
+    runtime_state = _plain_input_node_v1(runtime_root, directory=True)
+    if os.name == "posix" and stat.S_IMODE(runtime_state.st_mode) != 0o555:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer runtime directory is not read-only"
+        )
+    records.append(("R", "", *_stable_input_identity_v1(runtime_state)))
+    for name in sorted(
+        {REQUEST_FILENAME, HANDOFF_FILENAME, D2_REPLAY_FILENAME, D3_REPLAY_FILENAME}
+    ):
+        state = _plain_input_node_v1(runtime_root / name, directory=False)
+        if os.name == "posix" and stat.S_IMODE(state.st_mode) != 0o444:
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer runtime file is not read-only"
+            )
+        records.append(("W", name, *_stable_input_identity_v1(state)))
+    return tuple(records)
+
+
+def _materializer_input_inodes_v1(
+    source_root: Path,
+    runtime_root: Path,
+    handoff: WorkerHandoffV1,
+) -> tuple[tuple[str, str, int, int], ...]:
+    source_identity = _source_tree_identity_v1(
+        source_root, handoff, require_container_readable=False
+    )
+    records = tuple(
+        (str(item[0]), str(item[1]), int(item[2]), int(item[3]))
+        for item in source_identity
+    )
+    runtime_records: list[tuple[str, str, int, int]] = []
+    runtime_state = _plain_input_node_v1(runtime_root, directory=True)
+    runtime_records.append(("R", "", runtime_state.st_dev, runtime_state.st_ino))
+    for name in sorted(
+        {REQUEST_FILENAME, HANDOFF_FILENAME, D2_REPLAY_FILENAME, D3_REPLAY_FILENAME}
+    ):
+        state = _plain_input_node_v1(runtime_root / name, directory=False)
+        runtime_records.append(("W", name, state.st_dev, state.st_ino))
+    return records + tuple(runtime_records)
+
+
+@dataclass(frozen=True, slots=True)
+class _MaterializerInputsV1:
+    source_root: Path
+    runtime_root: Path
+    handoff: WorkerHandoffV1
+    inodes: tuple[tuple[str, str, int, int], ...]
+    identity: tuple[tuple[object, ...], ...]
+
+
+def _verify_materializer_inputs_v1(
+    inputs: _MaterializerInputsV1, wires: dict[str, bytes]
+) -> None:
+    if type(inputs) is not _MaterializerInputsV1 or type(wires) is not dict:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input verification is invalid"
+        )
+    if (
+        _materializer_input_inodes_v1(
+            inputs.source_root, inputs.runtime_root, inputs.handoff
+        )
+        != inputs.inodes
+    ):
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input inode binding changed"
+        )
+    before = _materializer_input_identity_v1(
+        inputs.source_root, inputs.runtime_root, inputs.handoff
+    )
+    if before != inputs.identity:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input identity changed"
+        )
+    try:
+        bundle = _load_runtime_bundle(inputs.runtime_root)
+        for record in inputs.handoff.files:
+            _read_source_record(
+                inputs.source_root,
+                record.path,
+                size=record.size,
+                sha256=record.sha256,
+            )
+    except (OciWorkerEntryError, OSError, TypeError, ValueError) as error:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input content changed"
+        ) from error
+    if bundle.handoff != inputs.handoff or _runtime_wires_from_bundle_v1(bundle) != wires:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer runtime binding changed"
+        )
+    after = _materializer_input_identity_v1(
+        inputs.source_root, inputs.runtime_root, inputs.handoff
+    )
+    if after != before:
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer input changed during verification"
+        )
+
+
+def _restore_materializer_input_permissions_v1(
+    inputs: _MaterializerInputsV1,
+) -> None:
+    if type(inputs) is not _MaterializerInputsV1:
+        raise LinuxOciProviderError(
+            "cleanup_uncertain",
+            "materializer input cleanup identity is invalid",
+            runtime_uncertain=True,
+        )
+    expected_inodes = {
+        (kind, name): (device, inode)
+        for kind, name, device, inode in inputs.inodes
+    }
+    if len(expected_inodes) != len(inputs.inodes):
+        raise LinuxOciProviderError(
+            "cleanup_uncertain",
+            "materializer input cleanup binding is invalid",
+            runtime_uncertain=True,
+        )
+
+    def restore(
+        path: Path, mode: int, *, directory: bool, kind: str, name: str
+    ) -> None:
+        state = _plain_input_node_v1(path, directory=directory)
+        if (state.st_dev, state.st_ino) != expected_inodes.get((kind, name)):
+            raise LinuxOciProviderError(
+                "cleanup_uncertain",
+                "materializer input changed before cleanup",
+                runtime_uncertain=True,
+            )
+        _chmod_input_node_v1(path, mode, directory=directory)
+
+    directories = tuple(
+        sorted(
+            _manifest_directories(inputs.handoff),
+            key=lambda item: (item.count("/"), item),
+        )
+    )
+    try:
+        restore(
+            inputs.source_root,
+            0o700,
+            directory=True,
+            kind="D",
+            name="",
+        )
+        for relative in directories:
+            restore(
+                inputs.source_root.joinpath(*relative.split("/")),
+                0o700,
+                directory=True,
+                kind="D",
+                name=relative,
+            )
+        restore(
+            inputs.runtime_root,
+            0o700,
+            directory=True,
+            kind="R",
+            name="",
+        )
+        for record in inputs.handoff.files:
+            restore(
+                inputs.source_root.joinpath(*record.path.split("/")),
+                0o600,
+                directory=False,
+                kind="F",
+                name=record.path,
+            )
+        for name in (REQUEST_FILENAME, HANDOFF_FILENAME, D2_REPLAY_FILENAME, D3_REPLAY_FILENAME):
+            restore(
+                inputs.runtime_root / name,
+                0o600,
+                directory=False,
+                kind="W",
+                name=name,
+            )
+    except LinuxOciProviderError as error:
+        raise LinuxOciProviderError(
+            "cleanup_uncertain",
+            "materializer input permissions could not be restored",
+            runtime_uncertain=True,
+        ) from error
+
+
+def _stage_materializer_inputs_v1(
+    private_root: Path,
+    source_root: Path,
+    wires: dict[str, bytes],
+) -> _MaterializerInputsV1:
+    if (
+        type(private_root) is not type(Path())
+        or type(source_root) is not type(Path())
+        or type(wires) is not dict
+    ):
+        raise LinuxOciProviderError(
+            "invalid_argument", "materializer staging input is invalid"
+        )
+    private_state = _plain_input_node_v1(private_root, directory=True)
+    if os.name == "posix" and (
+        stat.S_IMODE(private_state.st_mode) != 0o700
+        or private_state.st_uid != os.getuid()
+    ):
+        raise LinuxOciProviderError(
+            "runtime_input_failed", "materializer staging parent is not private"
+        )
+    staged_source = private_root / "source"
+    staged_runtime = private_root / "runtime"
+    handoff: WorkerHandoffV1 | None = None
+    input_inodes: tuple[tuple[str, str, int, int], ...] = ()
+    sealing_started = False
+    try:
+        _make_private_input_directory_v1(staged_source)
+        _make_private_input_directory_v1(staged_runtime)
+        _write_runtime_input_directory_v1(staged_runtime, wires)
+        try:
+            bundle = _load_runtime_bundle(staged_runtime)
+        except (OciWorkerEntryError, OSError, TypeError, ValueError) as error:
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer runtime input did not verify"
+            ) from error
+        handoff = bundle.handoff
+        if _runtime_wires_from_bundle_v1(bundle) != wires:
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer runtime input changed"
+            )
+        source_identity = _source_tree_identity_v1(
+            source_root, handoff, require_container_readable=False
+        )
+        directories = tuple(
+            sorted(
+                _manifest_directories(handoff),
+                key=lambda item: (item.count("/"), item),
+            )
+        )
+        for relative in directories:
+            _make_private_input_directory_v1(
+                staged_source.joinpath(*relative.split("/"))
+            )
+        for record in handoff.files:
+            _copy_source_record_v1(source_root, staged_source, record)
+        if (
+            _source_tree_identity_v1(
+                source_root, handoff, require_container_readable=False
+            )
+            != source_identity
+        ):
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "sealed source changed while staging"
+            )
+        try:
+            _inventory_source(staged_source, handoff)
+            for record in handoff.files:
+                _read_source_record(
+                    staged_source,
+                    record.path,
+                    size=record.size,
+                    sha256=record.sha256,
+                )
+        except (OciWorkerEntryError, OSError, TypeError, ValueError) as error:
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "staged source input did not verify"
+            ) from error
+        for relative in sorted(
+            directories, key=lambda item: (-item.count("/"), item)
+        ):
+            _sync_input_directory_v1(
+                staged_source.joinpath(*relative.split("/"))
+            )
+        _sync_input_directory_v1(staged_source)
+        _sync_input_directory_v1(staged_runtime)
+        _sync_input_directory_v1(private_root)
+
+        input_inodes = _materializer_input_inodes_v1(
+            staged_source, staged_runtime, handoff
+        )
+        sealing_started = True
+        for record in handoff.files:
+            _chmod_input_node_v1(
+                staged_source.joinpath(*record.path.split("/")),
+                0o444,
+                directory=False,
+            )
+        for name in (REQUEST_FILENAME, HANDOFF_FILENAME, D2_REPLAY_FILENAME, D3_REPLAY_FILENAME):
+            _chmod_input_node_v1(staged_runtime / name, 0o444, directory=False)
+        for relative in sorted(
+            directories, key=lambda item: (-item.count("/"), item)
+        ):
+            _chmod_input_node_v1(
+                staged_source.joinpath(*relative.split("/")),
+                0o555,
+                directory=True,
+            )
+        _chmod_input_node_v1(staged_source, 0o555, directory=True)
+        _chmod_input_node_v1(staged_runtime, 0o555, directory=True)
+        inputs = _MaterializerInputsV1(
+            source_root=staged_source,
+            runtime_root=staged_runtime,
+            handoff=handoff,
+            inodes=input_inodes,
+            identity=_materializer_input_identity_v1(
+                staged_source, staged_runtime, handoff
+            ),
+        )
+        _verify_materializer_inputs_v1(inputs, wires)
+        return inputs
+    except BaseException as primary:
+        if sealing_started and handoff is not None:
+            partial = _MaterializerInputsV1(
+                source_root=staged_source,
+                runtime_root=staged_runtime,
+                handoff=handoff,
+                inodes=input_inodes,
+                identity=(),
+            )
+            try:
+                _restore_materializer_input_permissions_v1(partial)
+            except BaseException:
+                raise LinuxOciProviderError(
+                    "cleanup_uncertain",
+                    "materializer staging cleanup did not close",
+                    runtime_uncertain=True,
+                ) from primary
+        raise
+
+
+def _close_materializer_staging_v1(
+    temporary_context: object, primary: BaseException | None
+) -> None:
+    try:
+        temporary_context.cleanup()
+    except BaseException as cleanup_error:
+        raise LinuxOciProviderError(
+            "cleanup_uncertain",
+            "materializer staging deletion did not close",
+            runtime_uncertain=True,
+        ) from (primary if primary is not None else cleanup_error)
+    if primary is not None:
+        raise primary
+
+
 def _validate_generation_receipt_v1(
     payload: bytes,
     *,
     request: OciWorkerRequestV1,
     launch: object,
+    handoff: WorkerHandoffV1,
+    wires: dict[str, bytes],
     d2_replay: OciReplayConfigV1,
     d3_replay: OciReplayConfigV1,
 ) -> GenerationReceiptV1:
+    if type(handoff) is not WorkerHandoffV1 or type(wires) is not dict:
+        raise LinuxOciProviderError(
+            "invalid_argument", "source generation receipt binding is invalid"
+        )
     try:
         receipt = GenerationReceiptV1.from_bytes(payload)
         task = launch.task
@@ -3096,6 +3892,9 @@ def _validate_generation_receipt_v1(
         or receipt.d2_replay_wire_sha256 != d2_replay.wire_sha256
         or receipt.d3_replay_sha256 != d3_replay.config_sha256
         or receipt.d3_replay_wire_sha256 != d3_replay.wire_sha256
+        or receipt.runtime_set_sha256 != _runtime_set_sha256(wires)
+        or receipt.file_count != handoff.file_count
+        or receipt.total_bytes != handoff.total_bytes
     ):
         raise LinuxOciProviderError(
             "generation_failed", "source generation receipt is detached"
@@ -3199,42 +3998,74 @@ def run_discovery_worker_linux_oci_v1(
     run_wire = b""
     run: SourceDiscoveryRunV1 | None = None
     try:
-        with tempfile.TemporaryDirectory(prefix="vulngym-e3-runtime-") as temporary:
-            runtime_input_root = Path(temporary)
-            _write_runtime_input_directory_v1(runtime_input_root, wires)
-            materializer = _create_worker_container_v1(
-                runtime,
-                mode="materialize",
-                source_root=launch.tree_root,
-                runtime_input_root=runtime_input_root,
+        try:
+            temporary_context = tempfile.TemporaryDirectory(
+                prefix="vulngym-e3-input-"
             )
-            materializer_primary: BaseException | None = None
+        except OSError as error:
+            raise LinuxOciProviderError(
+                "runtime_input_failed", "materializer staging could not be allocated"
+            ) from error
+        staging_primary: BaseException | None = None
+        try:
+            inputs = _stage_materializer_inputs_v1(
+                Path(temporary_context.name), launch.tree_root, wires
+            )
+            input_primary: BaseException | None = None
             try:
-                materializer_step = _run_container_step_v1(materializer)
-                generation = _validate_generation_receipt_v1(
-                    materializer_step.stdout,
-                    request=request,
-                    launch=launch,
-                    d2_replay=d2_replay,
-                    d3_replay=d3_replay,
+                materializer = _create_worker_container_v1(
+                    runtime,
+                    mode="materialize",
+                    source_root=inputs.source_root,
+                    runtime_input_root=inputs.runtime_root,
                 )
-                execution_image = _commit_execution_image_v1(materializer)
+                materializer_primary: BaseException | None = None
+                try:
+                    materializer_step = _run_container_step_v1(materializer)
+                    _verify_materializer_inputs_v1(inputs, wires)
+                    generation = _validate_generation_receipt_v1(
+                        materializer_step.stdout,
+                        request=request,
+                        launch=launch,
+                        handoff=inputs.handoff,
+                        wires=wires,
+                        d2_replay=d2_replay,
+                        d3_replay=d3_replay,
+                    )
+                    execution_image = _commit_execution_image_v1(materializer)
+                except BaseException as error:
+                    materializer_primary = error
+                try:
+                    _remove_worker_container_v1(materializer)
+                except BaseException as cleanup_error:
+                    raise LinuxOciProviderError(
+                        "cleanup_uncertain",
+                        "materializer container cleanup did not close",
+                        runtime_uncertain=True,
+                    ) from (
+                        materializer_primary
+                        if materializer_primary is not None
+                        else cleanup_error
+                    )
+                if materializer_primary is not None:
+                    raise materializer_primary
             except BaseException as error:
-                materializer_primary = error
+                input_primary = error
             try:
-                _remove_worker_container_v1(materializer)
+                _restore_materializer_input_permissions_v1(inputs)
             except BaseException as cleanup_error:
                 raise LinuxOciProviderError(
                     "cleanup_uncertain",
-                    "materializer container cleanup did not close",
+                    "materializer input cleanup did not close",
                     runtime_uncertain=True,
                 ) from (
-                    materializer_primary
-                    if materializer_primary is not None
-                    else cleanup_error
+                    input_primary if input_primary is not None else cleanup_error
                 )
-            if materializer_primary is not None:
-                raise materializer_primary
+            if input_primary is not None:
+                raise input_primary
+        except BaseException as error:
+            staging_primary = error
+        _close_materializer_staging_v1(temporary_context, staging_primary)
         if execution_image is None:
             raise LinuxOciProviderError(
                 "provider_failed", "derived execution image is unavailable"

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -112,6 +114,18 @@ class LinuxOciIntegrationTests(unittest.TestCase):
                 attestation_key=key,
                 expected_key_id=key_id,
             )
+            source_before = self._tree_observation(snapshot_root / "tree")
+            if os.name == "posix":
+                self.assertEqual(
+                    stat.S_IMODE(os.lstat(snapshot_root / "tree").st_mode),
+                    0o700,
+                )
+                self.assertEqual(
+                    stat.S_IMODE(
+                        os.lstat(snapshot_root / "tree" / "app.py").st_mode
+                    ),
+                    0o600,
+                )
             d2_replay = OciReplayConfigV1(
                 task_id=task_id, role="d2", responses=()
             )
@@ -172,6 +186,9 @@ class LinuxOciIntegrationTests(unittest.TestCase):
                 d2_replay=d2_replay,
                 d3_replay=d3_replay,
             )
+            self.assertEqual(
+                self._tree_observation(snapshot_root / "tree"), source_before
+            )
             claimed = completion._claim_for_plan(task_plan)
             evidence = claimed.runtime_evidence
             self.assertEqual(claimed.run.task, task)
@@ -193,6 +210,29 @@ class LinuxOciIntegrationTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
             )
             self.assertNotEqual(removed_image.returncode, 0)
+
+    @staticmethod
+    def _tree_observation(root: Path) -> tuple[tuple[object, ...], ...]:
+        records: list[tuple[object, ...]] = []
+        for path in (root, *sorted(root.rglob("*"))):
+            value = os.lstat(path)
+            records.append(
+                (
+                    "." if path == root else path.relative_to(root).as_posix(),
+                    value.st_dev,
+                    value.st_ino,
+                    value.st_size,
+                    stat.S_IMODE(value.st_mode),
+                    getattr(value, "st_mtime_ns", None),
+                    getattr(value, "st_ctime_ns", None),
+                    (
+                        hashlib.sha256(path.read_bytes()).hexdigest()
+                        if stat.S_ISREG(value.st_mode)
+                        else None
+                    ),
+                )
+            )
+        return tuple(records)
 
     @staticmethod
     def _git(root: Path, *arguments: str) -> subprocess.CompletedProcess[str]:

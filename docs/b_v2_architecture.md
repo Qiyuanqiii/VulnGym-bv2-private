@@ -330,9 +330,14 @@ Linux daemon 身份、精确基础镜像 ID 与整份 execution policy。任务�
 wall time 与完整进程树：Linux 使用独立 process group，Windows 在进程恢复执行前先加入
 kill-on-close Job Object。
 
-交接不使用普通 named volume。materializer 以非 root 身份、断网、drop-all capabilities、
-no-new-privileges 和固定资源上限启动，只把一题 sealed tree 与四份 runtime wire 递归只读
-挂载到 `/input-*`，并将规范化 generation 写入自身唯一允许变化的 `/vulngym` 容器层。
+交接不使用普通 named volume。evaluator 不直接修改或挂载原始 0700/0600 sealed tree，而是
+在 evaluator 独占的 0700 父目录中，以有界流式复制、逐级 no-follow/openat、完整 identity、
+SHA-256 和 handoff 清单校验生成一次性输入；仅把子目录/文件降为 0555/0444 供固定非 root
+UID 读取。materializer 以非 root 身份、断网、drop-all capabilities、no-new-privileges 和
+固定资源上限启动，只把该 source 副本与四份 runtime wire 副本递归只读挂载到 `/input-*`，
+并将规范化 generation 写入自身唯一允许变化的 `/vulngym` 容器层。materializer 退出后、
+receipt 校验和派生镜像提交前，evaluator 再次核对 staging identity/内容与原始 sealed tree；
+任何漂移或无法确认的权限恢复/清理都 fail closed。
 退出后 evaluator 要求 rootfs diff 只包含该 generation，随后以固定 argv、无 tag 的方式把
 停止容器提交为带唯一所有权 label 的内容寻址派生镜像，并核对其基础 RootFS layer 前缀、
 唯一新增 layer、Config 与精确 image ID。execute 容器从该派生 ID 启动，不挂载 source、
@@ -356,8 +361,9 @@ execute create/inspect/diff、资源上限、run wire、退出状态和 cleanup�
 若未来允许第三方插件进入 evaluator 进程，必须先把 provider 移到独立进程/服务并采用可
 验证的签名或认证通道，不能把 Python 私有名称或 token 当作进程内安全边界。
 
-Docker Desktop 仅用于开发烟测。正式发布门禁仍须在专用 native Linux runner 上使用独占
-daemon/socket，验证 cgroup/namespace/seccomp 与异常清理路径。E4 还需实现 50/20 批次
+Docker Desktop 仅用于可信单用户开发烟测；Windows `chmod` 不被视为 DACL 隔离证明。
+正式发布门禁仍须在专用 native Linux runner 上使用独占 daemon/socket，验证
+cgroup/namespace/seccomp、POSIX staging 权限与异常清理路径。E4 还需实现 50/20 批次
 调度、逐题失败隔离、固定批次配置/索引、train aggregate 与 blind-test projection 的完整
 运行及发布收据；在该门禁完成前，仓库不声称通过最终 50+20 验收。
 
@@ -395,7 +401,7 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - D0/D1 已完成严格 source-discovery 契约、固定 64 finding 权限、确定性投影，以及只在单题 `BoundSealedTree` 上工作的有界工具面；宿主机路径、密钥、Git 历史、shell 与网络均不进入该能力面。
 - D2/D3/D4 已完成 source-only 多候选 Producer、重新获取独立 tree/budget/context 的四准则 Reviewer、惰性分支编排与严格适配。D2 draft 上限为 32；D2 defer 不启动 D3；只有精确绑定的 D3 `accept` 才进入 D0 `emit`。
 - discovery replay 已以固定三文件结果包闭合 D2/D3 与可重算 D4；提交前失败保守留下私有 staging，提交后不确定统一以 `publication_uncertain` 交由 digest 复核。`project-discovery-train|test` 已接入 harness：先完整 D0(64) 再稳定截取，test 使用独立读取面且不调用训练汇总。
-- E3 已完成固定离线 replay 的 Linux OCI 单题竖切：生成内容通过 materializer 容器层提交为内容寻址派生镜像，execute 无 source/runtime/volume mount、只读 rootfs、断网、非 root、drop-all capabilities、no-new-privileges、seccomp 与固定资源上限；provider 对 create/inspect/terminal/diff/image/cleanup 全链路签发 success-only evidence，再由 supervisor 内嵌进 receipt。Docker Desktop 的真实单题烟测不能替代 native Linux 发布门禁。
+- E3 已完成固定离线 replay 的 Linux OCI 单题竖切：原始 sealed tree 保持 0700/0600 不变，evaluator 在私有父目录中生成并双向核验只读 source/runtime staging；生成内容通过 materializer 容器层提交为内容寻址派生镜像，execute 无 source/runtime/volume mount、只读 rootfs、断网、非 root、drop-all capabilities、no-new-privileges、seccomp 与固定资源上限；provider 对 create/inspect/terminal/diff/image/cleanup 全链路签发 success-only evidence，再由 supervisor 内嵌进 receipt。Docker Desktop 的真实单题烟测不能替代 native Linux 发布门禁。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立。source-discovery 候选已由 D3 独立复核；传统 Entry 链路中模型提出的标题、分类和其他未覆盖语义仍受严格输出契约约束，且不能冒充完整 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
