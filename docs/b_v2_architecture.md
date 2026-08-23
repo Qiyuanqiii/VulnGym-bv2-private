@@ -207,8 +207,9 @@ finding，对等价端点稳定去重；每题默认 Top 64，`--top-k` 硬上�
 阶段 A/B 解决公开离线数据契约与结果投影，阶段 C 解决源码交付边界。原有
 `LocalStructuredT2Producer` 仍是依赖公告、fix commit 与显式 source hints 的传统 Entry
 链路；D0–D4 则以独立的 source-discovery producer/reviewer 实现纯源码多候选路径。
-尚未跨过的最终验收前置条件是 **E：隔离 50/20 运行**——在逐题进程隔离、断网、严格
-只读挂载和 gold 物理隔离的环境中执行，再由独立 evaluator 汇总验收。
+最终验收前置条件 **E：隔离 50/20 运行** 已完成 E3 单题 OCI 竖切，尚缺 E4 批次调度与
+native Linux 50/20 门禁——必须在逐题进程隔离、断网、严格只读输入和 gold 物理隔离的
+环境中执行，再由独立 evaluator 汇总验收。
 
 ### 2.6 Sealed source snapshot（阶段 C）
 
@@ -318,6 +319,48 @@ benchmark harness 的 discovery 路径会先校验所有已索引任务包，再
 总量/recall 的 aggregate；测试路径使用独立 test reader，不加载公开训练答案、不调用训练
 aggregate，也不输出分数或 `aggregate.json`。
 
+### 2.8 E3 固定 Linux OCI 单题运行闭环
+
+E3 已实现一条固定的离线 replay 单题竖切，用来证明 D0–D4 能在真实 Linux OCI 边界内
+运行；它还不是 50/20 批次调度器。受信 evaluator 先绑定 Docker CLI 的实际文件字节、
+Linux daemon 身份、精确基础镜像 ID 与整份 execution policy。任务数据不能选择镜像、
+命令、entrypoint、mount 目的地、backend/provider 或资源参数。容器命令只有
+`materialize` 与 `execute` 两种固定形式，worker 只使用标准库和仓库内固定模块，模型响应
+来自显式绑定的离线 replay 配置。宿主侧 Docker CLI transport 同时限制 stdout/stderr、
+wall time 与完整进程树：Linux 使用独立 process group，Windows 在进程恢复执行前先加入
+kill-on-close Job Object。
+
+交接不使用普通 named volume。materializer 以非 root 身份、断网、drop-all capabilities、
+no-new-privileges 和固定资源上限启动，只把一题 sealed tree 与四份 runtime wire 递归只读
+挂载到 `/input-*`，并将规范化 generation 写入自身唯一允许变化的 `/vulngym` 容器层。
+退出后 evaluator 要求 rootfs diff 只包含该 generation，随后以固定 argv、无 tag 的方式把
+停止容器提交为带唯一所有权 label 的内容寻址派生镜像，并核对其基础 RootFS layer 前缀、
+唯一新增 layer、Config 与精确 image ID。execute 容器从该派生 ID 启动，不挂载 source、
+runtime 或其他数据卷；两个 bind 目标只保留为空的、非挂载点目录。rootfs 全只读，
+`/tmp` 是 `rw,nosuid,nodev,noexec` tmpfs。
+因此宿主机原始 tree/runtime 即使随后变化，也不会改变 worker 实际读取的 generation。
+
+execute 启动前后都严格检查完整固定配置、无附加网络/设备/权限面和 clean terminal state；
+worker 还从 `/proc` 复核 uid/gid、PID namespace、capabilities、no-new-privileges、seccomp、
+rootfs/tmpfs mount 属性及固定字面地址不可连接，并对 source/runtime/rootfs 做实际写失败
+探针。execute 的 image filesystem diff 必须真正为空。完成顺序固定为删除 execute
+container、materializer container、派生 image 并逐项确认；任何创建/提交/删除身份不确定都
+返回 `cleanup_uncertain`，不能签发成功证据。
+
+`RuntimeEvidenceV1` 是 success-only canonical 契约：同时绑定基础镜像、派生 generation
+镜像、Docker server/CLI、execution plan/policy、handoff、materializer create/inspect/diff、
+execute create/inspect/diff、资源上限、run wire、退出状态和 cleanup。receipt 内嵌整份证据
+而不只携带调用方给出的摘要；supervisor 只接受一次性 provider completion。哈希仍不是
+签名。evaluator Python 进程及其代码、专用 Docker daemon/socket、基础镜像和宿主内核属于
+受信计算基；拥有该 daemon 控制权者等价于 evaluator 管理员，不在同批次的不受信模型内。
+若未来允许第三方插件进入 evaluator 进程，必须先把 provider 移到独立进程/服务并采用可
+验证的签名或认证通道，不能把 Python 私有名称或 token 当作进程内安全边界。
+
+Docker Desktop 仅用于开发烟测。正式发布门禁仍须在专用 native Linux runner 上使用独占
+daemon/socket，验证 cgroup/namespace/seccomp 与异常清理路径。E4 还需实现 50/20 批次
+调度、逐题失败隔离、固定批次配置/索引、train aggregate 与 blind-test projection 的完整
+运行及发布收据；在该门禁完成前，仓库不声称通过最终 50+20 验收。
+
 ## 3. 交付边界与实施状态
 
 ### Standard 与 Bonus
@@ -326,7 +369,7 @@ B-v2 的 Standard 包含：T1 全核心字段三态、可读证据、多源与�
 
 Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归因、复杂 merge/backport、完整 taint 与自动发布。Standard 不建设第三个 Repair Agent、通用平台或远程 Artifact Store。
 
-### 当前已实现：传统闭环、隔离源码交付与 D0–D4 组件链路
+### 当前已实现：传统闭环、隔离源码交付、D0–D4 与 E3 单题竖切
 
 - 三份严格机器契约：Entry、Validation、Evidence Schema；`additionalProperties=false`，并有 `EvidenceItem`、`FieldValidation`、`ValidationReport` 可序列化模型。
 - `SchemaAdapter` 覆盖 15 个正式字段、额外/缺失字段、行范围、GHSA URL 与 `report_id` 一致性、ID 大写/去重/CVE-before-GHSA 排序及正式 T2 的 `verify=0`；它不会补造内容字段。
@@ -352,15 +395,17 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - D0/D1 已完成严格 source-discovery 契约、固定 64 finding 权限、确定性投影，以及只在单题 `BoundSealedTree` 上工作的有界工具面；宿主机路径、密钥、Git 历史、shell 与网络均不进入该能力面。
 - D2/D3/D4 已完成 source-only 多候选 Producer、重新获取独立 tree/budget/context 的四准则 Reviewer、惰性分支编排与严格适配。D2 draft 上限为 32；D2 defer 不启动 D3；只有精确绑定的 D3 `accept` 才进入 D0 `emit`。
 - discovery replay 已以固定三文件结果包闭合 D2/D3 与可重算 D4；提交前失败保守留下私有 staging，提交后不确定统一以 `publication_uncertain` 交由 digest 复核。`project-discovery-train|test` 已接入 harness：先完整 D0(64) 再稳定截取，test 使用独立读取面且不调用训练汇总。
+- E3 已完成固定离线 replay 的 Linux OCI 单题竖切：生成内容通过 materializer 容器层提交为内容寻址派生镜像，execute 无 source/runtime/volume mount、只读 rootfs、断网、非 root、drop-all capabilities、no-new-privileges、seccomp 与固定资源上限；provider 对 create/inspect/terminal/diff/image/cleanup 全链路签发 success-only evidence，再由 supervisor 内嵌进 receipt。Docker Desktop 的真实单题烟测不能替代 native Linux 发布门禁。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立。source-discovery 候选已由 D3 独立复核；传统 Entry 链路中模型提出的标题、分类和其他未覆盖语义仍受严格输出契约约束，且不能冒充完整 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：阶段 E 的逐题进程/网络/挂载隔离与 50/20 全量实跑；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C 与 D0–D4 组件均已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
+尚未完成：阶段 E4 的 50/20 调度、逐题异常隔离与 native Linux 全量发布门禁；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C、D0–D4 与 E3 单题竖切均已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
 
 ### 下一阶段
 
-下一阶段直接进入 E：把当前进程内 D0–D4 链路放入逐题独立进程，只读挂载一题 sealed
-tree 与一条无答案 task，限制输出并关闭网络；Producer 退出后由独立 evaluator 校验结果
-包、执行 train 汇总或 blind test 投影，并在 gold 物理隔离的环境中完成 50/20 端到端实跑。
+下一阶段直接进入 E4：以 E3 的固定单题 provider 为唯一执行面，增加确定性的 50/20 批次
+调度、逐题失败隔离、固定配置/索引和 native Linux mandatory gate；Producer 退出后由独立
+evaluator 校验结果包、执行 train 汇总或 blind test 投影，并在 gold 物理隔离的环境中完成
+50/20 端到端实跑。
 同时补 closed-loop replay 的独立 verify CLI、可显式选择的在线模型 backend 和全字段
 `required_check` verifier；完整 trace、AST/数据流与更多语言增强继续作为后续能力。

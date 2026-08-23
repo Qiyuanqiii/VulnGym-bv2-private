@@ -41,3 +41,45 @@ jobs:
 
       - name: Compile Python sources
         run: python -m compileall -q examples scripts tests vulngym_agent
+
+  linux-oci-integration:
+    name: Native Linux OCI single-task gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements-dev.txt
+
+      - name: Pull pinned base image
+        run: docker pull python@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1
+
+      - name: Build fixed evaluator image without build network
+        run: docker build --pull=false --network=none --file containers/evaluator/Containerfile --tag vulngym-e3-worker:ci .
+
+      - name: Run native Linux OCI integration
+        shell: bash
+        run: |
+          export VULNGYM_E3_DOCKER_INTEGRATION=1
+          export VULNGYM_E3_REQUIRE_NATIVE_LINUX=1
+          export VULNGYM_E3_WORKER_IMAGE_ID="$(docker image inspect --format '{{.Id}}' vulngym-e3-worker:ci)"
+          export VULNGYM_E3_DOCKER_EXECUTABLE="$(command -v docker)"
+          python -B -m unittest tests.test_linux_oci_integration -v
+
+      - name: Require complete OCI resource cleanup
+        if: always()
+        shell: bash
+        run: |
+          test -z "$(docker container ls --all --quiet --filter 'name=^/vulngym-e3-')"
+          test -z "$(docker container ls --all --quiet --filter label=vulngym.e3.container)"
+          test -z "$(docker image ls --quiet --no-trunc --filter label=vulngym.e3.execution)"
