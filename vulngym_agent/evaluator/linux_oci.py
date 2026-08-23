@@ -1387,29 +1387,35 @@ def normalized_container_inspect_v1(
         raise LinuxOciProviderError(
             "invalid_runtime", "pinned image environment is invalid"
         )
-    if (
-        config.get("Image") != expected_image_id
-        or config.get("User") != expected_user
-        or config.get("Hostname") != expected_hostname
-        or config.get("WorkingDir") != "/tmp"
-        or config.get("Entrypoint")
-        != [OCI_PYTHON, "-I", "-B", "-m", OCI_WORKER_MODULE]
-        or config.get("Cmd") != [mode]
-        or config.get("Labels") != expected_labels
-        or config.get("Env") != expected_env
-        or config.get("AttachStdin") is not False
-        or config.get("AttachStdout") is not True
-        or config.get("AttachStderr") is not True
-        or config.get("Tty") is not False
-        or config.get("OpenStdin") is not False
-        or config.get("StdinOnce") is not False
-        or config.get("Healthcheck") != {"Test": ["NONE"]}
-        or config.get("Volumes") not in (None, {})
-        or config.get("ExposedPorts") not in (None, {})
-    ):
-        raise LinuxOciProviderError(
-            "invalid_container", "container command or image configuration drifted"
-        )
+    config_requirements = (
+        ("image", config.get("Image") == expected_image_id),
+        ("user", config.get("User") == expected_user),
+        ("hostname", config.get("Hostname") == expected_hostname),
+        ("working_directory", config.get("WorkingDir") == "/tmp"),
+        (
+            "entrypoint",
+            config.get("Entrypoint")
+            == [OCI_PYTHON, "-I", "-B", "-m", OCI_WORKER_MODULE],
+        ),
+        ("command", config.get("Cmd") == [mode]),
+        ("labels", config.get("Labels") == expected_labels),
+        ("environment", config.get("Env") == expected_env),
+        ("attach_stdin", config.get("AttachStdin") is False),
+        ("attach_stdout", config.get("AttachStdout") is True),
+        ("attach_stderr", config.get("AttachStderr") is True),
+        ("tty", config.get("Tty") is False),
+        ("open_stdin", config.get("OpenStdin") is False),
+        ("stdin_once", config.get("StdinOnce") is False),
+        ("healthcheck", config.get("Healthcheck") == {"Test": ["NONE"]}),
+        ("volumes", config.get("Volumes") in (None, {})),
+        ("exposed_ports", config.get("ExposedPorts") in (None, {})),
+    )
+    for field, valid in config_requirements:
+        if not valid:
+            raise LinuxOciProviderError(
+                "invalid_container",
+                f"container {field} configuration drifted",
+            )
     security_options = host.get("SecurityOpt")
     cap_drop = host.get("CapDrop")
     restart_policy = host.get("RestartPolicy")

@@ -413,6 +413,21 @@ class LinuxOciTests(unittest.TestCase):
             )
         self.assertEqual(caught.exception.code, "invalid_container")
 
+        config_drifted = self._inspect(runtime)
+        config_drifted["Config"]["Hostname"] = "unexpected"  # type: ignore[index]
+        with self.assertRaises(linux_oci.LinuxOciProviderError) as captured:
+            linux_oci.normalized_container_inspect_v1(
+                _json(config_drifted),
+                runtime=runtime,
+                container_name=name,
+                mode="execute",
+                execution_image_id=execution_image_id,
+                execution_image_label=execution_label,
+            )
+        self.assertEqual(
+            str(captured.exception), "container hostname configuration drifted"
+        )
+
         drifts = (
             ("CapAdd", ["SYS_ADMIN"]),
             ("GroupAdd", ["0"]),
