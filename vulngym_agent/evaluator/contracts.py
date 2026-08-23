@@ -32,6 +32,10 @@ from vulngym_agent.benchmark.snapshot_batch import (
     SnapshotBatchTask,
 )
 from vulngym_agent.benchmark.worker_handoff import WorkerHandoffV1
+from vulngym_agent.evaluator.runtime_evidence import (
+    RuntimeEvidenceError,
+    RuntimeEvidenceV1,
+)
 
 
 EVALUATOR_CONTRACT_VERSION: Final[int] = 1
@@ -1421,7 +1425,7 @@ class DiscoveryTaskExecutionReceiptV1:
     discovery_result_sha256: str
     dataset_sha256: str
     artifact_index_sha256: str
-    runtime_evidence_sha256: str
+    runtime_evidence: RuntimeEvidenceV1
     status: str = "succeeded"
     contract_version: int = EVALUATOR_CONTRACT_VERSION
     kind: str = DISCOVERY_TASK_EXECUTION_RECEIPT_KIND
@@ -1451,9 +1455,35 @@ class DiscoveryTaskExecutionReceiptV1:
             (self.discovery_result_sha256, "discovery_result_sha256"),
             (self.dataset_sha256, "dataset_sha256"),
             (self.artifact_index_sha256, "artifact_index_sha256"),
-            (self.runtime_evidence_sha256, "runtime_evidence_sha256"),
         ):
             _require_sha256(value, name=name)
+        if type(self.runtime_evidence) is not RuntimeEvidenceV1:
+            raise EvaluatorContractError(
+                "invalid_argument", "runtime evidence must have an exact type"
+            )
+        try:
+            evidence_wire = self.runtime_evidence.to_bytes()
+            evidence = RuntimeEvidenceV1.from_bytes(
+                evidence_wire,
+                expected_evidence_sha256=self.runtime_evidence.evidence_sha256,
+                expected_wire_sha256=hashlib.sha256(evidence_wire).hexdigest(),
+            )
+        except (AttributeError, RuntimeEvidenceError, TypeError, ValueError):
+            raise EvaluatorContractError(
+                "invalid_binding", "runtime evidence did not pass strict normalization"
+            ) from None
+        if (
+            evidence.task_plan_sha256 != self.task_plan_sha256
+            or evidence.execution_policy_sha256 != self.execution_policy_sha256
+            or evidence.task_id != self.task_id
+            or evidence.snapshot_id != self.snapshot_id
+            or evidence.run_sha256 != self.run_sha256
+            or evidence.run_wire_sha256 != self.run_wire_sha256
+        ):
+            raise EvaluatorContractError(
+                "invalid_binding", "runtime evidence is detached from the task receipt"
+            )
+        object.__setattr__(self, "runtime_evidence", evidence)
         object.__setattr__(
             self,
             "receipt_sha256",
@@ -1473,7 +1503,8 @@ class DiscoveryTaskExecutionReceiptV1:
             "kind": self.kind,
             "run_sha256": self.run_sha256,
             "run_wire_sha256": self.run_wire_sha256,
-            "runtime_evidence_sha256": self.runtime_evidence_sha256,
+            "runtime_evidence": self.runtime_evidence.to_dict(),
+            "runtime_evidence_sha256": self.runtime_evidence.evidence_sha256,
             "snapshot_id": self.snapshot_id,
             "status": self.status,
             "task_id": self.task_id,
@@ -1499,6 +1530,10 @@ class DiscoveryTaskExecutionReceiptV1:
     def wire_sha256(self) -> str:
         return hashlib.sha256(self.to_bytes()).hexdigest()
 
+    @property
+    def runtime_evidence_sha256(self) -> str:
+        return self.runtime_evidence.evidence_sha256
+
     @classmethod
     def from_bytes(
         cls,
@@ -1519,6 +1554,7 @@ class DiscoveryTaskExecutionReceiptV1:
                 "receipt_sha256",
                 "run_sha256",
                 "run_wire_sha256",
+                "runtime_evidence",
                 "runtime_evidence_sha256",
                 "snapshot_id",
                 "status",
@@ -1537,6 +1573,29 @@ class DiscoveryTaskExecutionReceiptV1:
             raise EvaluatorContractError(
                 "digest_mismatch", "task execution receipt does not match its pin"
             )
+        raw_evidence = value["runtime_evidence"]
+        evidence_payload = _nested_payload(raw_evidence, name="runtime evidence")
+        if type(raw_evidence) is not dict:
+            raise EvaluatorContractError(
+                "invalid_contract", "runtime evidence must be an object"
+            )
+        try:
+            evidence = RuntimeEvidenceV1.from_bytes(
+                evidence_payload,
+                expected_evidence_sha256=_require_sha256(
+                    raw_evidence.get("evidence_sha256"),
+                    name="runtime evidence digest",
+                ),
+                expected_wire_sha256=hashlib.sha256(evidence_payload).hexdigest(),
+            )
+        except RuntimeEvidenceError:
+            raise EvaluatorContractError(
+                "invalid_contract", "runtime evidence did not pass strict parsing"
+            ) from None
+        if value["runtime_evidence_sha256"] != evidence.evidence_sha256:
+            raise EvaluatorContractError(
+                "invalid_binding", "runtime evidence digest is detached"
+            )
         result = cls(
             task_plan_sha256=value["task_plan_sha256"],
             execution_policy_sha256=value["execution_policy_sha256"],
@@ -1547,7 +1606,7 @@ class DiscoveryTaskExecutionReceiptV1:
             discovery_result_sha256=value["discovery_result_sha256"],
             dataset_sha256=value["dataset_sha256"],
             artifact_index_sha256=value["artifact_index_sha256"],
-            runtime_evidence_sha256=value["runtime_evidence_sha256"],
+            runtime_evidence=evidence,
             status=value["status"],
             contract_version=value["contract_version"],
             kind=value["kind"],
@@ -1634,13 +1693,32 @@ class DiscoveryBatchExecutionReceiptV1:
                 "invalid_binding", "batch receipt pre/post or membership is invalid"
             )
         for task_plan, receipt in zip(plan.tasks, tasks, strict=True):
+            evidence = receipt.runtime_evidence
+            resources = evidence.resources
+            policy = plan.execution_policy
             if (
                 receipt.task_plan_sha256 != task_plan.plan_sha256
                 or receipt.execution_policy_sha256
-                != plan.execution_policy.policy_sha256
+                != policy.policy_sha256
                 or receipt.task_id != task_plan.task_id
                 or receipt.snapshot_id != task_plan.snapshot_id
                 or receipt.artifact_index_sha256 != self.artifact_index_sha256
+                or evidence.snapshot_manifest_sha256
+                != task_plan.snapshot_manifest_sha256
+                or evidence.snapshot_content_root
+                != task_plan.snapshot_content_root
+                or evidence.handoff_sha256 != task_plan.handoff_sha256
+                or evidence.handoff_wire_sha256
+                != task_plan.handoff_wire_sha256
+                or evidence.runtime_image_id != policy.runtime_image_id
+                or resources.wall_time_seconds != policy.wall_time_seconds
+                or resources.memory_bytes != policy.memory_bytes
+                or resources.cpu_millis != policy.cpu_millis
+                or resources.pids_limit != policy.pids_limit
+                or resources.open_files_limit != policy.open_files_limit
+                or resources.stdout_max_bytes != policy.stdout_max_bytes
+                or resources.stderr_max_bytes != policy.stderr_max_bytes
+                or resources.tmpfs_bytes != policy.tmpfs_bytes
             ):
                 raise EvaluatorContractError(
                     "invalid_binding", "batch receipt task order or identity is invalid"

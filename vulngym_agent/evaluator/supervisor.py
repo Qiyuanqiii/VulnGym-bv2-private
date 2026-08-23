@@ -70,6 +70,14 @@ from vulngym_agent.evaluator.worker import (
     DEFAULT_D2_WORKER_BUDGET_LIMITS,
     DEFAULT_D3_WORKER_BUDGET_LIMITS,
 )
+from vulngym_agent.evaluator.runtime_evidence import (
+    RuntimeEvidenceError,
+    RuntimeEvidenceV1,
+)
+from vulngym_agent.evaluator.worker_completion import (
+    CompletedWorkerExecutionV1,
+    WorkerCompletionError,
+)
 from vulngym_agent.orchestrator.budget import Limits
 from vulngym_agent.orchestrator.discovery_pipeline import (
     SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES,
@@ -428,7 +436,7 @@ class PendingTaskExecutionV1:
         "__run",
         "__run_wire",
         "__run_wire_sha256",
-        "__runtime_evidence_sha256",
+        "__runtime_evidence",
         "__task_plan",
     )
 
@@ -439,7 +447,7 @@ class PendingTaskExecutionV1:
         task_plan: DiscoveryTaskExecutionPlanV1,
         run: SourceDiscoveryRunV1,
         run_wire: bytes,
-        runtime_evidence_sha256: str,
+        runtime_evidence: RuntimeEvidenceV1,
     ) -> None:
         if token is not _SESSION_TOKEN:
             raise TypeError("pending execution values are supervisor-created")
@@ -450,7 +458,40 @@ class PendingTaskExecutionV1:
         self.__discovery_result_sha256 = hashlib.sha256(
             _canonical_json(run.discovery_result.to_dict())
         ).hexdigest()
-        self.__runtime_evidence_sha256 = runtime_evidence_sha256
+        if type(runtime_evidence) is not RuntimeEvidenceV1:
+            raise EvaluatorSupervisorError(
+                "invalid_output", "runtime evidence has an invalid exact type"
+            )
+        evidence_wire = runtime_evidence.to_bytes()
+        try:
+            evidence = RuntimeEvidenceV1.from_bytes(
+                evidence_wire,
+                expected_evidence_sha256=runtime_evidence.evidence_sha256,
+                expected_wire_sha256=hashlib.sha256(evidence_wire).hexdigest(),
+            )
+        except (AttributeError, RuntimeEvidenceError, TypeError, ValueError):
+            raise EvaluatorSupervisorError(
+                "invalid_output", "runtime evidence did not pass strict normalization"
+            ) from None
+        if (
+            evidence.task_plan_sha256 != task_plan.plan_sha256
+            or evidence.execution_policy_sha256
+            != task_plan.execution_policy_sha256
+            or evidence.task_id != task_plan.task_id
+            or evidence.snapshot_id != task_plan.snapshot_id
+            or evidence.snapshot_manifest_sha256
+            != task_plan.snapshot_manifest_sha256
+            or evidence.snapshot_content_root != task_plan.snapshot_content_root
+            or evidence.handoff_sha256 != task_plan.handoff_sha256
+            or evidence.handoff_wire_sha256 != task_plan.handoff_wire_sha256
+            or evidence.run_sha256 != run.run_sha256
+            or evidence.run_wire_sha256 != hashlib.sha256(run_wire).hexdigest()
+            or evidence.run_wire_size != len(run_wire)
+        ):
+            raise EvaluatorSupervisorError(
+                "invalid_output", "runtime evidence is detached from worker output"
+            )
+        self.__runtime_evidence = evidence
 
     @property
     def task_plan(self) -> DiscoveryTaskExecutionPlanV1:
@@ -481,7 +522,16 @@ class PendingTaskExecutionV1:
 
     @property
     def runtime_evidence_sha256(self) -> str:
-        return self.__runtime_evidence_sha256
+        return self.__runtime_evidence.evidence_sha256
+
+    @property
+    def runtime_evidence(self) -> RuntimeEvidenceV1:
+        wire = self.__runtime_evidence.to_bytes()
+        return RuntimeEvidenceV1.from_bytes(
+            wire,
+            expected_evidence_sha256=self.__runtime_evidence.evidence_sha256,
+            expected_wire_sha256=hashlib.sha256(wire).hexdigest(),
+        )
 
     def __reduce__(self):
         raise TypeError("pending execution values are not serializable")
@@ -533,7 +583,7 @@ class PostVerifiedDiscoveryExecutionV1:
                 task_plan=item.task_plan,
                 run=item.run,
                 run_wire=item.run_wire,
-                runtime_evidence_sha256=item.runtime_evidence_sha256,
+                runtime_evidence=item.runtime_evidence,
             )
             for item in self.__pending
         )
@@ -678,35 +728,35 @@ class DiscoveryExecutionSession:
 
     def accept_worker_output(
         self,
-        task_id: str,
-        run_wire: bytes,
-        *,
-        runtime_evidence_sha256: str,
+        completion: CompletedWorkerExecutionV1,
     ) -> PendingTaskExecutionV1:
         with self.__lock:
             self._require_prepared()
-            if (
-                type(task_id) is not str
-                or type(run_wire) is not bytes
-                or not run_wire
-                or len(run_wire) > SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES
-                or type(runtime_evidence_sha256) is not str
-                or _SHA256_RE.fullmatch(runtime_evidence_sha256) is None
-            ):
+            if type(completion) is not CompletedWorkerExecutionV1:
                 self._fail()
                 raise EvaluatorSupervisorError(
-                    "invalid_argument", "worker output envelope is invalid"
-                )
-            if task_id in self.__pending:
-                self._fail()
-                raise EvaluatorSupervisorError(
-                    "duplicate_output", "worker output repeats a task"
+                    "invalid_argument", "worker completion envelope is invalid"
                 )
             try:
+                task_id = completion.task_id
+                if task_id in self.__pending:
+                    raise EvaluatorSupervisorError(
+                        "duplicate_output", "worker output repeats a task"
+                    )
                 launch = self.__launches.get(task_id)
                 if launch is None:
                     raise EvaluatorSupervisorError(
                         "unknown_task", "worker output task is not in the plan"
+                    )
+                claimed = completion._claim_for_plan(launch.task_plan)
+                run_wire = claimed.run_wire
+                if (
+                    type(run_wire) is not bytes
+                    or not run_wire
+                    or len(run_wire) > SOURCE_DISCOVERY_RUN_MAX_WIRE_BYTES
+                ):
+                    raise EvaluatorSupervisorError(
+                        "invalid_output", "worker run wire has an invalid size"
                     )
                 run = SourceDiscoveryRunV1.from_wire(run_wire)
                 if run.to_wire() != run_wire or run.task != launch.task:
@@ -719,13 +769,18 @@ class DiscoveryExecutionSession:
                     task_plan=launch.task_plan,
                     run=run,
                     run_wire=run_wire,
-                    runtime_evidence_sha256=runtime_evidence_sha256,
+                    runtime_evidence=claimed.runtime_evidence,
                 )
                 self.__pending[task_id] = pending
                 return pending
             except EvaluatorSupervisorError:
                 self._fail()
                 raise
+            except WorkerCompletionError as error:
+                self._fail()
+                raise EvaluatorSupervisorError(
+                    "invalid_output", "worker completion did not bind to the plan"
+                ) from error
             except (AttributeError, KeyError, RecursionError, RuntimeError, TypeError, ValueError):
                 self._fail()
                 raise EvaluatorSupervisorError(
@@ -955,17 +1010,13 @@ def prepare_discovery_execution_plan_v1(
 def accept_discovery_worker_output_v1(
     session: DiscoveryExecutionSession,
     *,
-    task_id: str,
-    run_wire: bytes,
-    runtime_evidence_sha256: str,
+    completion: CompletedWorkerExecutionV1,
 ) -> PendingTaskExecutionV1:
     if type(session) is not DiscoveryExecutionSession:
         raise EvaluatorSupervisorError(
             "invalid_argument", "session must have an exact supervisor type"
         )
-    return session.accept_worker_output(
-        task_id, run_wire, runtime_evidence_sha256=runtime_evidence_sha256
-    )
+    return session.accept_worker_output(completion)
 
 
 def postverify_discovery_execution_v1(
@@ -1447,7 +1498,7 @@ def publish_postverified_discovery_execution_v1(
                 discovery_result_sha256=task_pending.discovery_result_sha256,
                 dataset_sha256=verified.dataset_sha256,
                 artifact_index_sha256=index_sha256,
-                runtime_evidence_sha256=task_pending.runtime_evidence_sha256,
+                runtime_evidence=task_pending.runtime_evidence,
             )
             for task_pending, verified in zip(
                 pending, verified_results, strict=True

@@ -1,0 +1,15 @@
+FROM python@sha256:00faa2debb87529f9f0764e9491d8ba400a3678976616c3bd7cb193745ac20d1
+
+LABEL org.opencontainers.image.title="VulnGym isolated evaluator worker"
+LABEL org.opencontainers.image.version="source-discovery-isolated-worker-v1"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONHASHSEED=0 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /opt/vulngym
+COPY vulngym_agent /opt/vulngym/vulngym_agent
+RUN python3 -c "import os,pathlib,site; pathlib.Path(site.getsitepackages()[0], 'vulngym-agent.pth').write_text('/opt/vulngym\n', encoding='utf-8'); pathlib.Path('/vulngym').mkdir(); os.chown('/vulngym', 65532, 65532); os.chmod('/vulngym', 0o700)"
+
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/python3", "-I", "-B", "-m", "vulngym_agent.evaluator.oci_worker_entry"]

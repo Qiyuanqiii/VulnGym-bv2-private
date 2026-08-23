@@ -1,0 +1,5 @@
+**
+!vulngym_agent/
+!vulngym_agent/**
+vulngym_agent/**/__pycache__/
+vulngym_agent/**/*.py[cod]

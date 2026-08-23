@@ -41,6 +41,16 @@ from vulngym_agent.evaluator.worker import (
     DEFAULT_D2_WORKER_BUDGET_LIMITS,
     DEFAULT_D3_WORKER_BUDGET_LIMITS,
 )
+from vulngym_agent.evaluator.runtime_evidence import (
+    DockerServerIdentityV1,
+    RuntimeEvidenceV1,
+    RuntimeIsolationV1,
+    RuntimeResourceLimitsV1,
+)
+from vulngym_agent.evaluator.worker_completion import (
+    WorkerCompletionError,
+    _issue_completed_worker_execution_v1,
+)
 from vulngym_agent.orchestrator.discovery_pipeline import SourceDiscoveryRunV1
 from vulngym_agent.benchmark.sealed_tree_access import (
     DEFAULT_SEALED_TREE_ACCESS_LIMITS,
@@ -208,6 +218,67 @@ class EvaluatorSupervisorTests(unittest.TestCase):
         discovery = project_discovery_run_v1(producer, None)
         return SourceDiscoveryRunV1(producer, None, discovery).to_wire()
 
+    def _completion_for(self, launch, run_wire: bytes, marker: int):
+        run = SourceDiscoveryRunV1.from_wire(run_wire)
+        task_plan = launch.task_plan
+        evidence = RuntimeEvidenceV1(
+            docker_server=DockerServerIdentityV1(
+                operating_system="linux",
+                architecture="amd64",
+                engine_version="29.6.2",
+                api_version="1.55",
+                docker_executable_sha256=_sha(marker + 1),
+                daemon_endpoint_sha256=_sha(marker + 14),
+                server_observation_sha256=_sha(marker + 15),
+            ),
+            isolation=RuntimeIsolationV1(),
+            resources=RuntimeResourceLimitsV1(
+                wall_time_seconds=self.execution_policy.wall_time_seconds,
+                memory_bytes=self.execution_policy.memory_bytes,
+                cpu_millis=self.execution_policy.cpu_millis,
+                pids_limit=self.execution_policy.pids_limit,
+                open_files_limit=self.execution_policy.open_files_limit,
+                stdout_max_bytes=self.execution_policy.stdout_max_bytes,
+                stderr_max_bytes=self.execution_policy.stderr_max_bytes,
+                tmpfs_bytes=self.execution_policy.tmpfs_bytes,
+            ),
+            runtime_image_id=self.execution_policy.runtime_image_id,
+            runtime_image_inspect_sha256=_sha(marker + 16),
+            execution_image_id="sha256:" + "b" * 64,
+            execution_image_inspect_sha256=_sha(marker + 8),
+            execution_policy_sha256=self.execution_policy.policy_sha256,
+            task_plan_sha256=task_plan.plan_sha256,
+            task_id=task_plan.task_id,
+            snapshot_id=task_plan.snapshot_id,
+            snapshot_manifest_sha256=task_plan.snapshot_manifest_sha256,
+            snapshot_content_root=task_plan.snapshot_content_root,
+            handoff_sha256=task_plan.handoff_sha256,
+            handoff_wire_sha256=task_plan.handoff_wire_sha256,
+            source_generation_sha256=_sha(marker + 2),
+            runtime_config_sha256=_sha(marker + 3),
+            materializer_container_create_spec_sha256=_sha(marker + 9),
+            materializer_container_pre_inspect_sha256=_sha(marker + 10),
+            materializer_container_post_inspect_sha256=_sha(marker + 11),
+            materializer_container_diff_sha256=_sha(marker + 12),
+            materializer_container_identity_sha256=_sha(marker + 13),
+            container_create_spec_sha256=_sha(marker + 4),
+            container_pre_inspect_sha256=_sha(marker + 5),
+            container_post_inspect_sha256=_sha(marker + 6),
+            container_identity_sha256=_sha(marker + 7),
+            run_sha256=run.run_sha256,
+            run_wire_sha256=hashlib.sha256(run_wire).hexdigest(),
+            run_wire_size=len(run_wire),
+            stderr_sha256=hashlib.sha256(b"").hexdigest(),
+            stderr_size=0,
+            exit_code=0,
+            timed_out=False,
+            oom_killed=False,
+            restart_count=0,
+            container_diff_empty=True,
+            cleanup_complete=True,
+        )
+        return _issue_completed_worker_execution_v1(run_wire, evidence)
+
     def _postverified_token(self):
         verifier, builder = self._prepare(self.summary, self.summary)
         with verifier, builder:
@@ -222,9 +293,9 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 launch = session.launch_for(member.task_id)
                 accept_discovery_worker_output_v1(
                     session,
-                    task_id=member.task_id,
-                    run_wire=self._run_for(launch.task),
-                    runtime_evidence_sha256=_sha(5000 + index),
+                    completion=self._completion_for(
+                        launch, self._run_for(launch.task), 5000 + index * 10
+                    ),
                 )
             return postverify_discovery_execution_v1(session)
 
@@ -326,9 +397,9 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 launch = session.launch_for(member.task_id)
                 accept_discovery_worker_output_v1(
                     session,
-                    task_id=member.task_id,
-                    run_wire=self._run_for(launch.task),
-                    runtime_evidence_sha256=_sha(1000 + index),
+                    completion=self._completion_for(
+                        launch, self._run_for(launch.task), 1000 + index * 10
+                    ),
                 )
             token = postverify_discovery_execution_v1(session)
         self.assertEqual(verify_call.call_count, 2)
@@ -356,9 +427,9 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 launch = session.launch_for(member.task_id)
                 accept_discovery_worker_output_v1(
                     session,
-                    task_id=member.task_id,
-                    run_wire=self._run_for(launch.task),
-                    runtime_evidence_sha256=_sha(2000 + index),
+                    completion=self._completion_for(
+                        launch, self._run_for(launch.task), 2000 + index * 10
+                    ),
                 )
             with self.assertRaises(EvaluatorSupervisorError) as captured:
                 postverify_discovery_execution_v1(session)
@@ -366,7 +437,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
         self.assertEqual(session.state, "failed")
         self.assertTrue(all(value == 0 for value in session._DiscoveryExecutionSession__key))
 
-    def test_wrong_task_output_aborts_session(self) -> None:
+    def test_cross_task_output_cannot_form_a_provider_completion(self) -> None:
         verifier, builder = self._prepare(self.summary)
         with verifier, builder:
             session = prepare_discovery_execution_plan_v1(
@@ -378,16 +449,44 @@ class EvaluatorSupervisorTests(unittest.TestCase):
             )
         first = session.launch_for(self.members[0].task_id)
         second = session.launch_for(self.members[1].task_id)
-        with self.assertRaises(EvaluatorSupervisorError) as captured:
-            accept_discovery_worker_output_v1(
-                session,
-                task_id=first.task.task_id,
-                run_wire=self._run_for(second.task),
-                runtime_evidence_sha256=_sha(3000),
+        valid_for_first = self._completion_for(
+            first, self._run_for(first.task), 3000
+        )
+        evidence = valid_for_first._CompletedWorkerExecutionV1__evidence
+        with self.assertRaises(WorkerCompletionError) as captured:
+            _issue_completed_worker_execution_v1(
+                self._run_for(second.task), evidence
             )
-        self.assertEqual(captured.exception.code, "task_binding_mismatch")
+        self.assertEqual(captured.exception.code, "detached_completion")
+        self.assertEqual(session.state, "prepared")
+        session.abort()
+
+    def test_malformed_exact_completion_fails_session_and_clears_key(self) -> None:
+        verifier, builder = self._prepare(self.summary)
+        with verifier, builder:
+            session = prepare_discovery_execution_plan_v1(
+                self.batch_root,
+                expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+                execution_policy=self.execution_policy,
+            )
+        launch = session.launch_for(self.members[0].task_id)
+        completion = self._completion_for(
+            launch, self._run_for(launch.task), 3500
+        )
+        object.__setattr__(
+            completion,
+            "_CompletedWorkerExecutionV1__evidence",
+            object(),
+        )
+        with self.assertRaises(EvaluatorSupervisorError) as captured:
+            accept_discovery_worker_output_v1(session, completion=completion)
+        self.assertEqual(captured.exception.code, "invalid_output")
         self.assertEqual(session.state, "failed")
-        self.assertTrue(all(value == 0 for value in session._DiscoveryExecutionSession__key))
+        self.assertTrue(
+            all(value == 0 for value in session._DiscoveryExecutionSession__key)
+        )
 
     def test_postverified_batch_publishes_one_complete_outer_transaction(self) -> None:
         verifier, builder = self._prepare(self.summary, self.summary)
@@ -403,9 +502,9 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 launch = session.launch_for(member.task_id)
                 accept_discovery_worker_output_v1(
                     session,
-                    task_id=member.task_id,
-                    run_wire=self._run_for(launch.task),
-                    runtime_evidence_sha256=_sha(4000 + index),
+                    completion=self._completion_for(
+                        launch, self._run_for(launch.task), 4000 + index * 10
+                    ),
                 )
             token = postverify_discovery_execution_v1(session)
 

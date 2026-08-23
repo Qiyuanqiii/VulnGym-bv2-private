@@ -29,9 +29,6 @@ import stat
 from types import MappingProxyType
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
-from jsonschema import Draft202012Validator
-from jsonschema.exceptions import SchemaError
-
 from vulngym_agent.adapters import SchemaAdapter
 from vulngym_agent.orchestrator.replay import (
     ReplayArtifactError,
@@ -694,13 +691,21 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _schema_validator(schema: Any, *, name: str) -> Draft202012Validator:
+def _schema_validator(schema: Any, *, name: str) -> Any:
     if not isinstance(schema, dict):
         raise BenchmarkHarnessError("invalid_schema", f"{name} must be an object")
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         raise BenchmarkHarnessError(
             "invalid_schema_draft", f"{name} must declare Draft 2020-12"
         )
+    try:
+        from jsonschema import Draft202012Validator
+        from jsonschema.exceptions import SchemaError
+    except ImportError as error:
+        raise BenchmarkHarnessError(
+            "schema_dependency_unavailable",
+            "public benchmark schema validation dependency is unavailable",
+        ) from error
     try:
         Draft202012Validator.check_schema(schema)
     except SchemaError as error:
@@ -711,7 +716,7 @@ def _schema_validator(schema: Any, *, name: str) -> Draft202012Validator:
 
 
 def _validate_schema_instance(
-    validator: Draft202012Validator, value: Any, *, name: str
+    validator: Any, value: Any, *, name: str
 ) -> None:
     error = next(validator.iter_errors(value), None)
     if error is not None:

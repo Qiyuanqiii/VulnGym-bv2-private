@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from dataclasses import replace
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -29,6 +30,12 @@ from vulngym_agent.evaluator.contracts import (
     ExecutionPolicyBindingV1,
     SnapshotBatchBindingV1,
     snapshot_policy_sha256_v1,
+)
+from vulngym_agent.evaluator.runtime_evidence import (
+    DockerServerIdentityV1,
+    RuntimeEvidenceV1,
+    RuntimeIsolationV1,
+    RuntimeResourceLimitsV1,
 )
 
 
@@ -124,7 +131,12 @@ class EvaluatorContractTests(unittest.TestCase):
                 discovery_result_sha256=_sha(1200 + index),
                 dataset_sha256=self.dataset_sha256s[index],
                 artifact_index_sha256=self.artifact_index_sha256,
-                runtime_evidence_sha256=_sha(1400 + index),
+                runtime_evidence=self._runtime_evidence(
+                    task,
+                    run_sha256=_sha(1000 + index),
+                    run_wire_sha256=_sha(1100 + index),
+                    marker=1400 + index,
+                ),
             )
             for index, task in enumerate(self.task_plans)
         )
@@ -156,6 +168,62 @@ class EvaluatorContractTests(unittest.TestCase):
             snapshot_content_root=task.snapshot_content_root,
             handoff_sha256=_sha(300 + position),
             handoff_wire_sha256=_sha(400 + position),
+        )
+
+    def _runtime_evidence(
+        self,
+        task: DiscoveryTaskExecutionPlanV1,
+        *,
+        run_sha256: str,
+        run_wire_sha256: str,
+        marker: int,
+    ) -> RuntimeEvidenceV1:
+        return RuntimeEvidenceV1(
+            docker_server=DockerServerIdentityV1(
+                operating_system="linux",
+                architecture="amd64",
+                engine_version="29.6.2",
+                api_version="1.55",
+                docker_executable_sha256=_sha(marker + 1),
+                daemon_endpoint_sha256=_sha(marker + 14),
+                server_observation_sha256=_sha(marker + 15),
+            ),
+            isolation=RuntimeIsolationV1(),
+            resources=RuntimeResourceLimitsV1(),
+            runtime_image_id=self.policy.runtime_image_id,
+            runtime_image_inspect_sha256=_sha(marker + 16),
+            execution_image_id="sha256:" + "b" * 64,
+            execution_image_inspect_sha256=_sha(marker + 8),
+            execution_policy_sha256=self.policy.policy_sha256,
+            task_plan_sha256=task.plan_sha256,
+            task_id=task.task_id,
+            snapshot_id=task.snapshot_id,
+            snapshot_manifest_sha256=task.snapshot_manifest_sha256,
+            snapshot_content_root=task.snapshot_content_root,
+            handoff_sha256=task.handoff_sha256,
+            handoff_wire_sha256=task.handoff_wire_sha256,
+            source_generation_sha256=_sha(marker + 2),
+            runtime_config_sha256=_sha(marker + 3),
+            materializer_container_create_spec_sha256=_sha(marker + 9),
+            materializer_container_pre_inspect_sha256=_sha(marker + 10),
+            materializer_container_post_inspect_sha256=_sha(marker + 11),
+            materializer_container_diff_sha256=_sha(marker + 12),
+            materializer_container_identity_sha256=_sha(marker + 13),
+            container_create_spec_sha256=_sha(marker + 4),
+            container_pre_inspect_sha256=_sha(marker + 5),
+            container_post_inspect_sha256=_sha(marker + 6),
+            container_identity_sha256=_sha(marker + 7),
+            run_sha256=run_sha256,
+            run_wire_sha256=run_wire_sha256,
+            run_wire_size=100,
+            stderr_sha256=hashlib.sha256(b"").hexdigest(),
+            stderr_size=0,
+            exit_code=0,
+            timed_out=False,
+            oom_killed=False,
+            restart_count=0,
+            container_diff_empty=True,
+            cleanup_complete=True,
         )
 
     @staticmethod
@@ -290,7 +358,7 @@ class EvaluatorContractTests(unittest.TestCase):
             )
         self.assertEqual(captured.exception.code, "invalid_binding")
 
-    def test_batch_receipt_rejects_postverify_and_index_swaps(self) -> None:
+    def test_batch_receipt_rejects_postverify_swap(self) -> None:
         with self.assertRaises(EvaluatorContractError) as captured:
             DiscoveryBatchExecutionReceiptV1(
                 plan=self.plan,
@@ -300,6 +368,65 @@ class EvaluatorContractTests(unittest.TestCase):
                 tasks=self.task_receipts,
             )
         self.assertEqual(captured.exception.code, "invalid_binding")
+
+    def test_batch_receipt_rejects_evidence_plan_policy_and_index_drift(self) -> None:
+        original = self.task_receipts[0]
+        resource_drifts = (
+            ("wall_time_seconds", 1799),
+            ("memory_bytes", 8 * 1024 * 1024 * 1024),
+            ("cpu_millis", 1999),
+            ("pids_limit", 63),
+            ("open_files_limit", 255),
+            ("stdout_max_bytes", 5 * 1024 * 1024),
+            ("stderr_max_bytes", 1024 * 1024 - 1),
+            ("tmpfs_bytes", 63 * 1024 * 1024),
+        )
+        evidence_cases = (
+            replace(
+                original.runtime_evidence,
+                snapshot_manifest_sha256=_sha(9001),
+                snapshot_content_root=_sha(9002),
+                handoff_sha256=_sha(9003),
+                handoff_wire_sha256=_sha(9004),
+            ),
+            replace(
+                original.runtime_evidence,
+                runtime_image_id="sha256:" + "c" * 64,
+            ),
+            *(
+                replace(
+                    original.runtime_evidence,
+                    resources=replace(
+                        original.runtime_evidence.resources,
+                        **{name: value},
+                    ),
+                )
+                for name, value in resource_drifts
+            ),
+        )
+        for evidence in evidence_cases:
+            with self.subTest(evidence=evidence.evidence_sha256):
+                detached = DiscoveryTaskExecutionReceiptV1(
+                    task_plan_sha256=original.task_plan_sha256,
+                    execution_policy_sha256=original.execution_policy_sha256,
+                    task_id=original.task_id,
+                    snapshot_id=original.snapshot_id,
+                    run_sha256=original.run_sha256,
+                    run_wire_sha256=original.run_wire_sha256,
+                    discovery_result_sha256=original.discovery_result_sha256,
+                    dataset_sha256=original.dataset_sha256,
+                    artifact_index_sha256=original.artifact_index_sha256,
+                    runtime_evidence=evidence,
+                )
+                with self.assertRaises(EvaluatorContractError) as captured:
+                    DiscoveryBatchExecutionReceiptV1(
+                        plan=self.plan,
+                        pre_batch_binding_sha256=self.binding.binding_sha256,
+                        post_batch_binding_sha256=self.binding.binding_sha256,
+                        artifact_index_sha256=self.artifact_index_sha256,
+                        tasks=(detached, *self.task_receipts[1:]),
+                    )
+                self.assertEqual(captured.exception.code, "invalid_binding")
 
         detached_dataset = DiscoveryTaskExecutionReceiptV1(
             task_plan_sha256=self.task_plans[0].plan_sha256,
@@ -311,7 +438,12 @@ class EvaluatorContractTests(unittest.TestCase):
             discovery_result_sha256=_sha(8103),
             dataset_sha256=_sha(8104),
             artifact_index_sha256=self.artifact_index_sha256,
-            runtime_evidence_sha256=_sha(8106),
+            runtime_evidence=self._runtime_evidence(
+                self.task_plans[0],
+                run_sha256=_sha(8101),
+                run_wire_sha256=_sha(8102),
+                marker=8106,
+            ),
         )
         with self.assertRaises(EvaluatorContractError) as captured:
             DiscoveryBatchExecutionReceiptV1(
@@ -333,7 +465,12 @@ class EvaluatorContractTests(unittest.TestCase):
             discovery_result_sha256=_sha(8003),
             dataset_sha256=_sha(8004),
             artifact_index_sha256=_sha(8005),
-            runtime_evidence_sha256=_sha(8006),
+            runtime_evidence=self._runtime_evidence(
+                self.task_plans[0],
+                run_sha256=_sha(8001),
+                run_wire_sha256=_sha(8002),
+                marker=8006,
+            ),
         )
         with self.assertRaises(EvaluatorContractError) as captured:
             DiscoveryBatchExecutionReceiptV1(

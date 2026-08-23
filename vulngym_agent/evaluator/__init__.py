@@ -39,10 +39,22 @@ from .worker import (
     IsolatedWorkerError,
     execute_discovery_worker_v1,
 )
+from .runtime_evidence import (
+    DockerServerIdentityV1,
+    RuntimeEvidenceError,
+    RuntimeEvidenceV1,
+    RuntimeIsolationV1,
+    RuntimeResourceLimitsV1,
+)
+from .worker_completion import (
+    CompletedWorkerExecutionV1,
+    WorkerCompletionError,
+)
 
 __all__ = [
     "DEFAULT_D2_WORKER_BUDGET_LIMITS",
     "DEFAULT_D3_WORKER_BUDGET_LIMITS",
+    "CompletedWorkerExecutionV1",
     "DISCOVERY_BATCH_EXECUTION_PLAN_KIND",
     "DISCOVERY_BATCH_EXECUTION_RECEIPT_KIND",
     "DISCOVERY_TASK_EXECUTION_PLAN_KIND",
@@ -52,6 +64,7 @@ __all__ = [
     "DiscoveryExecutionSession",
     "DiscoveryTaskExecutionPlanV1",
     "DiscoveryTaskExecutionReceiptV1",
+    "DockerServerIdentityV1",
     "EVALUATOR_CONTRACT_VERSION",
     "EVALUATOR_SUPERVISOR_VERSION",
     "EXECUTION_POLICY_BINDING_KIND",
@@ -63,9 +76,14 @@ __all__ = [
     "IsolatedWorkerError",
     "PendingTaskExecutionV1",
     "PostVerifiedDiscoveryExecutionV1",
+    "RuntimeEvidenceError",
+    "RuntimeEvidenceV1",
+    "RuntimeIsolationV1",
+    "RuntimeResourceLimitsV1",
     "SNAPSHOT_BATCH_BINDING_KIND",
     "SnapshotBatchBindingV1",
     "WorkerTaskLaunchV1",
+    "WorkerCompletionError",
     "accept_discovery_worker_output_v1",
     "budget_limits_sha256_v1",
     "execute_discovery_worker_v1",
