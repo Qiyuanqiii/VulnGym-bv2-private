@@ -8,6 +8,7 @@ import os
 from pathlib import Path, PurePosixPath
 import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -1042,6 +1043,28 @@ class OciWorkerEntryTests(unittest.TestCase):
                 "kind": "vulngym.oci-worker-error.v1",
                 "mode": "execute",
             },
+        )
+
+    def test_module_cli_does_not_emit_parent_package_runpy_warning(self) -> None:
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-m",
+                "vulngym_agent.evaluator.oci_worker_entry",
+                "invalid",
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, b"")
+        self.assertEqual(
+            completed.stderr,
+            b'{"code":"invalid_arguments","contract_version":1,'
+            b'"kind":"vulngym.oci-worker-error.v1","mode":"cli"}\n',
         )
 
     def test_runtime_digest_mismatch_and_extra_members_fail_before_execution(self) -> None:

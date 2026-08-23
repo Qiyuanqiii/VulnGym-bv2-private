@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -260,6 +261,24 @@ class BatchReplayConfigTests(unittest.TestCase):
         finally:
             target.rmdir()
             target.write_bytes(saved)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX mode bits are required")
+    def test_writable_ancestor_is_allowed_but_writable_input_root_is_not(
+        self,
+    ) -> None:
+        ancestor = Path(self.temporary.name)
+        ancestor_mode = stat.S_IMODE(os.lstat(ancestor).st_mode)
+        root_mode = stat.S_IMODE(os.lstat(self.root).st_mode)
+        try:
+            os.chmod(ancestor, 0o777)
+            self.assertEqual(len(self._load()), len(self.task_ids))
+            os.chmod(self.root, root_mode | stat.S_IWGRP)
+            with self.assertRaises(BatchReplayConfigError) as captured:
+                self._load()
+            self.assertEqual(captured.exception.code, "unsafe_path")
+        finally:
+            os.chmod(self.root, root_mode)
+            os.chmod(ancestor, ancestor_mode)
 
     def test_rejects_symlink_config_member_when_supported(self) -> None:
         target = self.configs_root / self.task_ids[0] / "d2.json"

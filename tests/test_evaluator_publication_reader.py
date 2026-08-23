@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import shutil
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import tests.test_evaluator_supervisor as supervisor_tests
+import vulngym_agent.evaluator.publication_reader as reader_module
 from vulngym_agent.evaluator.e4_receipt import (
     E4_SUCCESS_RECEIPT_FILENAME,
     E4BatchSuccessReceiptV1,
@@ -114,6 +118,65 @@ class E4PublicationReaderTests(unittest.TestCase):
                 expected_wire_sha256=receipt.wire_sha256,
             )
         self.assertEqual(captured.exception.code, "publication_invalid")
+
+    def test_equivalent_resolved_root_spelling_is_checked_by_identity(
+        self,
+    ) -> None:
+        output, _receipt = self._scheduled_publication(
+            "published-e4-reader-equivalent-spelling"
+        )
+        alternate = output.parent / "canonical-equivalent-spelling"
+        root_state = os.lstat(output)
+        original_lstat = reader_module.os.lstat
+
+        def equivalent_lstat(path):
+            if Path(path) == alternate:
+                return root_state
+            return original_lstat(path)
+
+        with (
+            mock.patch.object(
+                reader_module.Path, "resolve", return_value=alternate
+            ),
+            mock.patch.object(
+                reader_module.os, "lstat", side_effect=equivalent_lstat
+            ),
+        ):
+            root, _parent_chain, identity = (
+                reader_module._checked_publication_root(output)
+            )
+        self.assertEqual(root, Path(os.path.abspath(output)))
+        self.assertEqual(identity, (root_state.st_dev, root_state.st_ino))
+
+    def test_resolved_root_identity_mismatch_is_unsafe(self) -> None:
+        output = self.fixture.root / "published-e4-reader-wrong-identity"
+        output.mkdir()
+        alternate = output.parent / "different-resolved-identity"
+        root_state = os.lstat(output)
+        different_state = SimpleNamespace(
+            st_mode=root_state.st_mode,
+            st_dev=root_state.st_dev,
+            st_ino=root_state.st_ino + 1,
+            st_file_attributes=0,
+        )
+        original_lstat = reader_module.os.lstat
+
+        def different_lstat(path):
+            if Path(path) == alternate:
+                return different_state
+            return original_lstat(path)
+
+        with (
+            mock.patch.object(
+                reader_module.Path, "resolve", return_value=alternate
+            ),
+            mock.patch.object(
+                reader_module.os, "lstat", side_effect=different_lstat
+            ),
+            self.assertRaises(E4PublicationReaderError) as captured,
+        ):
+            reader_module._checked_publication_root(output)
+        self.assertEqual(captured.exception.code, "unsafe_publication")
 
     def test_reader_rejects_extra_members_and_detached_contract_or_run(
         self,

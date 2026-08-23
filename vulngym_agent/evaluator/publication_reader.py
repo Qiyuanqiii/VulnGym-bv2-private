@@ -138,8 +138,13 @@ def _checked_publication_root(
                 "unsafe_publication", "publication root is unsafe"
             )
         resolved_root = root.resolve(strict=True)
-        if os.path.normcase(os.path.abspath(os.fspath(resolved_root))) != (
-            os.path.normcase(os.path.abspath(os.fspath(root)))
+        resolved_state = os.lstat(resolved_root)
+        if (
+            not stat.S_ISDIR(resolved_state.st_mode)
+            or stat.S_ISLNK(resolved_state.st_mode)
+            or _is_reparse(resolved_state)
+            or (resolved_state.st_dev, resolved_state.st_ino)
+            != (root_state.st_dev, root_state.st_ino)
         ):
             raise E4PublicationReaderError(
                 "unsafe_publication", "publication root resolution changed"

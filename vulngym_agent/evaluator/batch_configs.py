@@ -455,7 +455,9 @@ def _binding_identity(value: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _require_directory(path: Path) -> os.stat_result:
+def _require_directory(
+    path: Path, *, require_private: bool = True
+) -> os.stat_result:
     try:
         value = os.lstat(path)
     except OSError:
@@ -466,7 +468,11 @@ def _require_directory(path: Path) -> os.stat_result:
         not stat.S_ISDIR(value.st_mode)
         or stat.S_ISLNK(value.st_mode)
         or _is_reparse(value)
-        or (os.name == "posix" and value.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+        or (
+            require_private
+            and os.name == "posix"
+            and value.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        )
     ):
         raise BatchReplayConfigError(
             "unsafe_path", "replay input traverses an unsafe directory"
@@ -474,7 +480,9 @@ def _require_directory(path: Path) -> os.stat_result:
     return value
 
 
-def _canonical_input_root(root: object) -> Path:
+def _canonical_input_root(
+    root: object,
+) -> tuple[Path, tuple[tuple[Path, tuple[int, int]], ...]]:
     if type(root) not in (str, type(Path())):
         raise BatchReplayConfigError(
             "invalid_argument", "replay input root must be an exact path value"
@@ -492,9 +500,27 @@ def _canonical_input_root(root: object) -> Path:
         if current.parent == current:
             break
         current = current.parent
+    parent_chain: list[tuple[Path, tuple[int, int]]] = []
     for item in reversed(chain):
-        _require_directory(item)
-    return result
+        value = _require_directory(
+            item, require_private=item == result
+        )
+        if item != result:
+            parent_chain.append(
+                (item, (value.st_dev, value.st_ino))
+            )
+    return result, tuple(parent_chain)
+
+
+def _assert_input_parent_chain(
+    chain: tuple[tuple[Path, tuple[int, int]], ...]
+) -> None:
+    for path, identity in chain:
+        value = _require_directory(path, require_private=False)
+        if (value.st_dev, value.st_ino) != identity:
+            raise BatchReplayConfigError(
+                "input_changed", "replay input parent chain changed"
+            )
 
 
 def _scan_exact_directory(
@@ -679,7 +705,7 @@ def load_batch_replay_configs_v1(
         expected_split=expected_split,
         expected_task_ids=expected_task_ids,
     )
-    input_root = _canonical_input_root(root)
+    input_root, parent_chain = _canonical_input_root(root)
     root_identity = _scan_exact_directory(
         input_root,
         frozenset(
@@ -800,6 +826,7 @@ def load_batch_replay_configs_v1(
                 )
         for opened in opened_files:
             _reverify_opened(opened)
+        _assert_input_parent_chain(parent_chain)
         result = tuple(pairs)
     except BaseException as error:
         primary = error
