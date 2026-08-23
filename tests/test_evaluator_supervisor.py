@@ -29,6 +29,11 @@ from vulngym_agent.evaluator.contracts import (
     ExecutionPolicyBindingV1,
     snapshot_policy_sha256_v1,
 )
+from vulngym_agent.evaluator.oci_worker_entry import (
+    OciReplayConfigV1,
+    REPLAY_BACKEND_ID,
+    REPLAY_MODEL_ID,
+)
 from vulngym_agent.evaluator.supervisor import (
     EvaluatorSupervisorError,
     accept_discovery_worker_output_v1,
@@ -139,6 +144,21 @@ class EvaluatorSupervisorTests(unittest.TestCase):
             )
         cls.members = tuple(members)
         cls.handoffs = handoffs
+        cls.replay_configs = tuple(
+            (
+                OciReplayConfigV1(
+                    task_id=member.task_id,
+                    role="d2",
+                    responses=(),
+                ),
+                OciReplayConfigV1(
+                    task_id=member.task_id,
+                    role="d3",
+                    responses=(),
+                ),
+            )
+            for member in cls.members
+        )
         cls.summary = SnapshotBatchSummary(
             batch_root=cls.batch_root.resolve(),
             profile_id=PROFILE_ID,
@@ -157,12 +177,10 @@ class EvaluatorSupervisorTests(unittest.TestCase):
         )
         cls.execution_policy = ExecutionPolicyBindingV1(
             runtime_image_id="sha256:" + "a" * 64,
-            d2_backend_id="replay",
-            d2_model_id="offline-d2",
-            d2_config_sha256=_sha(11),
-            d3_backend_id="replay",
-            d3_model_id="offline-d3",
-            d3_config_sha256=_sha(12),
+            d2_backend_id=REPLAY_BACKEND_ID,
+            d2_model_id=REPLAY_MODEL_ID,
+            d3_backend_id=REPLAY_BACKEND_ID,
+            d3_model_id=REPLAY_MODEL_ID,
             snapshot_policy_sha256=snapshot_policy_sha256_v1(
                 DEFAULT_SNAPSHOT_POLICY
             ),
@@ -228,9 +246,9 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 architecture="amd64",
                 engine_version="29.6.2",
                 api_version="1.55",
-                docker_executable_sha256=_sha(marker + 1),
-                daemon_endpoint_sha256=_sha(marker + 14),
-                server_observation_sha256=_sha(marker + 15),
+                docker_executable_sha256=_sha(9001),
+                daemon_endpoint_sha256=_sha(9002),
+                server_observation_sha256=_sha(9003),
             ),
             isolation=RuntimeIsolationV1(),
             resources=RuntimeResourceLimitsV1(
@@ -244,8 +262,8 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 tmpfs_bytes=self.execution_policy.tmpfs_bytes,
             ),
             runtime_image_id=self.execution_policy.runtime_image_id,
-            runtime_image_inspect_sha256=_sha(marker + 16),
-            execution_image_id="sha256:" + "b" * 64,
+            runtime_image_inspect_sha256=_sha(9004),
+            execution_image_id="sha256:" + _sha(marker + 17),
             execution_image_inspect_sha256=_sha(marker + 8),
             execution_policy_sha256=self.execution_policy.policy_sha256,
             task_plan_sha256=task_plan.plan_sha256,
@@ -289,6 +307,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
             for index, member in enumerate(self.members):
                 launch = session.launch_for(member.task_id)
@@ -309,10 +328,22 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
         self.assertEqual(verify_call.call_count, 1)
         self.assertEqual(build_call.call_count, 20)
         self.assertEqual(len(session.plan.tasks), 20)
+        self.assertEqual(
+            tuple(task.task_id for task in session.plan.tasks),
+            tuple(member.task_id for member in self.members),
+        )
+        for task_plan, (d2_replay, d3_replay) in zip(
+            session.plan.tasks, self.replay_configs, strict=True
+        ):
+            self.assertEqual(task_plan.d2_replay_sha256, d2_replay.config_sha256)
+            self.assertEqual(task_plan.d2_replay_wire_sha256, d2_replay.wire_sha256)
+            self.assertEqual(task_plan.d3_replay_sha256, d3_replay.config_sha256)
+            self.assertEqual(task_plan.d3_replay_wire_sha256, d3_replay.wire_sha256)
         launch = session.launch_for(self.members[0].task_id)
         self.assertEqual(launch.task_plan.task_id, self.members[0].task_id)
         self.assertEqual(launch.tree_root.name, "tree")
@@ -322,6 +353,116 @@ class EvaluatorSupervisorTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             pickle.dumps(launch)
         session.abort()
+
+    def test_prepare_rejects_missing_replay_pair(self) -> None:
+        verifier, builder = self._prepare(self.summary)
+        with verifier, builder as build_call:
+            with self.assertRaises(EvaluatorSupervisorError) as captured:
+                prepare_discovery_execution_plan_v1(
+                    self.batch_root,
+                    expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                    attestation_key=KEY,
+                    expected_key_id=KEY_ID,
+                    execution_policy=self.execution_policy,
+                    task_replay_configs=self.replay_configs[:-1],
+                )
+        self.assertEqual(captured.exception.code, "invalid_binding")
+        self.assertEqual(build_call.call_count, 0)
+
+    def test_prepare_rejects_duplicate_replay_pair(self) -> None:
+        duplicate = self.replay_configs[:-1] + (self.replay_configs[0],)
+        verifier, builder = self._prepare(self.summary)
+        with verifier as verify_call, builder as build_call:
+            with self.assertRaises(EvaluatorSupervisorError) as captured:
+                prepare_discovery_execution_plan_v1(
+                    self.batch_root,
+                    expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                    attestation_key=KEY,
+                    expected_key_id=KEY_ID,
+                    execution_policy=self.execution_policy,
+                    task_replay_configs=duplicate,
+                )
+        self.assertEqual(captured.exception.code, "invalid_binding")
+        self.assertEqual(verify_call.call_count, 0)
+        self.assertEqual(build_call.call_count, 0)
+
+    def test_prepare_rejects_reordered_replay_pairs(self) -> None:
+        reordered = (
+            self.replay_configs[1],
+            self.replay_configs[0],
+            *self.replay_configs[2:],
+        )
+        verifier, builder = self._prepare(self.summary)
+        with verifier, builder as build_call:
+            with self.assertRaises(EvaluatorSupervisorError) as captured:
+                prepare_discovery_execution_plan_v1(
+                    self.batch_root,
+                    expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                    attestation_key=KEY,
+                    expected_key_id=KEY_ID,
+                    execution_policy=self.execution_policy,
+                    task_replay_configs=reordered,
+                )
+        self.assertEqual(captured.exception.code, "invalid_binding")
+        self.assertEqual(build_call.call_count, 0)
+
+    def test_prepare_rejects_cross_task_replay_exchange(self) -> None:
+        first_d2, first_d3 = self.replay_configs[0]
+        second_d2, second_d3 = self.replay_configs[1]
+        exchanged = (
+            (first_d2, second_d3),
+            (second_d2, first_d3),
+            *self.replay_configs[2:],
+        )
+        verifier, builder = self._prepare(self.summary)
+        with verifier as verify_call, builder as build_call:
+            with self.assertRaises(EvaluatorSupervisorError) as captured:
+                prepare_discovery_execution_plan_v1(
+                    self.batch_root,
+                    expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                    attestation_key=KEY,
+                    expected_key_id=KEY_ID,
+                    execution_policy=self.execution_policy,
+                    task_replay_configs=exchanged,
+                )
+        self.assertEqual(captured.exception.code, "policy_mismatch")
+        self.assertEqual(verify_call.call_count, 0)
+        self.assertEqual(build_call.call_count, 0)
+
+    def test_session_replay_for_returns_frozen_detached_copies(self) -> None:
+        verifier, builder = self._prepare(self.summary)
+        with verifier, builder:
+            session = prepare_discovery_execution_plan_v1(
+                self.batch_root,
+                expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+                execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
+            )
+        task_id = self.members[0].task_id
+        supplied_d2, supplied_d3 = self.replay_configs[0]
+        expected_d2_wire = supplied_d2.to_bytes()
+        expected_d3_wire = supplied_d3.to_bytes()
+        saved_d2_task_id = supplied_d2.task_id
+        saved_d3_task_id = supplied_d3.task_id
+        try:
+            object.__setattr__(supplied_d2, "task_id", self.members[1].task_id)
+            object.__setattr__(supplied_d3, "task_id", self.members[1].task_id)
+            first_d2, first_d3 = session.replay_for(task_id)
+            second_d2, second_d3 = session.replay_for(task_id)
+            self.assertEqual(first_d2.to_bytes(), expected_d2_wire)
+            self.assertEqual(first_d3.to_bytes(), expected_d3_wire)
+            self.assertEqual(second_d2.to_bytes(), expected_d2_wire)
+            self.assertEqual(second_d3.to_bytes(), expected_d3_wire)
+            self.assertIsNot(first_d2, supplied_d2)
+            self.assertIsNot(first_d3, supplied_d3)
+            self.assertIsNot(first_d2, second_d2)
+            self.assertIsNot(first_d3, second_d3)
+        finally:
+            object.__setattr__(supplied_d2, "task_id", saved_d2_task_id)
+            object.__setattr__(supplied_d3, "task_id", saved_d3_task_id)
+            session.abort()
 
     def test_prepare_binds_the_verifiers_canonical_root(self) -> None:
         supplied_alias = self.root / "batch-alias-spelling"
@@ -337,6 +478,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
         canonicalize.assert_called_once_with(
             Path(os.path.abspath(os.fspath(supplied_alias))),
@@ -366,6 +508,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                     attestation_key=KEY,
                     expected_key_id=KEY_ID,
                     execution_policy=self.execution_policy,
+                    task_replay_configs=self.replay_configs,
                 )
         self.assertEqual(captured.exception.code, "batch_binding_mismatch")
 
@@ -391,6 +534,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                     attestation_key=KEY,
                     expected_key_id=KEY_ID,
                     execution_policy=self.execution_policy,
+                    task_replay_configs=self.replay_configs,
                 )
         self.assertEqual(captured.exception.code, "batch_verification_failed")
 
@@ -403,6 +547,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
         first_id = self.members[0].task_id
         original = self.handoffs[first_id]
@@ -439,6 +584,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
             for index, member in reversed(tuple(enumerate(self.members))):
                 launch = session.launch_for(member.task_id)
@@ -469,6 +615,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
             for index, member in enumerate(self.members):
                 launch = session.launch_for(member.task_id)
@@ -484,6 +631,35 @@ class EvaluatorSupervisorTests(unittest.TestCase):
         self.assertEqual(session.state, "failed")
         self.assertTrue(all(value == 0 for value in session._DiscoveryExecutionSession__key))
 
+    def test_postverify_io_failure_fails_session_and_clears_key(self) -> None:
+        verifier, builder = self._prepare(
+            self.summary, OSError("injected postverify failure")
+        )
+        with verifier, builder:
+            session = prepare_discovery_execution_plan_v1(
+                self.batch_root,
+                expected_batch_manifest_sha256=self.summary.manifest_sha256,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+                execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
+            )
+            for index, member in enumerate(self.members):
+                launch = session.launch_for(member.task_id)
+                accept_discovery_worker_output_v1(
+                    session,
+                    completion=self._completion_for(
+                        launch, self._run_for(launch.task), 8000 + index * 10
+                    ),
+                )
+            with self.assertRaises(EvaluatorSupervisorError) as captured:
+                postverify_discovery_execution_v1(session)
+        self.assertEqual(captured.exception.code, "postverify_failed")
+        self.assertEqual(session.state, "failed")
+        self.assertTrue(
+            all(value == 0 for value in session._DiscoveryExecutionSession__key)
+        )
+
     def test_cross_task_output_cannot_form_a_provider_completion(self) -> None:
         verifier, builder = self._prepare(self.summary)
         with verifier, builder:
@@ -493,6 +669,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
         first = session.launch_for(self.members[0].task_id)
         second = session.launch_for(self.members[1].task_id)
@@ -517,6 +694,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
         launch = session.launch_for(self.members[0].task_id)
         completion = self._completion_for(
@@ -544,6 +722,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
                 execution_policy=self.execution_policy,
+                task_replay_configs=self.replay_configs,
             )
             for index, member in enumerate(self.members):
                 launch = session.launch_for(member.task_id)

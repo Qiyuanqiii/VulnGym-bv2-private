@@ -136,10 +136,8 @@ class LinuxOciIntegrationTests(unittest.TestCase):
                 runtime_image_id=image_id,
                 d2_backend_id=d2_replay.backend_id,
                 d2_model_id=d2_replay.model_id,
-                d2_config_sha256=d2_replay.config_sha256,
                 d3_backend_id=d3_replay.backend_id,
                 d3_model_id=d3_replay.model_id,
-                d3_config_sha256=d3_replay.config_sha256,
                 snapshot_policy_sha256=snapshot_policy_sha256_v1(
                     DEFAULT_SNAPSHOT_POLICY
                 ),
@@ -170,6 +168,10 @@ class LinuxOciIntegrationTests(unittest.TestCase):
                 snapshot_content_root=task.snapshot_content_root,
                 handoff_sha256=handoff.handoff_sha256,
                 handoff_wire_sha256=handoff.wire_sha256,
+                d2_replay_sha256=d2_replay.config_sha256,
+                d2_replay_wire_sha256=d2_replay.wire_sha256,
+                d3_replay_sha256=d3_replay.config_sha256,
+                d3_replay_wire_sha256=d3_replay.wire_sha256,
             )
             launch = WorkerTaskLaunchV1(
                 supervisor_module._SESSION_TOKEN,

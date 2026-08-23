@@ -166,6 +166,50 @@ class VerifiedDiscoveryResult:
         object.__setattr__(self, "result", canonical)
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedDiscoveryRun:
+    """Canonical closed run returned from one verified bundle byte snapshot."""
+
+    dataset_sha256: str
+    run: "SourceDiscoveryRunV1"
+
+    def __post_init__(self) -> None:
+        from .discovery_pipeline import SourceDiscoveryRunV1
+
+        if (
+            type(self.dataset_sha256) is not str
+            or _SHA256_RE.fullmatch(self.dataset_sha256) is None
+            or type(self.run) is not SourceDiscoveryRunV1
+        ):
+            raise ValueError("verified discovery run is invalid")
+        try:
+            supplied_run_sha256 = self.run.run_sha256
+            # Reconstruct from exact top-level fields.  SourceDiscoveryRunV1
+            # performs the complete nested preflight before any serializer is
+            # invoked, so a mutated frozen input cannot execute polymorphic
+            # nested methods here.
+            canonical = SourceDiscoveryRunV1(
+                producer_result=self.run.producer_result,
+                reviewer_result=self.run.reviewer_result,
+                discovery_result=self.run.discovery_result,
+                contract_version=self.run.contract_version,
+            )
+        except (AttributeError, RecursionError, RuntimeError, TypeError, ValueError):
+            raise ValueError("verified discovery run is invalid") from None
+        if (
+            type(supplied_run_sha256) is not str
+            or supplied_run_sha256 != canonical.run_sha256
+        ):
+            raise ValueError("verified discovery run is invalid")
+        object.__setattr__(self, "run", canonical)
+
+    @property
+    def result(self) -> DiscoveryTaskResult:
+        """Compatibility-friendly access to the run's canonical D0 result."""
+
+        return self.run.discovery_result
+
+
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -768,15 +812,15 @@ def _validate_manifest(
     return dataset_sha256
 
 
-def read_discovery_result_bundle(
+def read_discovery_run_bundle(
     root: str | os.PathLike[str],
     *,
     expected_dataset_sha256: str,
     expected_task_id: str,
     protected_paths: Sequence[str | os.PathLike[str]] = (),
     limits: DiscoveryReplayLimits | None = None,
-) -> VerifiedDiscoveryResult:
-    """Verify one byte snapshot from an evaluator-controlled bundle root."""
+) -> VerifiedDiscoveryRun:
+    """Verify one byte snapshot and return its complete canonical closed run."""
 
     expected_digest = _validate_expected_sha256(expected_dataset_sha256)
     expected_task = _validate_expected_task_id(expected_task_id)
@@ -839,6 +883,18 @@ def read_discovery_result_bundle(
             ) from None
         reviewer, reviewer_wire = _canonical_reviewer(parsed_reviewer)
     result = _project(producer, reviewer)
+    try:
+        from .discovery_pipeline import SourceDiscoveryRunV1
+
+        run = SourceDiscoveryRunV1(
+            producer_result=producer,
+            reviewer_result=reviewer,
+            discovery_result=result,
+        )
+    except (AttributeError, KeyError, RecursionError, RuntimeError, TypeError, ValueError):
+        raise DiscoveryReplayError(
+            "invalid_result", "bundle sidecars did not form one canonical closed run"
+        ) from None
     manifest = _parse_jsonl(
         payloads[_MANIFEST_FILE], name=_MANIFEST_FILE, allow_empty=False
     )
@@ -869,7 +925,30 @@ def read_discovery_result_bundle(
             "bundle_changed", "discovery bundle root changed during verification"
         )
     _assert_chain(parent_chain)
-    return VerifiedDiscoveryResult(dataset_sha256=dataset_sha256, result=result)
+    return VerifiedDiscoveryRun(dataset_sha256=dataset_sha256, run=run)
+
+
+def read_discovery_result_bundle(
+    root: str | os.PathLike[str],
+    *,
+    expected_dataset_sha256: str,
+    expected_task_id: str,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+    limits: DiscoveryReplayLimits | None = None,
+) -> VerifiedDiscoveryResult:
+    """Compatibility wrapper returning D0 from one richer verified read."""
+
+    verified = read_discovery_run_bundle(
+        root,
+        expected_dataset_sha256=expected_dataset_sha256,
+        expected_task_id=expected_task_id,
+        protected_paths=protected_paths,
+        limits=limits,
+    )
+    return VerifiedDiscoveryResult(
+        dataset_sha256=verified.dataset_sha256,
+        result=verified.run.discovery_result,
+    )
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -1188,7 +1267,9 @@ __all__ = [
     "DISCOVERY_REPLAY_VERSION",
     "DiscoveryReplayError",
     "DiscoveryReplayLimits",
+    "VerifiedDiscoveryRun",
     "VerifiedDiscoveryResult",
+    "read_discovery_run_bundle",
     "read_discovery_result_bundle",
     "write_discovery_result_bundle",
 ]

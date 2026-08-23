@@ -60,6 +60,10 @@ class WorkerCompletionTests(unittest.TestCase):
             snapshot_content_root=self.task.snapshot_content_root,
             handoff_sha256=_sha(5),
             handoff_wire_sha256=_sha(6),
+            d2_replay_sha256=_sha(23),
+            d2_replay_wire_sha256=_sha(24),
+            d3_replay_sha256=_sha(25),
+            d3_replay_wire_sha256=_sha(26),
         )
         self.evidence = RuntimeEvidenceV1(
             docker_server=DockerServerIdentityV1(

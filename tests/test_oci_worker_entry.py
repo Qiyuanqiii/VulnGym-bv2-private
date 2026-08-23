@@ -263,10 +263,8 @@ class OciWorkerEntryTests(unittest.TestCase):
             runtime_image_id="sha256:" + "a" * 64,
             d2_backend_id=self.d2_config.backend_id,
             d2_model_id=self.d2_config.model_id,
-            d2_config_sha256=self.d2_config.config_sha256,
             d3_backend_id=self.d3_config.backend_id,
             d3_model_id=self.d3_config.model_id,
-            d3_config_sha256=self.d3_config.config_sha256,
             snapshot_policy_sha256=snapshot_policy_sha256_v1(
                 DEFAULT_SNAPSHOT_POLICY
             ),
@@ -289,6 +287,10 @@ class OciWorkerEntryTests(unittest.TestCase):
             snapshot_content_root=self.task.snapshot_content_root,
             handoff_sha256=self.handoff.handoff_sha256,
             handoff_wire_sha256=self.handoff.wire_sha256,
+            d2_replay_sha256=self.d2_config.config_sha256,
+            d2_replay_wire_sha256=self.d2_config.wire_sha256,
+            d3_replay_sha256=self.d3_config.config_sha256,
+            d3_replay_wire_sha256=self.d3_config.wire_sha256,
         )
         launch = WorkerTaskLaunchV1(
             supervisor_module._SESSION_TOKEN,
@@ -561,6 +563,86 @@ class OciWorkerEntryTests(unittest.TestCase):
                         d3_replay=self.d3_config,
                     )
                 self.assertEqual(captured.exception.code, "generation_failed")
+
+    def test_provider_rejects_replay_wire_pin_drift_before_oci_side_effects(
+        self,
+    ) -> None:
+        runtime, launch = self._provider_flow_fixture()
+        task_plan = launch.task_plan
+        drifted_wire_sha256 = (
+            ("0" if task_plan.d2_replay_wire_sha256[0] != "0" else "1")
+            + task_plan.d2_replay_wire_sha256[1:]
+        )
+        drifted_launch = WorkerTaskLaunchV1(
+            supervisor_module._SESSION_TOKEN,
+            task_plan=replace(
+                task_plan, d2_replay_wire_sha256=drifted_wire_sha256
+            ),
+            handoff=self.handoff,
+            tree_root=self.snapshot_root / "tree",
+        )
+        with (
+            mock.patch.object(linux_oci, "_runtime_command") as runtime_command,
+            mock.patch.object(
+                linux_oci, "_stage_materializer_inputs_v1"
+            ) as stage_inputs,
+            mock.patch.object(
+                linux_oci, "_create_worker_container_v1"
+            ) as create_container,
+        ):
+            with self.assertRaises(
+                linux_oci.LinuxOciProviderError
+            ) as captured:
+                linux_oci.run_discovery_worker_linux_oci_v1(
+                    runtime,
+                    drifted_launch,
+                    d2_replay=self.d2_config,
+                    d3_replay=self.d3_config,
+                )
+        self.assertEqual(captured.exception.code, "policy_mismatch")
+        runtime_command.assert_not_called()
+        stage_inputs.assert_not_called()
+        create_container.assert_not_called()
+
+    def test_provider_consumes_launch_once_before_staging_side_effects(
+        self,
+    ) -> None:
+        runtime, launch = self._provider_flow_fixture()
+        stage_error = linux_oci.LinuxOciProviderError(
+            "runtime_input_failed", "injected staging failure"
+        )
+        with (
+            mock.patch.object(
+                linux_oci,
+                "_stage_materializer_inputs_v1",
+                side_effect=stage_error,
+            ) as stage_inputs,
+            mock.patch.object(
+                linux_oci, "_create_worker_container_v1"
+            ) as create_container,
+        ):
+            with self.assertRaises(
+                linux_oci.LinuxOciProviderError
+            ) as first:
+                linux_oci.run_discovery_worker_linux_oci_v1(
+                    runtime,
+                    launch,
+                    d2_replay=self.d2_config,
+                    d3_replay=self.d3_config,
+                )
+            with self.assertRaises(
+                linux_oci.LinuxOciProviderError
+            ) as second:
+                linux_oci.run_discovery_worker_linux_oci_v1(
+                    runtime,
+                    launch,
+                    d2_replay=self.d2_config,
+                    d3_replay=self.d3_config,
+                )
+        self.assertEqual(first.exception.code, "runtime_input_failed")
+        self.assertEqual(second.exception.code, "duplicate_launch")
+        stage_inputs.assert_called_once()
+        create_container.assert_not_called()
 
     def test_post_verify_failure_blocks_commit_and_completion(self) -> None:
         runtime, launch = self._provider_flow_fixture()

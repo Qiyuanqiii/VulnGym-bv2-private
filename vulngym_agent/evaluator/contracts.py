@@ -134,11 +134,9 @@ _EXECUTION_POLICY_CORE_KEYS: Final[frozenset[str]] = frozenset(
         "cpu_millis",
         "d2_backend_id",
         "d2_budget_sha256",
-        "d2_config_sha256",
         "d2_model_id",
         "d3_backend_id",
         "d3_budget_sha256",
-        "d3_config_sha256",
         "d3_model_id",
         "kind",
         "memory_bytes",
@@ -749,15 +747,13 @@ class SnapshotBatchBindingV1:
 
 @dataclass(frozen=True, slots=True)
 class ExecutionPolicyBindingV1:
-    """Fixed Linux OCI and model-runtime configuration for one batch."""
+    """Fixed Linux OCI and shared model/runtime policy for one batch."""
 
     runtime_image_id: str
     d2_backend_id: str
     d2_model_id: str
-    d2_config_sha256: str
     d3_backend_id: str
     d3_model_id: str
-    d3_config_sha256: str
     snapshot_policy_sha256: str
     d2_budget_sha256: str
     d3_budget_sha256: str
@@ -818,8 +814,6 @@ class ExecutionPolicyBindingV1:
                     "invalid_contract", f"{name} is invalid"
                 )
         for value, name in (
-            (self.d2_config_sha256, "d2_config_sha256"),
-            (self.d3_config_sha256, "d3_config_sha256"),
             (self.snapshot_policy_sha256, "snapshot_policy_sha256"),
             (self.d2_budget_sha256, "d2_budget_sha256"),
             (self.d3_budget_sha256, "d3_budget_sha256"),
@@ -865,11 +859,9 @@ class ExecutionPolicyBindingV1:
             "cpu_millis": self.cpu_millis,
             "d2_backend_id": self.d2_backend_id,
             "d2_budget_sha256": self.d2_budget_sha256,
-            "d2_config_sha256": self.d2_config_sha256,
             "d2_model_id": self.d2_model_id,
             "d3_backend_id": self.d3_backend_id,
             "d3_budget_sha256": self.d3_budget_sha256,
-            "d3_config_sha256": self.d3_config_sha256,
             "d3_model_id": self.d3_model_id,
             "kind": self.kind,
             "memory_bytes": self.memory_bytes,
@@ -952,7 +944,7 @@ class ExecutionPolicyBindingV1:
 
 @dataclass(frozen=True, slots=True)
 class DiscoveryTaskExecutionPlanV1:
-    """Pre-launch binding for one exact batch member and worker handoff."""
+    """Pre-launch binding for one member, handoff, and exact D2/D3 replay wires."""
 
     batch_binding_sha256: str
     execution_policy_sha256: str
@@ -962,6 +954,10 @@ class DiscoveryTaskExecutionPlanV1:
     snapshot_content_root: str
     handoff_sha256: str
     handoff_wire_sha256: str
+    d2_replay_sha256: str
+    d2_replay_wire_sha256: str
+    d3_replay_sha256: str
+    d3_replay_wire_sha256: str
     contract_version: int = EVALUATOR_CONTRACT_VERSION
     kind: str = DISCOVERY_TASK_EXECUTION_PLAN_KIND
     plan_sha256: str = field(init=False)
@@ -987,6 +983,10 @@ class DiscoveryTaskExecutionPlanV1:
             (self.snapshot_content_root, "snapshot_content_root"),
             (self.handoff_sha256, "handoff_sha256"),
             (self.handoff_wire_sha256, "handoff_wire_sha256"),
+            (self.d2_replay_sha256, "d2_replay_sha256"),
+            (self.d2_replay_wire_sha256, "d2_replay_wire_sha256"),
+            (self.d3_replay_sha256, "d3_replay_sha256"),
+            (self.d3_replay_wire_sha256, "d3_replay_wire_sha256"),
         ):
             _require_sha256(value, name=name)
         object.__setattr__(
@@ -1002,6 +1002,10 @@ class DiscoveryTaskExecutionPlanV1:
         return {
             "batch_binding_sha256": self.batch_binding_sha256,
             "contract_version": self.contract_version,
+            "d2_replay_sha256": self.d2_replay_sha256,
+            "d2_replay_wire_sha256": self.d2_replay_wire_sha256,
+            "d3_replay_sha256": self.d3_replay_sha256,
+            "d3_replay_wire_sha256": self.d3_replay_wire_sha256,
             "execution_policy_sha256": self.execution_policy_sha256,
             "handoff_sha256": self.handoff_sha256,
             "handoff_wire_sha256": self.handoff_wire_sha256,
@@ -1041,6 +1045,11 @@ class DiscoveryTaskExecutionPlanV1:
         batch: SnapshotBatchBindingV1,
         execution_policy: ExecutionPolicyBindingV1,
         handoff: WorkerHandoffV1,
+        *,
+        d2_replay_sha256: str,
+        d2_replay_wire_sha256: str,
+        d3_replay_sha256: str,
+        d3_replay_wire_sha256: str,
     ) -> "DiscoveryTaskExecutionPlanV1":
         if (
             type(batch) is not SnapshotBatchBindingV1
@@ -1111,6 +1120,10 @@ class DiscoveryTaskExecutionPlanV1:
             snapshot_content_root=expected_task.snapshot_content_root,
             handoff_sha256=handoff.handoff_sha256,
             handoff_wire_sha256=handoff.wire_sha256,
+            d2_replay_sha256=d2_replay_sha256,
+            d2_replay_wire_sha256=d2_replay_wire_sha256,
+            d3_replay_sha256=d3_replay_sha256,
+            d3_replay_wire_sha256=d3_replay_wire_sha256,
         )
 
     @classmethod
@@ -1130,6 +1143,10 @@ class DiscoveryTaskExecutionPlanV1:
                 {
                     "batch_binding_sha256",
                     "contract_version",
+                    "d2_replay_sha256",
+                    "d2_replay_wire_sha256",
+                    "d3_replay_sha256",
+                    "d3_replay_wire_sha256",
                     "execution_policy_sha256",
                     "handoff_sha256",
                     "handoff_wire_sha256",
@@ -1150,6 +1167,10 @@ class DiscoveryTaskExecutionPlanV1:
         result = cls(
             batch_binding_sha256=value["batch_binding_sha256"],
             execution_policy_sha256=value["execution_policy_sha256"],
+            d2_replay_sha256=value["d2_replay_sha256"],
+            d2_replay_wire_sha256=value["d2_replay_wire_sha256"],
+            d3_replay_sha256=value["d3_replay_sha256"],
+            d3_replay_wire_sha256=value["d3_replay_wire_sha256"],
             task_id=value["task_id"],
             snapshot_id=value["snapshot_id"],
             snapshot_manifest_sha256=value["snapshot_manifest_sha256"],
@@ -1277,9 +1298,13 @@ class DiscoveryBatchExecutionPlanV1:
             or len({task.plan_sha256 for task in tasks}) != len(tasks)
             or len({task.handoff_sha256 for task in tasks}) != len(tasks)
             or len({task.handoff_wire_sha256 for task in tasks}) != len(tasks)
+            or len({task.d2_replay_sha256 for task in tasks}) != len(tasks)
+            or len({task.d2_replay_wire_sha256 for task in tasks}) != len(tasks)
+            or len({task.d3_replay_sha256 for task in tasks}) != len(tasks)
+            or len({task.d3_replay_wire_sha256 for task in tasks}) != len(tasks)
         ):
             raise EvaluatorContractError(
-                "invalid_binding", "batch plan repeats a task or handoff identity"
+                "invalid_binding", "batch plan repeats a task, handoff, or replay identity"
             )
         object.__setattr__(self, "batch", batch)
         object.__setattr__(self, "execution_policy", policy)
@@ -1730,6 +1755,51 @@ class DiscoveryBatchExecutionReceiptV1:
         ):
             raise EvaluatorContractError(
                 "invalid_binding", "batch receipt repeats a task or result identity"
+            )
+        evidence_values = tuple(receipt.runtime_evidence for receipt in tasks)
+        if (
+            len(
+                {
+                    _canonical_json(evidence.docker_server.to_dict())
+                    for evidence in evidence_values
+                }
+            )
+            != 1
+            or len(
+                {evidence.runtime_image_inspect_sha256 for evidence in evidence_values}
+            )
+            != 1
+            or len({evidence.execution_image_id for evidence in evidence_values})
+            != len(evidence_values)
+            or len(
+                {
+                    evidence.execution_image_inspect_sha256
+                    for evidence in evidence_values
+                }
+            )
+            != len(evidence_values)
+            or len(
+                {
+                    evidence.materializer_container_identity_sha256
+                    for evidence in evidence_values
+                }
+            )
+            != len(evidence_values)
+            or len(
+                {
+                    evidence.container_identity_sha256
+                    for evidence in evidence_values
+                }
+            )
+            != len(evidence_values)
+            or len({evidence.source_generation_sha256 for evidence in evidence_values})
+            != len(evidence_values)
+            or len({evidence.runtime_config_sha256 for evidence in evidence_values})
+            != len(evidence_values)
+        ):
+            raise EvaluatorContractError(
+                "invalid_binding",
+                "batch receipt runtime identities are inconsistent or reused",
             )
         try:
             index = ArtifactBundleIndex(

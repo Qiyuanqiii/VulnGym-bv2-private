@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,9 @@ from vulngym_agent.orchestrator.discovery_replay import (
     DISCOVERY_REPLAY_FILES,
     DiscoveryReplayError,
     DiscoveryReplayLimits,
+    VerifiedDiscoveryRun,
     VerifiedDiscoveryResult,
+    read_discovery_run_bundle,
     read_discovery_result_bundle,
     write_discovery_result_bundle,
 )
@@ -109,6 +112,58 @@ class DiscoveryReplayTests(unittest.TestCase):
             self.assertEqual(1, (first / "producer.jsonl").read_bytes().count(b"\n"))
             self.assertEqual(1, (first / "reviewer.jsonl").read_bytes().count(b"\n"))
             self.assertEqual(1, (first / "manifest.jsonl").read_bytes().count(b"\n"))
+
+    def test_richer_reader_returns_the_complete_canonical_run(self) -> None:
+        run = _finalized_run()
+        with tempfile.TemporaryDirectory() as temporary:
+            output, written = self._write(Path(temporary), "bundle", run)
+            verified = read_discovery_run_bundle(
+                output,
+                expected_dataset_sha256=written.dataset_sha256,
+                expected_task_id=run.task_id,
+            )
+
+        self.assertIsInstance(verified, VerifiedDiscoveryRun)
+        self.assertEqual(verified.dataset_sha256, written.dataset_sha256)
+        self.assertEqual(verified.run, run)
+        self.assertIsNot(verified.run, run)
+        self.assertEqual(verified.result, run.discovery_result)
+        self.assertEqual(verified.run.run_sha256, run.run_sha256)
+        self.assertEqual(
+            hashlib.sha256(verified.run.to_wire()).hexdigest(),
+            hashlib.sha256(run.to_wire()).hexdigest(),
+        )
+        self.assertEqual(
+            hashlib.sha256(
+                replay_module._canonical_json(verified.run.discovery_result.to_dict())
+            ).hexdigest(),
+            hashlib.sha256(
+                replay_module._canonical_json(run.discovery_result.to_dict())
+            ).hexdigest(),
+        )
+
+    def test_legacy_result_wrapper_performs_only_one_bundle_read(self) -> None:
+        run = _d2_deferred_run()
+        with tempfile.TemporaryDirectory() as temporary:
+            output, written = self._write(Path(temporary), "bundle", run)
+            real_read = replay_module._read_stable_file
+            reads: list[str] = []
+
+            def tracked(path: Path, **kwargs):
+                reads.append(path.name)
+                return real_read(path, **kwargs)
+
+            with mock.patch.object(
+                replay_module, "_read_stable_file", side_effect=tracked
+            ):
+                verified = read_discovery_result_bundle(
+                    output,
+                    expected_dataset_sha256=written.dataset_sha256,
+                    expected_task_id=run.task_id,
+                )
+
+        self.assertEqual(reads, list(DISCOVERY_REPLAY_FILES))
+        self.assertEqual(verified.result, run.discovery_result)
 
     def test_d2_and_d3_deferred_branch_shapes_round_trip(self) -> None:
         for name, run, reviewer_lines in (
@@ -249,6 +304,44 @@ class DiscoveryReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "verified discovery result"):
             VerifiedDiscoveryResult("f" * 64, result)
         self.assertEqual([], calls)
+
+    def test_verified_run_preflights_nested_d0_before_serialization(self) -> None:
+        run = _finalized_run()
+        result = run.discovery_result
+        original = result.candidates[0]
+        calls: list[str] = []
+
+        class ExplodingCandidate(DiscoveryCandidate):
+            armed = False
+
+            def to_dict(self):
+                if type(self).armed:
+                    calls.append("d0")
+                    raise AssertionError("nested serializer executed")
+                return super().to_dict()
+
+        evil = ExplodingCandidate(
+            task_id=original.task_id,
+            snapshot_id=original.snapshot_id,
+            repo_url=original.repo_url,
+            commit=original.commit,
+            entry_point=original.entry_point,
+            critical_operation=original.critical_operation,
+            trace=original.trace,
+            relationship_evidence_refs=original.relationship_evidence_refs,
+            source_evidence_refs=original.source_evidence_refs,
+            contract_version=original.contract_version,
+        )
+        ExplodingCandidate.armed = True
+        object.__setattr__(result, "candidates", (evil,))
+        with self.assertRaisesRegex(ValueError, "verified discovery run"):
+            VerifiedDiscoveryRun("f" * 64, run)
+        self.assertEqual([], calls)
+
+        mutated_digest = _d2_deferred_run()
+        object.__setattr__(mutated_digest, "run_sha256", "f" * 64)
+        with self.assertRaisesRegex(ValueError, "verified discovery run"):
+            VerifiedDiscoveryRun("f" * 64, mutated_digest)
 
     def test_writer_rejects_a_mutated_run_digest(self) -> None:
         run = _d2_deferred_run()

@@ -363,9 +363,41 @@ execute create/inspect/diff、资源上限、run wire、退出状态和 cleanup�
 
 Docker Desktop 仅用于可信单用户开发烟测；Windows `chmod` 不被视为 DACL 隔离证明。
 正式发布门禁仍须在专用 native Linux runner 上使用独占 daemon/socket，验证
-cgroup/namespace/seccomp、POSIX staging 权限与异常清理路径。E4 还需实现 50/20 批次
-调度、逐题失败隔离、固定批次配置/索引、train aggregate 与 blind-test projection 的完整
-运行及发布收据；在该门禁完成前，仓库不声称通过最终 50+20 验收。
+cgroup/namespace/seccomp、POSIX staging 权限与异常清理路径。在 native Linux 50/20 门禁
+完成前，仓库不声称通过最终 50+20 验收。
+
+### 2.9 E4 固定批次调度内核
+
+E4 已完成第一层可信调度内核，但尚未完成正式 50+20 实跑。batch-wide execution policy
+只绑定共同的 backend/model、预算、隔离、资源和 runtime；每题 D2/D3 replay 的 semantic
+SHA 与 exact wire SHA 则直接进入 `DiscoveryTaskExecutionPlanV1`。batch plan 按 sealed batch
+顺序内嵌全部 task plan 并整体哈希，因此它本身是唯一执行授权索引，不依赖第二份可漂移的
+lookup。外部 replay input manifest 只负责以 content/wire 双 pin、固定目录布局、no-follow
+regular-file 读取和首尾 identity 复验，把 50 或 20 组实际 canonical config bytes 安全加载
+进 supervisor；manifest 不能单独授权执行。
+
+调度器固定 `max_parallelism=1`、`max_attempts=1`，只按 plan 顺序逐题 claim 一次 launch；
+launch 本身还会在 provider 入口、任何 staging/container 副作用前原子消费，因此已领取对象
+也不能被重复调用来产生多个真实 OCI attempt。provider 返回 success completion 后仍须重新核对 CLI/daemon/base image，才允许 supervisor
+claim completion。只有固定 allowlist 内、`cleanup_complete` 且 runtime fresh reverify 成功的
+单题失败可以继续后续题；`cleanup_uncertain`、runtime identity 漂移、未知 provider/supervisor
+异常都会立即毒化整批，剩余题标记 `not_run`。存在干净失败时仍会 fresh post-verify sealed
+batch，但只签发独立、不可发布的 canonical attempt report。全量成功时，runner 才签发一次性
+E4 publication authority；同一外层 staging/rename 事务除 artifact index、bundles、plan 与 E3
+execution receipt 外，还写入 `e4-success-receipt.json`。该成功收据固定绑定 scheduler version、
+串行度 1、attempt 上限 1、逐题 cleanup 后 runtime reverify、最终 snapshot reverify，以及按 plan
+顺序排列的 run/result/evidence hashes。直接调用低层 E3 publisher 得到的四文件目录不会被当作
+正式 E4 成功。batch receipt 还要求同批 Docker/基础镜像身份一致，且逐题派生镜像、容器、
+generation 与 runtime-config 身份不得复用。
+
+已提交 execution package 有独立 reader：它只接受调用方给出的 E4 semantic/wire 双 pin，
+复核固定五文件根与完整任务目录成员，严格读取 E4/E3 receipt、plan 和 artifact index，再从每题
+三文件包的同一 byte snapshot 重建 canonical `SourceDiscoveryRunV1`，逐层核对 run semantic、
+run wire、D0 result 与 dataset digest；首尾还复核整棵物化 identity 和父链。旧的 D0-only
+bundle reader 保持兼容，但由 richer reader 的同一次读取结果内存降级，不会二次读取路径。
+
+仍缺的是独立 E4 CLI、test-first 的 train/test 外层事务、projection/final gate receipt，以及
+专用 native Linux 上真实 20 test + 50 train mandatory gate。
 
 ## 3. 交付边界与实施状态
 
@@ -375,7 +407,7 @@ B-v2 的 Standard 包含：T1 全核心字段三态、可读证据、多源与�
 
 Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归因、复杂 merge/backport、完整 taint 与自动发布。Standard 不建设第三个 Repair Agent、通用平台或远程 Artifact Store。
 
-### 当前已实现：传统闭环、隔离源码交付、D0–D4 与 E3 单题竖切
+### 当前已实现：传统闭环、隔离源码交付、D0–D4、E3 与 E4 调度内核
 
 - 三份严格机器契约：Entry、Validation、Evidence Schema；`additionalProperties=false`，并有 `EvidenceItem`、`FieldValidation`、`ValidationReport` 可序列化模型。
 - `SchemaAdapter` 覆盖 15 个正式字段、额外/缺失字段、行范围、GHSA URL 与 `report_id` 一致性、ID 大写/去重/CVE-before-GHSA 排序及正式 T2 的 `verify=0`；它不会补造内容字段。
@@ -402,16 +434,16 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - D2/D3/D4 已完成 source-only 多候选 Producer、重新获取独立 tree/budget/context 的四准则 Reviewer、惰性分支编排与严格适配。D2 draft 上限为 32；D2 defer 不启动 D3；只有精确绑定的 D3 `accept` 才进入 D0 `emit`。
 - discovery replay 已以固定三文件结果包闭合 D2/D3 与可重算 D4；提交前失败保守留下私有 staging，提交后不确定统一以 `publication_uncertain` 交由 digest 复核。`project-discovery-train|test` 已接入 harness：先完整 D0(64) 再稳定截取，test 使用独立读取面且不调用训练汇总。
 - E3 已完成固定离线 replay 的 Linux OCI 单题竖切：原始 sealed tree 保持 0700/0600 不变，evaluator 在私有父目录中生成并双向核验只读 source/runtime staging；生成内容通过 materializer 容器层提交为内容寻址派生镜像，execute 无 source/runtime/volume mount、只读 rootfs、断网、非 root、drop-all capabilities、no-new-privileges、seccomp 与固定资源上限；provider 对 create/inspect/terminal/diff/image/cleanup 全链路签发 success-only evidence，再由 supervisor 内嵌进 receipt。Docker Desktop 的真实单题烟测不能替代 native Linux 发布门禁。
+- E4 调度内核已把逐题 replay semantic/wire pins 从 batch policy 移入 task plan，加入严格 replay input manifest/loader、supervisor/provider 双层一次性串行 launch、clean-failure allowlist、失败后 runtime/source reverify、runtime-poisoned 停批、非发布 attempt report 与跨题 runtime identity 闭合；全量成功还必须以一次性 authority 在同一事务写入 E4 scheduler receipt，独立 committed-output reader 会用外部双 pin 和 richer bundle reader 重建并核对完整证据链。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立。source-discovery 候选已由 D3 独立复核；传统 Entry 链路中模型提出的标题、分类和其他未覆盖语义仍受严格输出契约约束，且不能冒充完整 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：阶段 E4 的 50/20 调度、逐题异常隔离与 native Linux 全量发布门禁；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C、D0–D4 与 E3 单题竖切均已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
+尚未完成：阶段 E4 的独立 CLI、train/test 外层原子收据、projection/final gate receipt 与 native Linux 50+20 全量发布门禁；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C、D0–D4、E3 与 E4 调度/发布读回内核均已接入，但本仓库当前仍不声称已完成最终 50+20 数据验收。
 
 ### 下一阶段
 
-下一阶段直接进入 E4：以 E3 的固定单题 provider 为唯一执行面，增加确定性的 50/20 批次
-调度、逐题失败隔离、固定配置/索引和 native Linux mandatory gate；Producer 退出后由独立
-evaluator 校验结果包、执行 train 汇总或 blind test 投影，并在 gold 物理隔离的环境中完成
-50/20 端到端实跑。
+下一步闭合 E4 交付面：为现有调度/发布读回内核增加独立 CLI，以 test-first 外层事务连接
+blind test projection、train aggregate 与 final gate receipt，再在 gold 物理隔离
+的专用 native Linux 环境中完成 20 test + 50 train 端到端 mandatory gate。
 同时补 closed-loop replay 的独立 verify CLI、可显式选择的在线模型 backend 和全字段
 `required_check` verifier；完整 trace、AST/数据流与更多语言增强继续作为后续能力。

@@ -3077,12 +3077,14 @@ def _build_runtime_input_v1(
         or d2.role != "d2"
         or d2.backend_id != policy.d2_backend_id
         or d2.model_id != policy.d2_model_id
-        or d2.config_sha256 != policy.d2_config_sha256
+        or d2.config_sha256 != task_plan.d2_replay_sha256
+        or d2.wire_sha256 != task_plan.d2_replay_wire_sha256
         or d3.task_id != task.task_id
         or d3.role != "d3"
         or d3.backend_id != policy.d3_backend_id
         or d3.model_id != policy.d3_model_id
-        or d3.config_sha256 != policy.d3_config_sha256
+        or d3.config_sha256 != task_plan.d3_replay_sha256
+        or d3.wire_sha256 != task_plan.d3_replay_wire_sha256
     ):
         raise LinuxOciProviderError(
             "policy_mismatch", "worker runtime input is detached from its policy"
@@ -3982,6 +3984,18 @@ def _reverify_linux_oci_runtime_v1(
         _verify_execution_image_v1(execution_image)
 
 
+def reverify_linux_oci_runtime_v1(
+    runtime: VerifiedLinuxOciRuntimeV1,
+) -> None:
+    """Freshly re-establish the pinned CLI, daemon, and base-image identity."""
+
+    if type(runtime) is not VerifiedLinuxOciRuntimeV1:
+        raise LinuxOciProviderError(
+            "invalid_argument", "runtime must have an exact verified type"
+        )
+    _reverify_linux_oci_runtime_v1(runtime)
+
+
 def _cleanup_execution_image_or_raise_v1(
     image: _DerivedExecutionImageV1, primary: BaseException | None
 ) -> None:
@@ -4009,12 +4023,19 @@ def run_discovery_worker_linux_oci_v1(
             "invalid_argument", "runtime must have an exact verified type"
         )
     # Local import avoids a module cycle while retaining an exact supervisor type gate.
-    from vulngym_agent.evaluator.supervisor import WorkerTaskLaunchV1
+    from vulngym_agent.evaluator.supervisor import (
+        EvaluatorSupervisorError,
+        WorkerTaskLaunchV1,
+    )
 
     if type(launch) is not WorkerTaskLaunchV1:
         raise LinuxOciProviderError(
             "invalid_argument", "launch must have an exact supervisor type"
         )
+    try:
+        WorkerTaskLaunchV1._claim_for_provider(launch)
+    except EvaluatorSupervisorError as error:
+        raise LinuxOciProviderError(error.code, str(error)) from None
     policy = runtime.execution_policy
     request, wires = _build_runtime_input_v1(
         launch, policy, d2_replay, d3_replay
@@ -4225,6 +4246,7 @@ __all__ = [
     "container_inspect_sha256_v1",
     "normalized_container_inspect_v1",
     "normalized_terminal_container_inspect_v1",
+    "reverify_linux_oci_runtime_v1",
     "run_discovery_worker_linux_oci_v1",
     "verify_linux_oci_runtime_v1",
 ]

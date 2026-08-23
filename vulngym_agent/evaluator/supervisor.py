@@ -75,9 +75,21 @@ from vulngym_agent.evaluator.runtime_evidence import (
     RuntimeEvidenceError,
     RuntimeEvidenceV1,
 )
+from vulngym_agent.evaluator.oci_worker_entry import (
+    OciReplayConfigV1,
+    OciWorkerEntryError,
+)
 from vulngym_agent.evaluator.worker_completion import (
     CompletedWorkerExecutionV1,
     WorkerCompletionError,
+)
+from vulngym_agent.evaluator.e4_receipt import (
+    E4_SUCCESS_RECEIPT_FILENAME,
+    E4_SUCCESS_RECEIPT_MAX_BYTES,
+    E4BatchSuccessReceiptV1,
+    E4ReceiptError,
+    E4SuccessReceiptAuthorityV1,
+    claim_e4_success_receipt_authority_v1,
 )
 from vulngym_agent.orchestrator.budget import Limits
 from vulngym_agent.orchestrator.discovery_pipeline import (
@@ -104,8 +116,10 @@ TREE_LIMITS_DIGEST_DOMAIN: Final[bytes] = (
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _MIN_KEY_BYTES: Final[int] = 32
 _MAX_KEY_BYTES: Final[int] = 4096
+_MAX_BATCH_REPLAY_WIRE_BYTES: Final[int] = 512 * 1024 * 1024
 _SESSION_TOKEN: Final[object] = object()
 _POSTVERIFIED_TOKEN: Final[object] = object()
+_FAILED_CLOSURE_TOKEN: Final[object] = object()
 
 
 class EvaluatorSupervisorError(RuntimeError):
@@ -305,6 +319,67 @@ def _canonical_execution_policy(
     return policy
 
 
+def _canonical_task_replay_configs(
+    value: object,
+    *,
+    execution_policy: ExecutionPolicyBindingV1,
+) -> tuple[tuple[OciReplayConfigV1, OciReplayConfigV1], ...]:
+    """Freeze one exact, ordered D2/D3 replay pair for every batch task."""
+
+    if type(value) is not tuple:
+        raise EvaluatorSupervisorError(
+            "invalid_argument", "task replay configurations must be an exact tuple"
+        )
+    normalized: list[tuple[OciReplayConfigV1, OciReplayConfigV1]] = []
+    total_wire_bytes = 0
+    for pair in value:
+        if type(pair) is not tuple or len(pair) != 2:
+            raise EvaluatorSupervisorError(
+                "invalid_argument", "each task replay configuration must be a D2/D3 pair"
+            )
+        d2_supplied, d3_supplied = pair
+        if (
+            type(d2_supplied) is not OciReplayConfigV1
+            or type(d3_supplied) is not OciReplayConfigV1
+        ):
+            raise EvaluatorSupervisorError(
+                "invalid_argument", "task replay configurations have invalid exact types"
+            )
+        try:
+            d2_wire = d2_supplied.to_bytes()
+            d3_wire = d3_supplied.to_bytes()
+            d2 = OciReplayConfigV1.from_bytes(d2_wire)
+            d3 = OciReplayConfigV1.from_bytes(d3_wire)
+        except (AttributeError, OciWorkerEntryError, TypeError, ValueError):
+            raise EvaluatorSupervisorError(
+                "invalid_argument", "task replay configurations did not normalize"
+            ) from None
+        total_wire_bytes += len(d2_wire) + len(d3_wire)
+        if total_wire_bytes > _MAX_BATCH_REPLAY_WIRE_BYTES:
+            raise EvaluatorSupervisorError(
+                "limit_exceeded", "task replay configurations exceed the batch byte limit"
+            )
+        if (
+            d2.task_id != d3.task_id
+            or d2.role != "d2"
+            or d3.role != "d3"
+            or d2.backend_id != execution_policy.d2_backend_id
+            or d2.model_id != execution_policy.d2_model_id
+            or d3.backend_id != execution_policy.d3_backend_id
+            or d3.model_id != execution_policy.d3_model_id
+        ):
+            raise EvaluatorSupervisorError(
+                "policy_mismatch", "task replay configurations do not bind the policy"
+            )
+        normalized.append((d2, d3))
+    task_ids = tuple(pair[0].task_id for pair in normalized)
+    if len(set(task_ids)) != len(task_ids):
+        raise EvaluatorSupervisorError(
+            "invalid_binding", "task replay configurations repeat a task"
+        )
+    return tuple(normalized)
+
+
 def _task_from_member(member: SnapshotBatchTask) -> DiscoveryTaskInputV1:
     try:
         return DiscoveryTaskInputV1(
@@ -328,6 +403,8 @@ class WorkerTaskLaunchV1:
         "__handoff_payload",
         "__handoff_sha256",
         "__handoff_wire_sha256",
+        "__provider_claimed",
+        "__provider_lock",
         "__task_plan_payload",
         "__task_plan_sha256",
         "__tree_root",
@@ -390,6 +467,8 @@ class WorkerTaskLaunchV1:
         self.__handoff_sha256 = handoff_sha256
         self.__handoff_wire_sha256 = handoff_wire_sha256
         self.__tree_root = tree_root
+        self.__provider_claimed = False
+        self.__provider_lock = threading.Lock()
 
     @property
     def task_plan(self) -> DiscoveryTaskExecutionPlanV1:
@@ -424,6 +503,16 @@ class WorkerTaskLaunchV1:
     @property
     def handoff_wire_sha256(self) -> str:
         return self.__handoff_wire_sha256
+
+    def _claim_for_provider(self) -> None:
+        """Consume this launch exactly once before provider-side effects."""
+
+        with self.__provider_lock:
+            if self.__provider_claimed:
+                raise EvaluatorSupervisorError(
+                    "duplicate_launch", "worker launch was already consumed"
+                )
+            self.__provider_claimed = True
 
     def __reduce__(self):
         raise TypeError("worker launch values are not serializable")
@@ -605,11 +694,64 @@ class PostVerifiedDiscoveryExecutionV1:
         raise TypeError("post-verified values are not serializable")
 
 
+class FailedDiscoveryExecutionClosureV1:
+    """Opaque proof that a non-publishable attempt ended with a fresh snapshot check."""
+
+    __slots__ = ("__accepted_task_ids", "__plan")
+
+    def __init__(
+        self,
+        token: object,
+        *,
+        plan: DiscoveryBatchExecutionPlanV1,
+        accepted_task_ids: tuple[str, ...],
+    ) -> None:
+        if token is not _FAILED_CLOSURE_TOKEN:
+            raise TypeError("failed execution closures are supervisor-created")
+        plan_wire = plan.to_bytes()
+        self.__plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+            plan_wire,
+            expected_plan_sha256=_embedded_sha256_from_canonical_wire(
+                plan_wire, field="plan_sha256"
+            ),
+            expected_wire_sha256=hashlib.sha256(plan_wire).hexdigest(),
+        )
+        expected_order = tuple(task.task_id for task in self.__plan.tasks)
+        if (
+            type(accepted_task_ids) is not tuple
+            or len(set(accepted_task_ids)) != len(accepted_task_ids)
+            or any(task_id not in expected_order for task_id in accepted_task_ids)
+            or accepted_task_ids
+            != tuple(task_id for task_id in expected_order if task_id in accepted_task_ids)
+        ):
+            raise EvaluatorSupervisorError(
+                "invalid_state", "accepted task closure order is invalid"
+            )
+        self.__accepted_task_ids = accepted_task_ids
+
+    @property
+    def plan(self) -> DiscoveryBatchExecutionPlanV1:
+        wire = self.__plan.to_bytes()
+        return DiscoveryBatchExecutionPlanV1.from_bytes(
+            wire,
+            expected_plan_sha256=self.__plan.plan_sha256,
+            expected_wire_sha256=hashlib.sha256(wire).hexdigest(),
+        )
+
+    @property
+    def accepted_task_ids(self) -> tuple[str, ...]:
+        return self.__accepted_task_ids
+
+    def __reduce__(self):
+        raise TypeError("failed execution closures are not serializable")
+
+
 class DiscoveryExecutionSession:
     """One-way trusted state from fresh pre-verification to post-verification."""
 
     __slots__ = (
         "__batch_root",
+        "__claimed_launches",
         "__expected_key_id",
         "__expected_manifest_sha256",
         "__key",
@@ -618,6 +760,7 @@ class DiscoveryExecutionSession:
         "__pending",
         "__plan",
         "__policy",
+        "__replay_wires",
         "__state",
     )
 
@@ -632,6 +775,7 @@ class DiscoveryExecutionSession:
         policy: SnapshotPolicy,
         plan: DiscoveryBatchExecutionPlanV1,
         handoffs: tuple[WorkerHandoffV1, ...],
+        replay_configs: tuple[tuple[OciReplayConfigV1, OciReplayConfigV1], ...],
     ) -> None:
         if token is not _SESSION_TOKEN:
             raise TypeError("execution sessions are supervisor-created")
@@ -651,14 +795,60 @@ class DiscoveryExecutionSession:
             raise EvaluatorSupervisorError(
                 "invalid_plan", "execution handoffs do not cover the frozen plan"
             )
+        if type(replay_configs) is not tuple or len(replay_configs) != len(
+            frozen_plan.tasks
+        ):
+            raise EvaluatorSupervisorError(
+                "invalid_plan", "execution replay inputs do not cover the frozen plan"
+            )
+        replay_wires: dict[str, tuple[bytes, bytes]] = {}
+        for task_plan, pair in zip(frozen_plan.tasks, replay_configs, strict=True):
+            if type(pair) is not tuple or len(pair) != 2:
+                raise EvaluatorSupervisorError(
+                    "invalid_plan", "execution replay pair is invalid"
+                )
+            d2, d3 = pair
+            if type(d2) is not OciReplayConfigV1 or type(d3) is not OciReplayConfigV1:
+                raise EvaluatorSupervisorError(
+                    "invalid_plan", "execution replay values have invalid exact types"
+                )
+            try:
+                d2_wire = d2.to_bytes()
+                d3_wire = d3.to_bytes()
+                d2 = OciReplayConfigV1.from_bytes(d2_wire)
+                d3 = OciReplayConfigV1.from_bytes(d3_wire)
+            except (AttributeError, OciWorkerEntryError, TypeError, ValueError):
+                raise EvaluatorSupervisorError(
+                    "invalid_plan", "execution replay values did not normalize"
+                ) from None
+            if (
+                d2.task_id != task_plan.task_id
+                or d3.task_id != task_plan.task_id
+                or d2.role != "d2"
+                or d3.role != "d3"
+                or d2.backend_id != frozen_plan.execution_policy.d2_backend_id
+                or d2.model_id != frozen_plan.execution_policy.d2_model_id
+                or d3.backend_id != frozen_plan.execution_policy.d3_backend_id
+                or d3.model_id != frozen_plan.execution_policy.d3_model_id
+                or d2.config_sha256 != task_plan.d2_replay_sha256
+                or d2.wire_sha256 != task_plan.d2_replay_wire_sha256
+                or d3.config_sha256 != task_plan.d3_replay_sha256
+                or d3.wire_sha256 != task_plan.d3_replay_wire_sha256
+            ):
+                raise EvaluatorSupervisorError(
+                    "invalid_plan", "execution replay values do not bind the task plan"
+                )
+            replay_wires[task_plan.task_id] = (d2_wire, d3_wire)
         self.__batch_root = batch_root
         self.__expected_manifest_sha256 = expected_manifest_sha256
         self.__expected_key_id = expected_key_id
         self.__key = key
         self.__policy = policy
         self.__plan = frozen_plan
+        self.__replay_wires = replay_wires
         self.__lock = threading.RLock()
         self.__pending: dict[str, PendingTaskExecutionV1] = {}
+        self.__claimed_launches: set[str] = set()
         self.__state = "prepared"
         self.__launches = {
             task_plan.task_id: WorkerTaskLaunchV1(
@@ -714,6 +904,11 @@ class DiscoveryExecutionSession:
                 raise EvaluatorSupervisorError(
                     "unknown_task", "task is not a member of this execution plan"
                 ) from None
+            if task_id in self.__claimed_launches:
+                raise EvaluatorSupervisorError(
+                    "duplicate_launch", "task launch was already claimed"
+                )
+            self.__claimed_launches.add(task_id)
             payload = launch.handoff_payload
             handoff = WorkerHandoffV1.from_bytes(
                 payload,
@@ -726,6 +921,48 @@ class DiscoveryExecutionSession:
                 handoff=handoff,
                 tree_root=launch.tree_root,
             )
+
+    def replay_for(
+        self, task_id: str
+    ) -> tuple[OciReplayConfigV1, OciReplayConfigV1]:
+        """Return detached canonical replay values already bound into the plan."""
+
+        if type(task_id) is not str:
+            raise EvaluatorSupervisorError(
+                "invalid_argument", "task_id must be an exact string"
+            )
+        with self.__lock:
+            self._require_prepared()
+            try:
+                d2_wire, d3_wire = self.__replay_wires[task_id]
+            except KeyError:
+                raise EvaluatorSupervisorError(
+                    "unknown_task", "task is not a member of this execution plan"
+                ) from None
+            try:
+                return (
+                    OciReplayConfigV1.from_bytes(d2_wire),
+                    OciReplayConfigV1.from_bytes(d3_wire),
+                )
+            except (OciWorkerEntryError, TypeError, ValueError):
+                self._fail()
+                raise EvaluatorSupervisorError(
+                    "invalid_state", "frozen task replay configuration changed"
+                ) from None
+
+    def claim_task_execution(
+        self, task_id: str
+    ) -> tuple[
+        WorkerTaskLaunchV1,
+        OciReplayConfigV1,
+        OciReplayConfigV1,
+    ]:
+        """Atomically claim the sole launch and its frozen replay pair."""
+
+        with self.__lock:
+            d2, d3 = self.replay_for(task_id)
+            launch = self.launch_for(task_id)
+            return launch, d2, d3
 
     def accept_worker_output(
         self,
@@ -748,6 +985,10 @@ class DiscoveryExecutionSession:
                 if launch is None:
                     raise EvaluatorSupervisorError(
                         "unknown_task", "worker output task is not in the plan"
+                    )
+                if task_id not in self.__claimed_launches:
+                    raise EvaluatorSupervisorError(
+                        "invalid_output", "worker output has no claimed launch"
                     )
                 claimed = completion._claim_for_plan(launch.task_plan)
                 run_wire = claimed.run_wire
@@ -829,10 +1070,74 @@ class DiscoveryExecutionSession:
             except EvaluatorSupervisorError:
                 self._fail()
                 raise
-            except (EvaluatorContractError, SnapshotBatchError, AttributeError, OSError, TypeError, ValueError):
+            except (
+                EvaluatorContractError,
+                SnapshotBatchError,
+                AttributeError,
+                OSError,
+                TypeError,
+                ValueError,
+            ):
                 self._fail()
                 raise EvaluatorSupervisorError(
                     "postverify_failed", "post-run batch verification did not close"
+                ) from None
+            except BaseException:
+                self._fail()
+                raise
+
+    def close_failed_attempt(self) -> FailedDiscoveryExecutionClosureV1:
+        """Reverify source after a clean partial attempt without granting publication."""
+
+        with self.__lock:
+            self._require_prepared()
+            expected_ids = tuple(task.task_id for task in self.__plan.tasks)
+            if set(self.__pending) == set(expected_ids):
+                self._fail()
+                raise EvaluatorSupervisorError(
+                    "invalid_state", "complete execution must use success post-verification"
+                )
+            try:
+                summary = verify_snapshot_batch(
+                    self.__batch_root,
+                    expected_manifest_sha256=self.__expected_manifest_sha256,
+                    attestation_key=self.__key,
+                    expected_key_id=self.__expected_key_id,
+                    policy=self.__policy,
+                )
+                post_binding = SnapshotBatchBindingV1.from_verified_summary(
+                    summary, snapshot_policy=self.__policy
+                )
+                if post_binding != self.__plan.batch:
+                    raise EvaluatorSupervisorError(
+                        "postverify_mismatch",
+                        "post-run batch binding differs from the execution plan",
+                    )
+                accepted = tuple(
+                    task_id for task_id in expected_ids if task_id in self.__pending
+                )
+                closure = FailedDiscoveryExecutionClosureV1(
+                    _FAILED_CLOSURE_TOKEN,
+                    plan=self.__plan,
+                    accepted_task_ids=accepted,
+                )
+                _zero_key(self.__key)
+                self.__state = "failed_closed"
+                return closure
+            except EvaluatorSupervisorError:
+                self._fail()
+                raise
+            except (
+                EvaluatorContractError,
+                SnapshotBatchError,
+                AttributeError,
+                OSError,
+                TypeError,
+                ValueError,
+            ):
+                self._fail()
+                raise EvaluatorSupervisorError(
+                    "postverify_failed", "failed attempt snapshot verification did not close"
                 ) from None
             except BaseException:
                 self._fail()
@@ -861,6 +1166,9 @@ def prepare_discovery_execution_plan_v1(
     attestation_key: bytes | bytearray | memoryview,
     expected_key_id: str,
     execution_policy: ExecutionPolicyBindingV1,
+    task_replay_configs: tuple[
+        tuple[OciReplayConfigV1, OciReplayConfigV1], ...
+    ],
     snapshot_policy: SnapshotPolicy = DEFAULT_SNAPSHOT_POLICY,
     d2_budget_limits: Limits = DEFAULT_D2_WORKER_BUDGET_LIMITS,
     d3_budget_limits: Limits = DEFAULT_D3_WORKER_BUDGET_LIMITS,
@@ -932,6 +1240,9 @@ def prepare_discovery_execution_plan_v1(
             d3_budget_limits=d3_limits,
             tree_limits=source_limits,
         )
+        replay_configs = _canonical_task_replay_configs(
+            task_replay_configs, execution_policy=runtime_policy
+        )
         supplied_root = Path(os.path.abspath(os.fspath(batch_root)))
         expected_root = _canonical_existing_path(
             supplied_root, directory=True, status=4
@@ -966,7 +1277,17 @@ def prepare_discovery_execution_plan_v1(
             )
         handoffs: list[WorkerHandoffV1] = []
         task_plans: list[DiscoveryTaskExecutionPlanV1] = []
-        for member in binding.tasks:
+        if len(replay_configs) != len(binding.tasks):
+            raise EvaluatorSupervisorError(
+                "invalid_binding", "task replay configurations do not cover the batch"
+            )
+        for member, (d2_replay, d3_replay) in zip(
+            binding.tasks, replay_configs, strict=True
+        ):
+            if d2_replay.task_id != member.task_id or d3_replay.task_id != member.task_id:
+                raise EvaluatorSupervisorError(
+                    "invalid_binding", "task replay configuration order differs from the batch"
+                )
             task = _task_from_member(member)
             handoff = build_worker_handoff(
                 task,
@@ -976,7 +1297,13 @@ def prepare_discovery_execution_plan_v1(
                 policy=policy,
             )
             task_plan = DiscoveryTaskExecutionPlanV1.from_handoff(
-                binding, runtime_policy, handoff
+                binding,
+                runtime_policy,
+                handoff,
+                d2_replay_sha256=d2_replay.config_sha256,
+                d2_replay_wire_sha256=d2_replay.wire_sha256,
+                d3_replay_sha256=d3_replay.config_sha256,
+                d3_replay_wire_sha256=d3_replay.wire_sha256,
             )
             handoffs.append(handoff)
             task_plans.append(task_plan)
@@ -994,6 +1321,7 @@ def prepare_discovery_execution_plan_v1(
             policy=policy,
             plan=plan,
             handoffs=tuple(handoffs),
+            replay_configs=replay_configs,
         )
     except EvaluatorSupervisorError:
         _zero_key(key)
@@ -1034,6 +1362,16 @@ def postverify_discovery_execution_v1(
             "invalid_argument", "session must have an exact supervisor type"
         )
     return session.postverify()
+
+
+def close_failed_discovery_execution_v1(
+    session: DiscoveryExecutionSession,
+) -> FailedDiscoveryExecutionClosureV1:
+    if type(session) is not DiscoveryExecutionSession:
+        raise EvaluatorSupervisorError(
+            "invalid_argument", "session must have an exact supervisor type"
+        )
+    return session.close_failed_attempt()
 
 
 def _path_relation(left: Path, right: Path) -> bool:
@@ -1406,15 +1744,23 @@ def _materialized_identity(root: Path) -> tuple[tuple[object, ...], ...]:
     return tuple(sorted(records, key=lambda item: (str(item[1]), str(item[0]))))
 
 
-def publish_postverified_discovery_execution_v1(
+def _publish_postverified_discovery_execution_v1_impl(
     token: PostVerifiedDiscoveryExecutionV1,
     output_root: str | os.PathLike[str],
-) -> DiscoveryBatchExecutionReceiptV1:
+    *,
+    success_authority: E4SuccessReceiptAuthorityV1 | None,
+) -> DiscoveryBatchExecutionReceiptV1 | E4BatchSuccessReceiptV1:
     """Publish every result, index, plan, and receipt in one outer transaction."""
 
     if type(token) is not PostVerifiedDiscoveryExecutionV1:
         raise EvaluatorSupervisorError(
             "invalid_argument", "publication requires an exact post-verified token"
+        )
+    if success_authority is not None and type(
+        success_authority
+    ) is not E4SuccessReceiptAuthorityV1:
+        raise EvaluatorSupervisorError(
+            "invalid_argument", "scheduled publication authority has an invalid type"
         )
     output, parent_chain = _publication_output_path(
         output_root, protected=token.batch_root
@@ -1518,10 +1864,22 @@ def publish_postverified_discovery_execution_v1(
             artifact_index_sha256=index_sha256,
             tasks=task_receipts,
         )
+        success_receipt = (
+            None
+            if success_authority is None
+            else claim_e4_success_receipt_authority_v1(
+                success_authority, receipt
+            )
+        )
         plan_payload = plan.to_bytes()
         receipt_payload = receipt.to_bytes()
         _write_exact_file(staging / "execution-plan.json", plan_payload)
         _write_exact_file(staging / "execution-receipt.json", receipt_payload)
+        if success_receipt is not None:
+            _write_exact_file(
+                staging / E4_SUCCESS_RECEIPT_FILENAME,
+                success_receipt.to_bytes(),
+            )
 
         # Full readback while the tree is still unpublished.
         loaded_index = load_artifact_bundle_index(
@@ -1567,12 +1925,28 @@ def publish_postverified_discovery_execution_v1(
             raise EvaluatorSupervisorError(
                 "receipt_binding_mismatch", "execution contracts failed readback"
             )
+        if success_receipt is not None:
+            parsed_success_receipt = E4BatchSuccessReceiptV1.from_bytes(
+                _read_bounded_regular_file(
+                    staging / E4_SUCCESS_RECEIPT_FILENAME,
+                    maximum_bytes=E4_SUCCESS_RECEIPT_MAX_BYTES,
+                ),
+                expected_receipt_sha256=success_receipt.receipt_sha256,
+                expected_wire_sha256=success_receipt.wire_sha256,
+            )
+            if parsed_success_receipt != success_receipt:
+                raise EvaluatorSupervisorError(
+                    "receipt_binding_mismatch",
+                    "E4 success receipt failed staging readback",
+                )
         expected_root_members = {
             "artifact-index.json",
             "bundles",
             "execution-plan.json",
             "execution-receipt.json",
         }
+        if success_receipt is not None:
+            expected_root_members.add(E4_SUCCESS_RECEIPT_FILENAME)
         if {item.name for item in os.scandir(staging)} != expected_root_members:
             raise EvaluatorSupervisorError(
                 "staging_changed", "execution staging has unexpected members"
@@ -1657,6 +2031,16 @@ def publish_postverified_discovery_execution_v1(
             expected_receipt_sha256=receipt.receipt_sha256,
             expected_wire_sha256=receipt.wire_sha256,
         )
+        final_success_receipt = None
+        if success_receipt is not None:
+            final_success_receipt = E4BatchSuccessReceiptV1.from_bytes(
+                _read_bounded_regular_file(
+                    output / E4_SUCCESS_RECEIPT_FILENAME,
+                    maximum_bytes=E4_SUCCESS_RECEIPT_MAX_BYTES,
+                ),
+                expected_receipt_sha256=success_receipt.receipt_sha256,
+                expected_wire_sha256=success_receipt.wire_sha256,
+            )
         for member, verified in zip(
             plan.batch.tasks, verified_results, strict=True
         ):
@@ -1682,6 +2066,7 @@ def publish_postverified_discovery_execution_v1(
             final_plan != plan
             or final_receipt != receipt
             or final_receipt.plan != final_plan
+            or final_success_receipt != success_receipt
             or tuple(final_index.bundles) != tuple(bundle_digests)
             or {item.name for item in os.scandir(output)}
             != expected_root_members
@@ -1711,7 +2096,11 @@ def publish_postverified_discovery_execution_v1(
                 "published execution identity changed after commit",
                 committed=True,
             )
-        return final_receipt
+        return (
+            final_receipt
+            if final_success_receipt is None
+            else final_success_receipt
+        )
     except EvaluatorSupervisorError as error:
         if committed and not error.committed:
             raise EvaluatorSupervisorError(
@@ -1721,6 +2110,7 @@ def publish_postverified_discovery_execution_v1(
     except (
         BenchmarkHarnessError,
         DiscoveryReplayError,
+        E4ReceiptError,
         EvaluatorContractError,
         AttributeError,
         OSError,
@@ -1745,17 +2135,60 @@ def publish_postverified_discovery_execution_v1(
         _ = (staging, staging_identity)
 
 
+def publish_postverified_discovery_execution_v1(
+    token: PostVerifiedDiscoveryExecutionV1,
+    output_root: str | os.PathLike[str],
+) -> DiscoveryBatchExecutionReceiptV1:
+    """Publish an E3 execution receipt without claiming E4 scheduler closure."""
+
+    result = _publish_postverified_discovery_execution_v1_impl(
+        token,
+        output_root,
+        success_authority=None,
+    )
+    if type(result) is not DiscoveryBatchExecutionReceiptV1:
+        raise EvaluatorSupervisorError(
+            "invalid_state", "unscheduled publication returned an invalid receipt"
+        )
+    return result
+
+
+def _publish_scheduled_postverified_discovery_execution_v1(
+    token: PostVerifiedDiscoveryExecutionV1,
+    authority: E4SuccessReceiptAuthorityV1,
+    output_root: str | os.PathLike[str],
+) -> E4BatchSuccessReceiptV1:
+    """Internal E4 path that atomically adds the scheduler success receipt."""
+
+    if type(authority) is not E4SuccessReceiptAuthorityV1:
+        raise EvaluatorSupervisorError(
+            "invalid_argument", "scheduled publication requires an exact authority"
+        )
+    result = _publish_postverified_discovery_execution_v1_impl(
+        token,
+        output_root,
+        success_authority=authority,
+    )
+    if type(result) is not E4BatchSuccessReceiptV1:
+        raise EvaluatorSupervisorError(
+            "invalid_state", "scheduled publication returned an invalid receipt"
+        )
+    return result
+
+
 __all__ = [
     "BUDGET_LIMITS_DIGEST_DOMAIN",
     "DiscoveryExecutionSession",
     "EVALUATOR_SUPERVISOR_VERSION",
     "EvaluatorSupervisorError",
+    "FailedDiscoveryExecutionClosureV1",
     "PendingTaskExecutionV1",
     "PostVerifiedDiscoveryExecutionV1",
     "TREE_LIMITS_DIGEST_DOMAIN",
     "WorkerTaskLaunchV1",
     "accept_discovery_worker_output_v1",
     "budget_limits_sha256_v1",
+    "close_failed_discovery_execution_v1",
     "postverify_discovery_execution_v1",
     "prepare_discovery_execution_plan_v1",
     "publish_postverified_discovery_execution_v1",

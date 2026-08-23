@@ -81,10 +81,8 @@ class EvaluatorContractTests(unittest.TestCase):
             runtime_image_id="sha256:" + "a" * 64,
             d2_backend_id="replay",
             d2_model_id="offline-d2",
-            d2_config_sha256=_sha(11),
             d3_backend_id="replay",
             d3_model_id="offline-d3",
-            d3_config_sha256=_sha(12),
             snapshot_policy_sha256=snapshot_policy_sha256_v1(
                 DEFAULT_SNAPSHOT_POLICY
             ),
@@ -168,6 +166,10 @@ class EvaluatorContractTests(unittest.TestCase):
             snapshot_content_root=task.snapshot_content_root,
             handoff_sha256=_sha(300 + position),
             handoff_wire_sha256=_sha(400 + position),
+            d2_replay_sha256=_sha(500 + position),
+            d2_replay_wire_sha256=_sha(600 + position),
+            d3_replay_sha256=_sha(700 + position),
+            d3_replay_wire_sha256=_sha(800 + position),
         )
 
     def _runtime_evidence(
@@ -184,15 +186,15 @@ class EvaluatorContractTests(unittest.TestCase):
                 architecture="amd64",
                 engine_version="29.6.2",
                 api_version="1.55",
-                docker_executable_sha256=_sha(marker + 1),
-                daemon_endpoint_sha256=_sha(marker + 14),
-                server_observation_sha256=_sha(marker + 15),
+                docker_executable_sha256=_sha(9001),
+                daemon_endpoint_sha256=_sha(9002),
+                server_observation_sha256=_sha(9003),
             ),
             isolation=RuntimeIsolationV1(),
             resources=RuntimeResourceLimitsV1(),
             runtime_image_id=self.policy.runtime_image_id,
-            runtime_image_inspect_sha256=_sha(marker + 16),
-            execution_image_id="sha256:" + "b" * 64,
+            runtime_image_inspect_sha256=_sha(9004),
+            execution_image_id="sha256:" + _sha(marker + 17),
             execution_image_inspect_sha256=_sha(marker + 8),
             execution_policy_sha256=self.policy.policy_sha256,
             task_plan_sha256=task.plan_sha256,
@@ -341,10 +343,8 @@ class EvaluatorContractTests(unittest.TestCase):
             runtime_image_id="sha256:" + "b" * 64,
             d2_backend_id="replay",
             d2_model_id="offline-d2",
-            d2_config_sha256=_sha(21),
             d3_backend_id="replay",
             d3_model_id="offline-d3",
-            d3_config_sha256=_sha(22),
             snapshot_policy_sha256=_sha(23),
             d2_budget_sha256=_sha(24),
             d3_budget_sha256=_sha(25),
@@ -368,6 +368,45 @@ class EvaluatorContractTests(unittest.TestCase):
                 tasks=self.task_receipts,
             )
         self.assertEqual(captured.exception.code, "invalid_binding")
+
+    def test_batch_receipt_rejects_cross_task_runtime_drift_or_reuse(self) -> None:
+        first = self.task_receipts[0]
+        second = self.task_receipts[1]
+        evidence_cases = (
+            replace(
+                second.runtime_evidence,
+                docker_server=replace(
+                    second.runtime_evidence.docker_server,
+                    server_observation_sha256=_sha(9901),
+                ),
+            ),
+            replace(
+                second.runtime_evidence,
+                runtime_image_inspect_sha256=_sha(9902),
+            ),
+            replace(
+                second.runtime_evidence,
+                execution_image_id=first.runtime_evidence.execution_image_id,
+            ),
+            replace(
+                second.runtime_evidence,
+                container_identity_sha256=(
+                    first.runtime_evidence.container_identity_sha256
+                ),
+            ),
+        )
+        for evidence in evidence_cases:
+            with self.subTest(evidence=evidence.evidence_sha256):
+                detached = replace(second, runtime_evidence=evidence)
+                with self.assertRaises(EvaluatorContractError) as captured:
+                    DiscoveryBatchExecutionReceiptV1(
+                        plan=self.plan,
+                        pre_batch_binding_sha256=self.binding.binding_sha256,
+                        post_batch_binding_sha256=self.binding.binding_sha256,
+                        artifact_index_sha256=self.artifact_index_sha256,
+                        tasks=(first, detached, *self.task_receipts[2:]),
+                    )
+                self.assertEqual(captured.exception.code, "invalid_binding")
 
     def test_batch_receipt_rejects_evidence_plan_policy_and_index_drift(self) -> None:
         original = self.task_receipts[0]
@@ -487,10 +526,8 @@ class EvaluatorContractTests(unittest.TestCase):
             "runtime_image_id": "sha256:" + "a" * 64,
             "d2_backend_id": "replay",
             "d2_model_id": "offline-d2",
-            "d2_config_sha256": _sha(31),
             "d3_backend_id": "replay",
             "d3_model_id": "offline-d3",
-            "d3_config_sha256": _sha(32),
             "snapshot_policy_sha256": snapshot_policy_sha256_v1(
                 DEFAULT_SNAPSHOT_POLICY
             ),
