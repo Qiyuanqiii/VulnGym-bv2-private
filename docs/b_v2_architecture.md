@@ -1,6 +1,6 @@
 # VulnGym T1 × T2 自动化闭环：B-v2 首版设计
 
-> 状态（2026-08-23）：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact、benchmark 阶段 A/B、阶段 C sealed source snapshot、D0–D4 source-only 生产/独立复核，以及阶段 E3/E4 的隔离执行、固定批次调度、严格投影和 test-first 20+50 final gate 均已实现。专用 native Linux 上的真实 20+50 全量实跑、在线模型接入与全字段确定性 verifier 仍未完成，因此本文不声称最终数据验收已经通过。
+> 状态（2026-08-23）：确定性 T1 基础、受控闭环编排、本地结构化 T2 Producer、离线批处理/replay artifact、benchmark 阶段 A/B、阶段 C sealed source snapshot、D0–D4 source-only 生产/独立复核、无凭据可恢复 replay 制备控制面，以及阶段 E3/E4 的隔离执行、固定批次调度、严格投影和 test-first 20+50 final gate 均已实现。70 题的真实响应配置、专用 native Linux 上的真实 20+50 全量实跑、在线模型接入与全字段确定性 verifier 仍未完成，因此本文不声称最终数据验收已经通过。
 
 ## 1. 目标与总体架构
 
@@ -364,6 +364,57 @@ benchmark harness 的 discovery 路径会先校验所有已索引任务包，再
 总量/recall 的 aggregate；测试路径使用独立 test reader，不加载公开训练答案、不调用训练
 aggregate，也不输出分数或 `aggregate.json`。
 
+#### 2.7.1 无凭据的 ordered replay 制备控制面
+
+正式 D2/D3 请求不是可预先静态枚举的模板：下一次 payload 会包含前一次工具动作签发的
+opaque artifact/node ID、catalog 和 last result，因此 70 题的真实配置必须逐题运行当前
+sealed tree 后再决定。`replay_authoring_cli` 为此提供受信但不含在线 provider 的单题恢复
+循环：它读取调用方以 exact wire SHA-256 固定的 canonical `DiscoveryTaskInputV1`、已认证
+sealed bundle/key 以及只含 `d2.json`、`d3.json` 的草稿，从头确定性运行生产 controller。
+已有响应由正式 `OciReplayConfigV1` reader 重建；第一次 `replay_miss` 被转换成唯一的
+path-free pending contract，固定 `task_id/role/stage/payload/request_sha256`、该请求在当前
+role transcript 中的一基 occurrence，以及当前 prefix config semantic digest，不输出宿主路径、
+密钥或额外运行日志。相同 stage/payload 的请求可以在一次合法动态流程中重复；ordered
+transcript 的位置、occurrence 和 prefix digest 共同区分它们，先前 occurrence 的 envelope
+不能重用于后一次。
+
+外部人工或 Agent 只能提交与该 pending 精确绑定的 strict structured response envelope；
+response body 及其 digest、task、role、stage、request digest、occurrence 和 prefix digest
+全部规范化复核。preparer 先把候选 response 放入内存中的 prospective pair，再从头运行；
+过期绑定、controller 结构拒绝、错序或未消费 response 都在写盘前失败。通过后只用同目录
+临时普通文件和 `os.replace` 原子延长对应 role 草稿，并立即按正式 reader 读回。API 在运行
+前后检查 sealed/draft 的稳定目录及父链 identity、精确两文件 membership，并拒绝 sealed、
+draft、publication 之间的相等、祖先/后代和现存 inode alias；CLI 边界再隔离 task/key/response
+文件。中断后重新执行
+`next-request` 会从 canonical pair 重放，得到同一个下一请求；无需保存进程状态、provider
+session 或凭据。
+
+草稿替换前失败会清理本次临时文件并保持原字节；publication staging 在提交前失败也必须
+清理。`os.replace` 之后的 fsync、目录扫描、reader readback、identity 复核或 reload 任一步
+失败都统一报告 `committed=True` 的 `update_uncertain`，不能伪装成未提交。CLI 不输出异常
+路径或 traceback，stdout/flush、`KeyboardInterrupt`、snapshot/path 拒绝均映射到固定错误码；
+exit 11 表示调用方必须先按 config/wire digest 读回确认，不能盲目重试。
+
+闭合时 preparer 再用生产 `ReplayStructuredModelBackend` 纯离线执行并要求 exact closure，
+然后把两份 canonical config 发布到一个新目录。backend 把 config 视为 invocation transcript
+而不是 request dictionary：非空配置必须逐项、按序、恰好消费一次；miss、错序、额外调用
+或 unused suffix 均拒绝 worker 成功；Replay backend 子类也由基类 closure protocol 强制
+检查，不能覆盖方法绕过。D2 defer 时 D3 必须为空。闭合 summary 明确暴露
+`run_outcome`（`d2_deferred`/`d3_deferred`/`finalized`）以及 candidate、finding、reviewer verdict、
+accept/reject/defer 计数，供上层 receipt/gate 机械判定实际运行结果。
+
+`validate_formal_replay_pair_v1` 只验证两个 canonical、任务/角色/backend/model 绑定正确且
+D2、D3 transcript 均非空；它是正式非 smoke 输入的最低静态形状，不声称质量达标。
+`validate_empty_smoke_replay_pair_v1` 则只接受两个空配置，显式与正式路径分离。空配置仅允许
+“惰性分支零调用”或“首次请求 miss”两种兼容闭合；它能验证 E3/E4 管线，却不能替代有意义
+的 70 题响应和真实质量门禁。正式发布仍须结合 summary/独立 receipt 拒绝 defer、零 finding
+或其他不满足验收策略的 outcome。
+
+该控制面刻意没有网络、SDK、provider 命令或 API key 参数。实现者/批评者/审查者 Agent
+可以在控制面之外协作产生 response body，但它们不能绕过 sealed source capability、固定
+controller、prospective run、原子草稿更新或最终 exact replay。70 题批量 manifest 仍由 E4
+现有严格 loader/plan 生成与绑定；本控制面只负责逐题形成可恢复、可审计的合法 config pair。
+
 ### 2.8 E3 固定 Linux OCI 单题运行闭环
 
 E3 已实现一条固定的离线 replay 单题竖切，用来证明 D0–D4 能在真实 Linux OCI 边界内
@@ -493,13 +544,14 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - `snapshot_cli prepare|verify-batch` 已完成阶段 C：按精确 source identity 从受信 Git 对象生成不含历史面的单题 tree，以逐文件 Git OID/SHA-256、canonical manifest 和 HMAC 绑定，再通过两轮逐题复验与一次外层事务发布/复验形成 sealed batch。Agent 消费端的只读单题 mount/ACL 与断网仍由阶段 E 的运行环境强制。
 - D0/D1 已完成严格 source-discovery 契约、固定 64 finding 权限、确定性投影，以及只在单题 `BoundSealedTree` 上工作的有界工具面；宿主机路径、密钥、Git 历史、shell 与网络均不进入该能力面。
 - D2/D3/D4 已完成 source-only 多候选 Producer、重新获取独立 tree/budget/context 的四准则 Reviewer、惰性分支编排与严格适配。D2 draft 上限为 32；D2 defer 不启动 D3；只有精确绑定的 D3 `accept` 才进入 D0 `emit`。
+- 单题 replay authoring 已能在不接入在线 provider 的情况下从 sealed bundle/key 确定性重放到首个 miss，输出 request/digest 绑定的 canonical pending，严格接收一个 response 后 prospective 执行并原子延长 D2/D3 草稿；闭合和正式 worker 都要求非空 replay 按调用顺序恰好消费，D2 defer 强制 D3 为空。它尚未生成 70 题真实 response，空/defer 配置只算机械 smoke。
 - discovery replay 已以固定三文件结果包闭合 D2/D3 与可重算 D4；提交前失败保守留下私有 staging，提交后不确定统一以 `publication_uncertain` 交由 digest 复核。`project-discovery-train|test` 已接入 harness：先完整 D0(64) 再稳定截取，test 使用独立读取面且不调用训练汇总。
 - E3 已完成固定离线 replay 的 Linux OCI 单题竖切：原始 sealed tree 保持 0700/0600 不变，evaluator 在私有父目录中生成并双向核验只读 source/runtime staging；生成内容通过 materializer 容器层提交为内容寻址派生镜像，execute 无 source/runtime/volume mount、只读 rootfs、断网、非 root、drop-all capabilities、no-new-privileges、seccomp 与固定资源上限；provider 对 create/inspect/terminal/diff/image/cleanup 全链路签发 success-only evidence，再由 supervisor 内嵌进 receipt。Docker Desktop 的真实单题烟测不能替代 native Linux 发布门禁。
 - E4 已把逐题 replay semantic/wire pins 从 batch policy 移入 task plan，加入严格 replay input manifest/loader、supervisor/provider 双层一次性串行 launch、clean-failure allowlist、失败后 runtime/source reverify、runtime-poisoned 停批、非发布 attempt report 与跨题 runtime identity 闭合；全量成功还必须以一次性 authority 在同一事务写入 E4 scheduler receipt。固定 split driver/CLI、test-first 20+50 外层事务、projection/final-gate receipt 及两层独立 committed reader 已接入，最终 reader 会从实际 task plans 重建 replay manifest，并用外部双 pin 核对完整证据链。
 
 代码实现、固定策略和本地运行配置属于受信计算基；模型输出与全部任务/资料数据均不受信。Git/公告/Schema 等事实必须由受限工具重新建立。source-discovery 候选已由 D3 独立复核；传统 Entry 链路中模型提出的标题、分类和其他未覆盖语义仍受严格输出契约约束，且不能冒充完整 T1 裁决。canonical digest、哈希链和 unsigned JSON transcript 只证明一次记录内部的 closure、绑定和一致性，不提供数字签名，也不证明公告、仓库或模型结论的外部真实性；抵抗拥有持久化写权限者的整体重写仍需外部签名或可信事件根。
 
-尚未完成：专用 native Linux 上的真实 20+50 全量发布门禁；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C、D0–D4、E3 以及 E4 调度、投影、final-gate 发布与读回均已接入，但本仓库当前仍不声称已完成最终 20+50 数据验收。
+尚未完成：为 70 个真实 task 逐题完成有意义的 D2/D3 response config；专用 native Linux 上的真实 20+50 全量发布门禁；closed-loop replay 的独立 verify CLI；显式配置的在线模型 backend；覆盖所有正式 Entry 字段的 `required_check` 确定性 verifier；受影响版本范围及 merge/backport/squash 裁决；以及 AST/调用图/数据流支撑的最终 Entry/Critical/trace 语义。阶段 A/B、C、D0–D4、replay 制备控制面、E3 以及 E4 调度、投影、final-gate 发布与读回均已接入，但本仓库当前仍不声称已完成最终 20+50 数据验收。
 
 ### 下一阶段
 

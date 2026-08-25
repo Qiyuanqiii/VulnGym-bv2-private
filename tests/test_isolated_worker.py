@@ -7,6 +7,10 @@ import tempfile
 import unittest
 from unittest import mock
 
+from vulngym_agent.agents.model_runtime import (
+    ReplayResponse,
+    ReplayStructuredModelBackend,
+)
 from vulngym_agent.benchmark.contracts import INSTRUCTION_ID
 from vulngym_agent.benchmark.discovery_contracts import (
     DiscoveryCandidate,
@@ -272,6 +276,55 @@ class IsolatedWorkerTests(unittest.TestCase):
         self.assertEqual(budget_factory.call_count, 1)
         self.assertEqual(d3_accesses, [])
         self.assertTrue(producer_seen[0][1].usage_snapshot().finalized)
+
+    def test_exact_replay_closure_rejects_unused_d2_and_deferred_d3(self) -> None:
+        unused = ReplayResponse(
+            stage="plan",
+            request={"fixture": "unused"},
+            response={"action": "advance"},
+        )
+        producer_seen: list[tuple[object, ...]] = []
+        with mock.patch(
+            "vulngym_agent.orchestrator.discovery_pipeline.SourceDiscoveryAttemptController",
+            self._producer_controller(self._deferred(), producer_seen),
+        ):
+            with self.assertRaises(IsolatedWorkerError) as captured:
+                self._execute(
+                    d2_backend=ReplayStructuredModelBackend((unused,)),
+                    d3_backend=ReplayStructuredModelBackend(()),
+                )
+        self.assertEqual(captured.exception.code, "run_failed")
+        self.assertEqual(len(producer_seen), 1)
+
+        class ForgedClosureBackend(ReplayStructuredModelBackend):
+            def assert_exact_closure(self) -> None:
+                return
+
+        producer_seen.clear()
+        with mock.patch(
+            "vulngym_agent.orchestrator.discovery_pipeline.SourceDiscoveryAttemptController",
+            self._producer_controller(self._deferred(), producer_seen),
+        ):
+            with self.assertRaises(IsolatedWorkerError) as captured:
+                self._execute(
+                    d2_backend=ForgedClosureBackend((unused,)),
+                    d3_backend=ReplayStructuredModelBackend(()),
+                )
+        self.assertEqual(captured.exception.code, "run_failed")
+        self.assertEqual(len(producer_seen), 1)
+
+        producer_seen.clear()
+        with mock.patch(
+            "vulngym_agent.orchestrator.discovery_pipeline.SourceDiscoveryAttemptController",
+            self._producer_controller(self._deferred(), producer_seen),
+        ):
+            with self.assertRaises(IsolatedWorkerError) as captured:
+                self._execute(
+                    d2_backend=ReplayStructuredModelBackend(()),
+                    d3_backend=ReplayStructuredModelBackend((unused,)),
+                )
+        self.assertEqual(captured.exception.code, "run_failed")
+        self.assertEqual(len(producer_seen), 1)
 
     def test_draft_uses_two_independent_trees_and_budgets_and_returns_canonical_run(self) -> None:
         producer = self._draft()

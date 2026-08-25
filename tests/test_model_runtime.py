@@ -11,6 +11,7 @@ from vulngym_agent.agents.model_runtime import (
     ModelLedgerMismatch,
     ModelRequest,
     ModelRuntimeFinalized,
+    ReplayClosureError,
     ReplayResponse,
     ReplayStructuredModelBackend,
     StructuredModelBackend,
@@ -148,23 +149,98 @@ class AttemptModelRuntimeTests(unittest.TestCase):
         first = self._runtime(backend).call(
             "MODEL-00001", "plan", {"evidence_ids": ["E-1"]}
         )
-        second = self._runtime(backend).call(
-            "MODEL-00099", "plan", {"evidence_ids": ["E-1"]}
+        backend.assert_exact_closure()
+        self.assertTrue(backend.exact_closure_succeeded)
+        self.assertEqual(backend.consumed_sequence, backend.registered_sequence)
+        self.assertEqual(backend.remaining_sequence, ())
+
+        miss_backend = ReplayStructuredModelBackend(
+            (entry,), backend_id="replay-test", model_id="fixture-v2"
         )
-        miss = self._runtime(backend).call(
+        miss = self._runtime(miss_backend).call(
             "MODEL-00001", "reflection", {"evidence_ids": ["E-1"]}
         )
 
         self.assertEqual(first.status, "success")
-        self.assertEqual(first.response_sha256, second.response_sha256)
         self.assertEqual(miss.status, "blocked")
-        self.assertEqual(miss.error_code, "replay_miss")
+        self.assertEqual(miss.error_code, "replay_order_mismatch")
         self.assertIsNone(miss.response_sha256)
+        with self.assertRaises(ReplayClosureError):
+            miss_backend.assert_exact_closure()
 
-        with self.assertRaisesRegex(ValueError, "duplicate"):
-            ReplayStructuredModelBackend((entry, entry))
+        repeated = ReplayStructuredModelBackend(
+            (
+                ReplayResponse(
+                    stage="plan",
+                    request={"repeat": True},
+                    response={"ordinal": 1},
+                ),
+                ReplayResponse(
+                    stage="plan",
+                    request={"repeat": True},
+                    response={"ordinal": 2},
+                ),
+            )
+        )
+        first_repeat = self._runtime(repeated).call(
+            "MODEL-00001", "plan", {"repeat": True}
+        )
+        second_repeat = self._runtime(repeated).call(
+            "MODEL-00002", "plan", {"repeat": True}
+        )
+        self.assertEqual(first_repeat.response["ordinal"], 1)
+        self.assertEqual(second_repeat.response["ordinal"], 2)
+        repeated.assert_exact_closure()
         with self.assertRaises(TypeError):
             backend._responses[("plan", "0" * 64)] = {}  # type: ignore[attr-defined]
+
+    def test_replay_backend_rejects_unused_extra_calls_and_ambiguous_empty_smoke(self) -> None:
+        first = ReplayResponse(
+            stage="plan", request={"step": 1}, response={"action": "continue"}
+        )
+        second = ReplayResponse(
+            stage="semantic_judge",
+            request={"step": 2},
+            response={"action": "finish"},
+        )
+
+        unused = ReplayStructuredModelBackend((first, second))
+        result = self._runtime(unused).call("MODEL-00001", "plan", {"step": 1})
+        self.assertEqual(result.status, "success")
+        self.assertEqual(len(unused.remaining_sequence), 1)
+        with self.assertRaises(ReplayClosureError):
+            unused.assert_exact_closure()
+
+        out_of_order = ReplayStructuredModelBackend((first, second))
+        result = self._runtime(out_of_order).call(
+            "MODEL-00002", "semantic_judge", {"step": 2}
+        )
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.error_code, "replay_order_mismatch")
+        with self.assertRaises(ReplayClosureError):
+            out_of_order.assert_exact_closure()
+
+        extra_call = ReplayStructuredModelBackend((first,))
+        self.assertEqual(
+            self._runtime(extra_call).call("MODEL-00001", "plan", {"step": 1}).status,
+            "success",
+        )
+        result = self._runtime(extra_call).call("MODEL-00002", "plan", {"step": 2})
+        self.assertEqual((result.status, result.error_code), ("blocked", "replay_miss"))
+        with self.assertRaises(ReplayClosureError):
+            extra_call.assert_exact_closure()
+
+        lazy_empty = ReplayStructuredModelBackend(())
+        lazy_empty.assert_exact_closure()
+        exercised_empty = ReplayStructuredModelBackend(())
+        result = self._runtime(exercised_empty).call("MODEL-00001", "plan", {})
+        self.assertEqual((result.status, result.error_code), ("blocked", "replay_miss"))
+        exercised_empty.assert_exact_closure()
+        ambiguous_empty = ReplayStructuredModelBackend(())
+        for call_id in ("MODEL-00001", "MODEL-00002"):
+            self._runtime(ambiguous_empty).call(call_id, "plan", {})
+        with self.assertRaises(ReplayClosureError):
+            ambiguous_empty.assert_exact_closure()
 
     def test_backend_block_and_error_are_charged_but_scrub_sensitive_content(self) -> None:
         secrets = "raw prompt api-key sk-secret hidden chain-of-thought"

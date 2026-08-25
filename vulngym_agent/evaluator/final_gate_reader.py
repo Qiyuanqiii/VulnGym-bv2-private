@@ -472,6 +472,12 @@ def _verify_projection_summary(
             or summary.deferred_task_count != closure.deferred_task_count
             or summary.candidate_count != closure.candidate_count
             or summary.finding_count != closure.finding_count
+            or summary.finalized_task_count != summary.task_count
+            or summary.deferred_task_count != 0
+            or summary.finding_count < summary.task_count
+            or closure.finalized_task_count != closure.task_count
+            or closure.deferred_task_count != 0
+            or closure.finding_count < closure.task_count
             or summary.bundle_index_sha256 != closure.artifact_index_sha256
             or summary.output_manifest_sha256
             != closure.projection_manifest_sha256
@@ -628,6 +634,7 @@ def _verify_split(
         expected_artifact_index_sha256=closure.artifact_index_sha256,
         expected_tasks=bindings,
         benchmark_root=benchmark_root if split == "train" else None,
+        require_formal_outcomes=True,
     )
     if type(verified_projection) is not VerifiedDiscoveryProjectionV1:
         raise FinalGateReaderError(

@@ -246,6 +246,68 @@ class DiscoveryProjectionReaderTests(unittest.TestCase):
                 serialized = json.dumps(result.to_dict(), sort_keys=True)
                 self.assertNotIn(str(root), serialized)
 
+    def test_formal_outcome_gate_rejects_deferred_and_zero_finding_tasks(self) -> None:
+        one_finding = harness.DiscoveryProjectionStats(
+            candidate_count=1,
+            emit_review_count=1,
+            reject_review_count=0,
+            defer_review_count=0,
+            trace_node_count=0,
+            unique_findings=1,
+            emitted_findings=1,
+            truncated_findings=0,
+            task_deferred=0,
+        )
+        zero_finding = harness.DiscoveryProjectionStats(
+            candidate_count=0,
+            emit_review_count=0,
+            reject_review_count=0,
+            defer_review_count=0,
+            trace_node_count=0,
+            unique_findings=0,
+            emitted_findings=0,
+            truncated_findings=0,
+            task_deferred=0,
+        )
+        deferred = harness.DiscoveryProjectionStats(
+            candidate_count=0,
+            emit_review_count=0,
+            reject_review_count=0,
+            defer_review_count=0,
+            trace_node_count=0,
+            unique_findings=0,
+            emitted_findings=0,
+            truncated_findings=0,
+            task_deferred=1,
+        )
+
+        projection_reader._validate_formal_projection_outcomes_v1(
+            (one_finding,), ("finalized",)
+        )
+        for stats, statuses in (
+            ((zero_finding,), ("finalized",)),
+            ((deferred,), ("deferred",)),
+        ):
+            with self.subTest(statuses=statuses), self.assertRaises(
+                DiscoveryProjectionReaderError
+            ) as captured:
+                projection_reader._validate_formal_projection_outcomes_v1(
+                    stats, statuses
+                )
+            self.assertEqual("formal_outcome_incomplete", captured.exception.code)
+
+        root, manifest, index, bindings = self._build("test")
+        with self.assertRaises(DiscoveryProjectionReaderError) as captured:
+            read_committed_discovery_projection_v1(
+                root,
+                expected_split="test",
+                expected_manifest_sha256=manifest,
+                expected_artifact_index_sha256=index,
+                expected_tasks=bindings,
+                require_formal_outcomes=True,
+            )
+        self.assertEqual("formal_outcome_incomplete", captured.exception.code)
+
     def test_train_requires_trusted_root_and_test_never_calls_oracle(self) -> None:
         train_root, train_manifest, train_index, train_bindings = self._build("train")
         with mock.patch.object(

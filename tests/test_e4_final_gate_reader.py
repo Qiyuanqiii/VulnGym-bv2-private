@@ -203,8 +203,8 @@ class FinalGateReaderTests(unittest.TestCase):
         )
         e4_wire_payload = f"{split}:exact-e4-wire\n".encode("utf-8")
         self.e4_wire_payloads[e4.receipt_sha256] = e4_wire_payload
-        finalized = count - 1
-        deferred = 1
+        finalized = count
+        deferred = 0
         candidate_count = count * 2
         finding_count = count
         aggregate_file_sha256 = (

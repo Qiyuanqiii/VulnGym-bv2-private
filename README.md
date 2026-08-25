@@ -676,6 +676,94 @@ restricted to 1..64. Both publish `findings.jsonl`, `task_results.jsonl`, and
 its dedicated test read surface, never invokes the training aggregate, and
 does not load the public training answers.
 
+#### Credential-free D2/D3 replay authoring
+
+`python -m vulngym_agent.replay_authoring_cli` prepares one production
+`OciReplayConfigV1` pair without an online provider or model credential. The
+trusted preparer starts from an authenticated single-task sealed bundle and a
+caller-pinned canonical `DiscoveryTaskInputV1` JSON line. Every step reruns the
+fixed D2 -> D3 controller from the beginning, consumes the saved ordered prefix,
+and emits only the first missing request as a canonical, path-free object bound
+to `task_id`, `role`, `stage`, payload, request SHA-256, the one-based occurrence
+of that request, and the semantic SHA-256 of the exact replay prefix. Identical
+requests may legitimately recur; their transcript position and prefix binding
+keep an earlier response envelope from authorizing a later occurrence.
+
+Create an empty draft and inspect its first request:
+
+```bash
+python -m vulngym_agent.replay_authoring_cli init \
+  --task-file /srv/vulngym/control/task.json \
+  --expected-task-wire-sha256 <task-file-sha256> \
+  --draft-root /srv/vulngym/replay-drafts/VG-TRAIN-00000000000000000000
+
+python -m vulngym_agent.replay_authoring_cli next-request \
+  --task-file /srv/vulngym/control/task.json \
+  --expected-task-wire-sha256 <task-file-sha256> \
+  --sealed-bundle-root /srv/vulngym/sealed/VG-TRAIN-00000000000000000000 \
+  --draft-root /srv/vulngym/replay-drafts/VG-TRAIN-00000000000000000000 \
+  --key-file /srv/vulngym/secrets/snapshot.key \
+  --key-id evaluator-snapshot-v1 > pending-request.json
+```
+
+Exit code `10` means the canonical stdout object is the next request. A human
+or an Agent writes only a structured JSON object for that request. Bind it to
+the request before submitting it; this prevents a stale response from being
+applied after a restart:
+
+```python
+import json
+from pathlib import Path
+from vulngym_agent.evaluator import (
+    ReplayAuthoringPendingRequestV1,
+    ReplayAuthoringResponseV1,
+)
+
+pending = ReplayAuthoringPendingRequestV1.from_bytes(
+    Path("pending-request.json").read_bytes()
+)
+body = json.loads(Path("response-body.json").read_text(encoding="utf-8"))
+Path("response-envelope.json").write_bytes(
+    ReplayAuthoringResponseV1.from_pending(pending, body).to_bytes()
+)
+```
+
+Submit `response-envelope.json` with `respond` and the same pinned task,
+sealed-bundle, draft, and key arguments plus
+`--response-file response-envelope.json`. Repeat while the command returns
+`10`. A terminal response returns a canonical `closed` summary with code `0`.
+Then run `finalize` with the same arguments and a new `--output-root`; it
+performs another pure offline production-backend replay, requires every saved
+response to be consumed exactly once in order, and atomically publishes only
+`d2.json` and `d3.json`.
+
+Draft updates are same-directory atomic replacements. Invalid, stale, unused,
+out-of-order, or structurally rejected responses do not advance the prefix.
+Formal worker execution independently repeats exact-closure enforcement. When
+D2 explicitly defers, D3 must contain zero responses. The API rejects sealed,
+draft, and publication directory overlap (including ancestor/descendant and
+existing filesystem aliases), rechecks stable identities and exact draft
+membership, and reports a post-replacement verification failure as committed
+but uncertain instead of claiming rollback. The CLI additionally isolates the
+task, key, response, draft, sealed, and output paths; its error records are
+fixed and path-free. Exit code `11` means a committed update must be inspected
+by digest before retrying.
+
+A terminal summary exposes `run_outcome` (`d2_deferred`, `d3_deferred`, or
+`finalized`) plus candidate, finding, reviewer-verdict, accept, reject, and
+defer counts. Call `validate_formal_replay_pair_v1(d2, d3)` for the minimum
+static non-smoke shape: both canonical role-bound configs must be non-empty.
+This is not a quality assertion; a release gate must still require the intended
+runtime outcome and evaluator receipt (for example, finalized with a nonzero
+finding count). `validate_empty_smoke_replay_pair_v1(d2, d3)` is the separate
+two-empty-config compatibility check. Empty configs retain a narrow smoke
+meaning (one first-request miss, or an unused lazy D3 branch); generating 70
+empty/deferred pairs can test mechanics but does not constitute the real
+quality gate. Agent-authored responses remain untrusted inputs, so separate
+critic/reviewer Agents may help author them, but only the fixed controllers,
+sealed source tools, offline replay, and final evaluator decide whether the
+pair closes.
+
 Phase E now includes the fixed offline Linux OCI single-task boundary, the
 serial E4 split scheduler, committed execution/projection readers, and one
 test-first 20+50 final-gate transaction. The outer coordinator completes and

@@ -781,6 +781,33 @@ def _validate_task_results(
     return tuple(stats), tuple(statuses)
 
 
+def _validate_formal_projection_outcomes_v1(
+    stats: tuple[DiscoveryProjectionStats, ...],
+    statuses: tuple[str, ...],
+) -> None:
+    """Require one finalized, non-empty result for every formal-gate task.
+
+    This is deliberately a mechanical completion check.  It does not claim
+    that a finding is correct and it does not replace scoring against trusted
+    gold.
+    """
+
+    if (
+        type(stats) is not tuple
+        or type(statuses) is not tuple
+        or not stats
+        or len(stats) != len(statuses)
+        or any(type(item) is not DiscoveryProjectionStats for item in stats)
+        or any(type(status) is not str for status in statuses)
+        or any(status != "finalized" for status in statuses)
+        or any(item.unique_findings < 1 for item in stats)
+    ):
+        raise DiscoveryProjectionReaderError(
+            "formal_outcome_incomplete",
+            "formal final gate requires every task finalized with a finding",
+        )
+
+
 def _validate_findings(
     records: tuple[dict[str, Any], ...],
     *,
@@ -904,6 +931,7 @@ def read_committed_discovery_projection_v1(
     expected_artifact_index_sha256: str,
     expected_tasks: tuple[DiscoveryProjectionTaskBindingV1, ...],
     benchmark_root: str | os.PathLike[str] | None = None,
+    require_formal_outcomes: bool = False,
 ) -> VerifiedDiscoveryProjectionV1:
     """Verify one stable committed projection from external pins.
 
@@ -912,6 +940,10 @@ def read_committed_discovery_projection_v1(
     root and never enters the training oracle surface.
     """
 
+    if type(require_formal_outcomes) is not bool:
+        raise DiscoveryProjectionReaderError(
+            "invalid_argument", "formal outcome mode must be an exact boolean"
+        )
     split, manifest_pin, index_pin, bindings = _validate_expected_bindings(
         expected_split=expected_split,
         expected_manifest_sha256=expected_manifest_sha256,
@@ -966,6 +998,8 @@ def read_committed_discovery_projection_v1(
             allow_empty=False,
         )
         stats, statuses = _validate_task_results(task_results, bindings=bindings)
+        if require_formal_outcomes:
+            _validate_formal_projection_outcomes_v1(stats, statuses)
         findings = _parse_canonical_jsonl(
             payloads["findings.jsonl"],
             name="projection findings",

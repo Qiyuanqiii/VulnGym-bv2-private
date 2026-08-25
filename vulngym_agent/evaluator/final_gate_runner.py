@@ -846,6 +846,9 @@ def _project_and_read_split(
         or summary.split != split_plan.split
         or summary.task_count != split_plan.task_count
         or summary.bundle_index_sha256 != artifact_index_sha256
+        or summary.finalized_task_count != summary.task_count
+        or summary.deferred_task_count != 0
+        or summary.finding_count < summary.task_count
     ):
         raise FinalGateRunnerError(
             "projection_mismatch", "projection summary differs from its split"
@@ -860,6 +863,7 @@ def _project_and_read_split(
             benchmark_root=(
                 benchmark_root if split_plan.split == "train" else None
             ),
+            require_formal_outcomes=True,
         )
     except DiscoveryProjectionReaderError:
         raise FinalGateRunnerError(
@@ -874,6 +878,9 @@ def _project_and_read_split(
         or verified.summary != summary
         or verified.summary.output_manifest_sha256
         != summary.output_manifest_sha256
+        or verified.summary.finalized_task_count != verified.summary.task_count
+        or verified.summary.deferred_task_count != 0
+        or verified.summary.finding_count < verified.summary.task_count
         or (split_plan.split == "test" and verified.aggregate_file_sha256 is not None)
         or (split_plan.split == "train" and verified.aggregate_file_sha256 is None)
     ):

@@ -16,7 +16,11 @@ from __future__ import annotations
 import os
 from typing import Final
 
-from vulngym_agent.agents.model_runtime import StructuredModelBackend
+from vulngym_agent.agents.model_runtime import (
+    ReplayClosureError,
+    ReplayStructuredModelBackend,
+    StructuredModelBackend,
+)
 from vulngym_agent.benchmark.sealed_tree_access import (
     DEFAULT_SEALED_TREE_ACCESS_LIMITS,
     SealedTreeAccessError,
@@ -214,13 +218,27 @@ def execute_discovery_worker_v1(
             d3_budget_factory=lambda: Budget(d3_limits),
             d3_backend=d3_backend,
         )
+        for backend in (d2_backend, d3_backend):
+            if isinstance(backend, ReplayStructuredModelBackend):
+                # Invoke the trusted implementation directly so a subclass
+                # cannot override closure and turn an unconsumed transcript
+                # into a successful formal worker result.
+                ReplayStructuredModelBackend.assert_exact_closure(backend)
     except SealedTreeAccessError:
         raise IsolatedWorkerError(
             "source_rejected", "worker source mount did not remain verified"
         ) from None
     except IsolatedWorkerError:
         raise
-    except (AttributeError, KeyError, RecursionError, RuntimeError, TypeError, ValueError):
+    except (
+        AttributeError,
+        KeyError,
+        RecursionError,
+        ReplayClosureError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ):
         raise IsolatedWorkerError(
             "run_failed", "worker run did not close successfully"
         ) from None

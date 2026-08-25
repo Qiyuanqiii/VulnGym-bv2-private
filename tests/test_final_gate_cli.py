@@ -83,8 +83,8 @@ class FinalGateCliTests(unittest.TestCase):
             artifact_index_sha256=_sha(f"{split}:artifact-index"),
             projection_manifest_sha256=_sha(f"{split}:projection"),
             task_count=count,
-            finalized_task_count=count - 1,
-            deferred_task_count=1,
+            finalized_task_count=count,
+            deferred_task_count=0,
             candidate_count=count * 2,
             finding_count=count,
             aggregate_file_sha256=(

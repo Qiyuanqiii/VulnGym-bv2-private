@@ -61,6 +61,17 @@ class ModelLedgerMismatch(ModelRuntimeError):
     """Raised when recorded model calls do not exactly match the budget ledger."""
 
 
+class ReplayClosureError(ModelRuntimeError):
+    """Raised when an ordered offline replay did not close exactly once.
+
+    A non-empty replay is an invocation transcript, not a request dictionary:
+    every registered response must be consumed once and in order, and no
+    request may fall off the end.  The sole exception is the deliberately empty
+    smoke fixture.  It may remain unused (for a lazy D3 branch) or block one
+    request (for an explicit all-deferred smoke run).
+    """
+
+
 class ModelBlocked(RuntimeError):
     """Stable expected refusal from a structured model backend.
 
@@ -311,9 +322,20 @@ class ReplayResponse:
 
 
 class ReplayStructuredModelBackend:
-    """Offline backend that serves only constructor-registered exact matches."""
+    """Offline backend that consumes one exact ordered response transcript."""
 
-    __slots__ = ("_backend_id", "_model_id", "_responses")
+    __slots__ = (
+        "_backend_id",
+        "_closed",
+        "_consumed",
+        "_entries",
+        "_invocations",
+        "_lock",
+        "_misses",
+        "_model_id",
+        "_order_mismatches",
+        "_responses",
+    )
 
     def __init__(
         self,
@@ -337,16 +359,27 @@ class ReplayStructuredModelBackend:
         if any(not isinstance(item, ReplayResponse) for item in items):
             raise ValueError("entries must contain only ReplayResponse values")
         responses: dict[tuple[str, str], Mapping[str, Any]] = {}
+        ordered: list[tuple[tuple[str, str], Mapping[str, Any]]] = []
         for item in items:
             key = (item.stage, item.request_sha256)
-            if key in responses:
-                raise ValueError("duplicate replay request registration")
             # Copy through the bounded validator so the backend does not rely
             # on mutable caller-owned state, even if a future entry type does.
-            responses[key] = _freeze_json_object(
+            response = _freeze_json_object(
                 item.response, name="registered replay response"
             )
+            # ``registered_keys`` remains a compatibility projection.  The
+            # ordered ledger below is authoritative and deliberately permits
+            # the same request identity to occur more than once.
+            responses.setdefault(key, response)
+            ordered.append((key, response))
         self._responses = MappingProxyType(responses)
+        self._entries = tuple(ordered)
+        self._consumed = 0
+        self._invocations = 0
+        self._misses = 0
+        self._order_mismatches = 0
+        self._closed = False
+        self._lock = RLock()
 
     @property
     def backend_id(self) -> str:
@@ -360,13 +393,82 @@ class ReplayStructuredModelBackend:
     def registered_keys(self) -> frozenset[tuple[str, str]]:
         return frozenset(self._responses)
 
+    @property
+    def registered_sequence(self) -> tuple[tuple[str, str], ...]:
+        """Return the immutable invocation order authorized by the fixture."""
+
+        return tuple(key for key, _response in self._entries)
+
+    @property
+    def consumed_sequence(self) -> tuple[tuple[str, str], ...]:
+        """Return the exact registered prefix consumed so far."""
+
+        with self._lock:
+            return tuple(key for key, _response in self._entries[: self._consumed])
+
+    @property
+    def remaining_sequence(self) -> tuple[tuple[str, str], ...]:
+        """Return the exact registered suffix that has not been consumed."""
+
+        with self._lock:
+            return tuple(key for key, _response in self._entries[self._consumed :])
+
+    @property
+    def invocation_count(self) -> int:
+        with self._lock:
+            return self._invocations
+
+    @property
+    def exact_closure_succeeded(self) -> bool:
+        with self._lock:
+            return self._closed
+
     def invoke(self, request: ModelRequest) -> Mapping[str, Any]:
-        try:
-            response = self._responses[(request.stage, request.request_sha256)]
-        except KeyError as exc:
-            raise ModelBlocked("replay_miss") from exc
-        # Return another frozen copy so callers cannot mutate registry state.
-        return _freeze_json_object(response, name="replay response")
+        key = (request.stage, request.request_sha256)
+        with self._lock:
+            if self._closed:
+                raise ReplayClosureError("replay backend is already closed")
+            self._invocations += 1
+            if self._consumed >= len(self._entries):
+                self._misses += 1
+                raise ModelBlocked("replay_miss")
+            expected, response = self._entries[self._consumed]
+            if key != expected:
+                self._order_mismatches += 1
+                raise ModelBlocked("replay_order_mismatch")
+            self._consumed += 1
+            # Return another frozen copy so callers cannot mutate registry state.
+            return _freeze_json_object(response, name="replay response")
+
+    def assert_exact_closure(self) -> None:
+        """Seal the backend after proving exact ordered consumption.
+
+        Empty fixtures intentionally retain their established smoke semantics:
+        a lazy branch may make no call, while an exercised branch may block its
+        first request.  Any other invocation of an empty fixture is ambiguous.
+        """
+
+        with self._lock:
+            if self._closed:
+                return
+            empty_smoke_closed = (
+                not self._entries
+                and self._order_mismatches == 0
+                and self._misses == self._invocations
+                and self._invocations in {0, 1}
+            )
+            exact_nonempty_closed = (
+                bool(self._entries)
+                and self._consumed == len(self._entries)
+                and self._invocations == len(self._entries)
+                and self._misses == 0
+                and self._order_mismatches == 0
+            )
+            if not (empty_smoke_closed or exact_nonempty_closed):
+                raise ReplayClosureError(
+                    "replay responses were not consumed exactly once in order"
+                )
+            self._closed = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -821,6 +923,7 @@ __all__ = [
     "MODEL_STAGES",
     "ModelBlocked",
     "ModelLedgerMismatch",
+    "ReplayClosureError",
     "ModelRequest",
     "ModelResult",
     "ModelRuntimeError",
