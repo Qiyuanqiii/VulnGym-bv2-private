@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
+from unittest import mock
+
+import vulngym_agent.evaluator.bounded_process as bounded_process_module
 
 from vulngym_agent.tools.git import (
     GitBlobTooLarge,
     GitCommandError,
     GitRepository,
     RepositoryUnavailable,
+)
+from vulngym_agent.tools.git.repository import (
+    BoundedProcessOutputTooLarge,
+    run_bounded_process,
 )
 
 
@@ -162,6 +172,132 @@ class RawGitTreeTests(unittest.TestCase):
             self.skipTest(f"hard links are unavailable: {error}")
         with self.assertRaises(RepositoryUnavailable):
             self.repository.assert_storage_safe()
+
+    def test_critical_metadata_identity_and_hardlinks_are_rejected(self) -> None:
+        config = self.root / ".git" / "config"
+        outside = self.root / "outside-config-link"
+        try:
+            outside.hardlink_to(config)
+        except (OSError, NotImplementedError) as error:
+            self.skipTest(f"hard links are unavailable: {error}")
+        with self.assertRaises(RepositoryUnavailable):
+            self.repository.assert_storage_safe()
+
+    def test_promisor_pack_marker_and_packed_refs_appearance_are_rejected(self) -> None:
+        promisor = self.root / ".git" / "objects" / "pack" / ("a" * 40 + ".promisor")
+        promisor.write_bytes(b"")
+        with self.assertRaises(RepositoryUnavailable):
+            self.repository.assert_storage_safe()
+        promisor.unlink()
+
+        packed_refs = self.root / ".git" / "packed-refs"
+        packed_refs.write_text("# pack-refs with: peeled fully-peeled\n", encoding="ascii")
+        with self.assertRaises(RepositoryUnavailable):
+            self.repository.assert_storage_safe()
+
+    def test_bounded_process_never_buffers_past_stdout_limit(self) -> None:
+        with self.assertRaises(BoundedProcessOutputTooLarge) as captured:
+            run_bounded_process(
+                (
+                    sys.executable,
+                    "-c",
+                    "import sys;sys.stdout.buffer.write(b'x'*65536)",
+                ),
+                cwd=self.root,
+                environment=os.environ,
+                timeout_seconds=10,
+                max_stdout_bytes=64,
+                max_stderr_bytes=64,
+            )
+        self.assertEqual(captured.exception.stream_name, "stdout")
+
+    def test_bounded_process_timeout_terminates_real_descendant_tree(self) -> None:
+        marker = self.root / "late-descendant.txt"
+        child_source = (
+            "import pathlib,time;time.sleep(1);"
+            f"pathlib.Path({str(marker)!r}).write_text('late')"
+        )
+        parent_source = (
+            "import subprocess,sys,time;"
+            f"subprocess.Popen((sys.executable,'-I','-B','-c',{child_source!r}));"
+            "time.sleep(30)"
+        )
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_bounded_process(
+                (sys.executable, "-I", "-B", "-c", parent_source),
+                cwd=self.root,
+                environment=os.environ,
+                timeout_seconds=0.25,
+                max_stdout_bytes=1024,
+                max_stderr_bytes=1024,
+            )
+        time.sleep(1.2)
+        self.assertFalse(marker.exists())
+
+    def test_bounded_process_overflow_terminates_real_descendant_tree(
+        self,
+    ) -> None:
+        marker = self.root / "late-overflow-descendant.txt"
+        child_source = (
+            "import pathlib,time;time.sleep(1);"
+            f"pathlib.Path({str(marker)!r}).write_text('late')"
+        )
+        parent_source = (
+            "import os,subprocess,sys,time;"
+            f"subprocess.Popen((sys.executable,'-I','-B','-c',{child_source!r}));"
+            "os.write(1,b'x'*65536);time.sleep(30)"
+        )
+        with self.assertRaises(BoundedProcessOutputTooLarge):
+            run_bounded_process(
+                (sys.executable, "-I", "-B", "-c", parent_source),
+                cwd=self.root,
+                environment=os.environ,
+                timeout_seconds=10,
+                max_stdout_bytes=64,
+                max_stderr_bytes=1024,
+            )
+        time.sleep(1.2)
+        self.assertFalse(marker.exists())
+
+    def test_bounded_process_keyboard_interrupt_terminates_real_descendant_tree(
+        self,
+    ) -> None:
+        ready = self.root / "descendant-ready.txt"
+        marker = self.root / "late-interrupted-descendant.txt"
+        child_source = (
+            "import pathlib,time;"
+            f"pathlib.Path({str(ready)!r}).write_text('ready');"
+            "time.sleep(1);"
+            f"pathlib.Path({str(marker)!r}).write_text('late')"
+        )
+        parent_source = (
+            "import subprocess,sys,time;"
+            f"subprocess.Popen((sys.executable,'-I','-B','-c',{child_source!r}));"
+            "time.sleep(30)"
+        )
+        original_monotonic = time.monotonic
+
+        def interrupt_after_descendant_started() -> float:
+            if ready.exists():
+                raise KeyboardInterrupt
+            return original_monotonic()
+
+        with mock.patch.object(
+            bounded_process_module.time,
+            "monotonic",
+            side_effect=interrupt_after_descendant_started,
+        ), self.assertRaises(KeyboardInterrupt):
+            run_bounded_process(
+                (sys.executable, "-I", "-B", "-c", parent_source),
+                cwd=self.root,
+                environment=os.environ,
+                timeout_seconds=10,
+                max_stdout_bytes=1024,
+                max_stderr_bytes=1024,
+            )
+        self.assertTrue(ready.exists())
+        time.sleep(1.2)
+        self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

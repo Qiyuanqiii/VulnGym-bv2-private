@@ -536,13 +536,14 @@ def run_bounded_process_v1(
             daemon=True,
         ),
     )
-    for thread in threads:
-        thread.start()
-
     timed_out = False
     interrupted = False
-    deadline = time.monotonic() + float(timeout_seconds)
+    started_threads: list[threading.Thread] = []
     try:
+        for thread in threads:
+            thread.start()
+            started_threads.append(thread)
+        deadline = time.monotonic() + float(timeout_seconds)
         while process.poll() is None:
             if overflow.is_set() or pump_failed.is_set():
                 _terminate_process_tree(process, windows_job=windows_job)
@@ -571,9 +572,9 @@ def run_bounded_process_v1(
             pass
         raise
     finally:
-        for thread in threads:
+        for thread in started_threads:
             thread.join(timeout=5)
-        if any(thread.is_alive() for thread in threads):
+        if any(thread.is_alive() for thread in started_threads):
             _terminate_process_tree(process, windows_job=windows_job)
             if not interrupted:
                 pump_failed.set()

@@ -239,12 +239,54 @@ source-map 是独立、严格、canonical 的受信配置，`sources` 必须按 
 SHA-256、同一 HMAC key 和
 预期 key ID，并深度复验外层布局和每题 tree：
 
+source-map 由受信的 `source_acquisition_cli prepare` 从一至两个已验证 answer-free task
+export 机械生成，不要求操作员手写 URL 或 commit。它只接受 canonical GitHub HTTPS
+identity，按 `<store>/<owner>/<repo>.git` 建立互不共享对象的 bare SHA-1 repository，并把
+每个精确 commit 固定在 `refs/vulngym/<commit>`；fetch 禁止 shallow、filter、alternate、
+worktree 与交互式凭据提示，随后执行 storage checks、ref/cat-file 闭合和
+`git fsck --full --strict`。默认 HTTPS；受控网络必须使用 SSH 时，只能通过
+`--github-transport ssh --ssh-executable /usr/bin/ssh` 将已验证 HTTPS identity 派生为固定
+GitHub SSH transport，并强制 BatchMode/no-prompt/host-key checking、忽略 ambient 用户 SSH
+配置且禁用 ProxyCommand/ProxyJump，不能接收任意 SSH URL。
+
+```bash
+python -m vulngym_agent.source_acquisition_cli prepare \
+  --repository-store /srv/vulngym/repos \
+  --output-dir /srv/vulngym/source-controls \
+  --git-executable /usr/bin/git \
+  --github-transport ssh \
+  --ssh-executable /usr/bin/ssh \
+  --test-task-export-dir /srv/vulngym/exports/test-tasks \
+  --test-expected-tasks-sha256 <test-tasks-jsonl-sha256> \
+  --train-task-export-dir /srv/vulngym/exports/train-tasks \
+  --train-expected-tasks-sha256 <train-tasks-jsonl-sha256>
+
+python -m vulngym_agent.source_acquisition_cli verify \
+  --repository-store /srv/vulngym/repos \
+  --output-dir /srv/vulngym/source-controls \
+  --git-executable /usr/bin/git \
+  --github-transport ssh \
+  --ssh-executable /usr/bin/ssh \
+  --test-task-export-dir /srv/vulngym/exports/test-tasks \
+  --test-expected-tasks-sha256 <test-tasks-jsonl-sha256> \
+  --train-task-export-dir /srv/vulngym/exports/train-tasks \
+  --train-expected-tasks-sha256 <train-tasks-jsonl-sha256>
+```
+
+输出的 acquisition report 不含宿主机路径，逐 commit 记录 root tree、tree mode、
+symlink/gitlink/LFS、资源上限、扫描完整性和稳定状态码；source-map 因包含 canonical
+absolute repo path，其 digest 必然与平台/部署路径绑定。fetch/fsck 成功不等于 sealed-ready：
+report 与 CLI summary 都闭合 `ready_task_count/blocked_task_count`；有 policy-blocked commit
+时仍发布诊断控制文件，但 CLI 返回 10，禁止自动化误把“取源成功”解释成“可制备”。输出
+采用 no-replace 发布；提交点后若 readback/identity 不确定，返回 `publication_uncertain`
+（status 5）并保留 destination，调用方只能做精确 `verify`，不能按路径名回滚或清理。
+
 ```bash
 python -m vulngym_agent.snapshot_cli prepare \
   --task-export-dir /srv/vulngym/exports/test-tasks \
   --expected-tasks-sha256 <tasks-jsonl-sha256> \
   --expected-public-manifest-sha256 <public-manifest-sha256> \
-  --source-map /srv/vulngym/config/source-map.json \
+  --source-map /srv/vulngym/source-controls/test-source-map.json \
   --expected-source-map-sha256 <source-map-file-sha256> \
   --output-dir /srv/vulngym/sealed/test \
   --key-file /srv/vulngym/secrets/snapshot-hmac.key \

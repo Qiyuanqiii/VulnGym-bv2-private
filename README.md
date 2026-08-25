@@ -522,8 +522,63 @@ task export exactly by `(repo_url, commit)`, with neither missing nor extra
 repositories:
 
 ```json
-{"kind":"sealed_snapshot_source_map","profile_id":"vulngym-50-20-v1","public_manifest_sha256":"<public-manifest-sha256>","schema_version":"1.0.0","sources":[{"commit":"<40-lower-case-hex>","repo_root":"/srv/vulngym/repos/project","repo_url":"https://github.com/owner/project"}],"tasks_sha256":"<tasks-jsonl-sha256>"}
+{"kind":"sealed_snapshot_source_map","profile_id":"vulngym-50-20-v1","public_manifest_sha256":"<public-manifest-sha256>","schema_version":"1.0.0","sources":[{"commit":"<40-lower-case-hex>","repo_root":"/srv/vulngym/repos/owner/project.git","repo_url":"https://github.com/owner/project"}],"tasks_sha256":"<tasks-jsonl-sha256>"}
 ```
+
+The trusted source-acquisition CLI constructs these maps from one or both
+verified task exports; operators do not hand-author repository identities or
+commit pins. It accepts canonical `https://github.com/<owner>/<repo>`
+identities only, creates one independent bare SHA-1 object store at
+`<repository-store>/<owner>/<repo>.git`, and binds every exact commit to
+`refs/vulngym/<commit>`. Fetches are full (no shallow/filter/alternate/worktree
+storage), non-interactive, followed by storage checks, exact ref/cat-file
+verification, and `git fsck --full --strict`. HTTPS is the default transport.
+`--github-transport ssh` derives only the fixed
+`git@github.com:<owner>/<repo>.git` transport from the already verified HTTPS
+identity and requires an explicit SSH executable with batch/no-prompt host-key
+checking. It ignores ambient user SSH configuration and disables proxy command
+and proxy jump rewriting; an arbitrary SSH URL is never an input.
+
+```bash
+# Acquire both splits and publish canonical host-specific source maps plus a
+# path-independent acquisition/readiness report. Replace ssh with https and
+# omit --ssh-executable where HTTPS works in the evaluator environment.
+python -m vulngym_agent.source_acquisition_cli prepare \
+  --repository-store /srv/vulngym/repos \
+  --output-dir /srv/vulngym/source-controls \
+  --git-executable /usr/bin/git \
+  --github-transport ssh \
+  --ssh-executable /usr/bin/ssh \
+  --test-task-export-dir /srv/vulngym/exports/test-tasks \
+  --test-expected-tasks-sha256 <test-tasks-jsonl-sha256> \
+  --train-task-export-dir /srv/vulngym/exports/train-tasks \
+  --train-expected-tasks-sha256 <train-tasks-jsonl-sha256>
+
+# Network-free, resumable readback of repositories, refs, objects, reports,
+# and both source maps. Supply the same transport recorded by prepare.
+python -m vulngym_agent.source_acquisition_cli verify \
+  --repository-store /srv/vulngym/repos \
+  --output-dir /srv/vulngym/source-controls \
+  --git-executable /usr/bin/git \
+  --github-transport ssh \
+  --ssh-executable /usr/bin/ssh \
+  --test-task-export-dir /srv/vulngym/exports/test-tasks \
+  --test-expected-tasks-sha256 <test-tasks-jsonl-sha256> \
+  --train-task-export-dir /srv/vulngym/exports/train-tasks \
+  --train-expected-tasks-sha256 <train-tasks-jsonl-sha256>
+```
+
+`acquisition-report.json` records per-commit root tree, Git mode counts,
+symlink/gitlink/LFS counts, policy limits, scan completeness, and stable
+readiness status codes without host paths. `test-source-map.json` and
+`train-source-map.json` intentionally contain canonical absolute repository
+paths, so their digests are host-specific. A successful fetch is not a claim
+that sealed preparation is ready: the JSON summary and report close over
+`ready_task_count` and `blocked_task_count`, and the CLI returns status 10 after
+publishing diagnostics when any commit is policy-blocked. Output publication
+is no-replace; a post-commit/readback ambiguity returns
+`publication_uncertain` (status 5), preserves the destination, and requires an
+exact `verify` readback instead of path-name rollback or cleanup.
 
 ```bash
 # Prepare every task in one private staging area, verify every task, bind the
@@ -532,7 +587,7 @@ python -m vulngym_agent.snapshot_cli prepare \
   --task-export-dir /srv/vulngym/exports/test-tasks \
   --expected-tasks-sha256 <tasks-jsonl-sha256> \
   --expected-public-manifest-sha256 <public-manifest-sha256> \
-  --source-map /srv/vulngym/config/source-map.json \
+  --source-map /srv/vulngym/source-controls/test-source-map.json \
   --expected-source-map-sha256 <source-map-file-sha256> \
   --output-dir /srv/vulngym/sealed/test \
   --key-file /srv/vulngym/secrets/snapshot-hmac.key \

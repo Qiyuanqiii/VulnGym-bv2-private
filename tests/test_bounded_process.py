@@ -79,6 +79,32 @@ class BoundedProcessTests(unittest.TestCase):
             time.sleep(2.2)
             self.assertFalse(marker.exists())
 
+    def test_interrupt_while_initialising_deadline_terminates_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            marker = Path(temporary) / "late.txt"
+            child_source = (
+                "import pathlib,time; time.sleep(1); "
+                f"pathlib.Path({str(marker)!r}).write_text('late')"
+            )
+            parent_source = (
+                "import subprocess,sys,time; "
+                f"subprocess.Popen((sys.executable,'-I','-B','-c',{child_source!r})); "
+                "time.sleep(30)"
+            )
+
+            def interrupt_after_child_can_start() -> float:
+                time.sleep(0.25)
+                raise KeyboardInterrupt
+
+            with mock.patch.object(
+                bounded_module.time,
+                "monotonic",
+                side_effect=interrupt_after_child_can_start,
+            ), self.assertRaises(KeyboardInterrupt):
+                self._python(parent_source)
+            time.sleep(1.2)
+            self.assertFalse(marker.exists())
+
     def test_exited_leader_does_not_leave_background_descendant(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             marker = Path(temporary) / "orphan.txt"

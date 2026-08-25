@@ -16,10 +16,18 @@ import subprocess
 from dataclasses import dataclass
 from difflib import unified_diff
 from pathlib import Path
-from typing import Final, Sequence
+from typing import Final, Mapping, Sequence
+
+from vulngym_agent.evaluator.bounded_process import (
+    BoundedProcessError,
+    run_bounded_process_v1,
+)
 
 
 _SHA_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
+_HEAD_REF_RE: Final[re.Pattern[bytes]] = re.compile(
+    rb"ref: refs/[A-Za-z0-9][A-Za-z0-9._/-]{0,1023}\n\Z"
+)
 _MAX_ERROR_CHARS: Final[int] = 2_000
 DEFAULT_MAX_BLOB_BYTES: Final[int] = 8 * 1024 * 1024
 DEFAULT_MAX_COMMIT_BYTES: Final[int] = 1024 * 1024
@@ -31,6 +39,14 @@ DEFAULT_MAX_DIFF_OUTPUT_BYTES: Final[int] = 2 * 1024 * 1024
 DEFAULT_MAX_DIFF_LINES: Final[int] = 10_000
 MAX_DIFF_CONTEXT_LINES: Final[int] = 100
 MAX_STORAGE_SCAN_ENTRIES: Final[int] = 1_000_000
+MAX_STORAGE_SCAN_BYTES: Final[int] = 64 * 1024 * 1024 * 1024
+MAX_CRITICAL_CONFIG_BYTES: Final[int] = 1024 * 1024
+MAX_HEAD_BYTES: Final[int] = 4 * 1024
+MAX_PACKED_REFS_BYTES: Final[int] = 64 * 1024 * 1024
+MAX_SHALLOW_BYTES: Final[int] = 16 * 1024 * 1024
+DEFAULT_MAX_PROCESS_STDOUT_BYTES: Final[int] = 64 * 1024 * 1024
+DEFAULT_MAX_PROCESS_STDERR_BYTES: Final[int] = 256 * 1024
+DEFAULT_MAX_PROCESS_STDIN_BYTES: Final[int] = 16 * 1024 * 1024
 _PROMISOR_CONFIG_RE: Final[re.Pattern[str]] = re.compile(
     r"remote\..+\.promisor\Z", re.IGNORECASE
 )
@@ -54,6 +70,18 @@ class RepositoryUnavailable(GitFactError):
 
 class GitTimeoutError(GitFactError):
     """A bounded read-only Git operation exceeded its timeout."""
+
+
+class GitOutputTooLarge(GitFactError):
+    """A Git subprocess exceeded its fixed stdout or stderr byte budget."""
+
+
+class BoundedProcessOutputTooLarge(RuntimeError):
+    """A generic bounded subprocess exceeded one of its capture budgets."""
+
+    def __init__(self, stream_name: str) -> None:
+        self.stream_name = stream_name
+        super().__init__(f"subprocess {stream_name} exceeded its byte budget")
 
 
 class GitBlobTooLarge(GitFactError):
@@ -95,6 +123,26 @@ class TreeEntry:
     @property
     def is_blob(self) -> bool:
         return self.object_type == "blob"
+
+
+@dataclass(frozen=True, slots=True)
+class GitStorageSeal:
+    """Path-free identities and bounded inventory facts for Git metadata."""
+
+    git_directory_identity: tuple[int, int]
+    object_directory_identity: tuple[int, int]
+    refs_directory_identity: tuple[int, int]
+    pack_directory_identity: tuple[int, int]
+    config_identity: tuple[int, int, int, int | None]
+    head_identity: tuple[int, int, int, int | None]
+    packed_refs_identity: tuple[int, int, int, int | None] | None
+    object_entry_count: int
+    object_total_bytes: int
+    object_inventory_sha256: str
+    refs_entry_count: int
+    refs_total_bytes: int
+    refs_inventory_sha256: str
+    shallow_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,6 +235,36 @@ def _find_git_executable(disallowed_root: Path) -> str:
     )
 
 
+def _resolve_git_executable(
+    executable: str | os.PathLike[str], disallowed_root: Path
+) -> str:
+    """Resolve one explicitly trusted Git executable outside the repository."""
+
+    try:
+        spelling = os.fspath(executable)
+    except TypeError as error:
+        raise RepositoryUnavailable("git executable path is invalid") from error
+    if (
+        not isinstance(spelling, str)
+        or not spelling
+        or "\x00" in spelling
+        or any(ord(character) < 32 for character in spelling)
+        or not os.path.isabs(spelling)
+    ):
+        raise RepositoryUnavailable("git executable path is not canonical")
+    try:
+        resolved = Path(spelling).resolve(strict=True)
+    except (OSError, RuntimeError) as error:
+        raise RepositoryUnavailable("git executable path is unavailable") from error
+    if not resolved.is_file() or not os.access(resolved, os.X_OK):
+        raise RepositoryUnavailable("git executable is not executable")
+    try:
+        resolved.relative_to(disallowed_root)
+    except ValueError:
+        return str(resolved)
+    raise RepositoryUnavailable("git executable must remain outside the repository")
+
+
 def _diagnostic_text(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")[:_MAX_ERROR_CHARS]
 
@@ -205,6 +283,215 @@ def _is_reparse(result: os.stat_result) -> bool:
     return bool(attributes & flag)
 
 
+def sanitized_git_environment(
+    base: Mapping[str, str],
+    *,
+    deny_askpass_executable: str | os.PathLike[str],
+) -> dict[str, str]:
+    """Remove ambient prompt/config controls and install a fixed deny helper."""
+
+    environment = dict(base)
+    explicit = {
+        "SSH_ASKPASS",
+        "SSH_ASKPASS_REQUIRE",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "XAUTHORITY",
+        "SUDO_ASKPASS",
+    }
+    for key in tuple(environment):
+        upper = key.upper()
+        if upper.startswith("GIT_") or upper.startswith("GCM_") or upper in explicit:
+            environment.pop(key)
+    deny = os.fspath(deny_askpass_executable)
+    if not isinstance(deny, str) or not os.path.isabs(deny):
+        raise ValueError("deny askpass executable must be absolute")
+    environment.update(
+        {
+            "GCM_GUI_PROMPT": "0",
+            "GCM_INTERACTIVE": "never",
+            "GIT_ASKPASS": deny,
+            "GIT_TERMINAL_PROMPT": "0",
+            "SSH_ASKPASS": deny,
+            "SSH_ASKPASS_REQUIRE": "never",
+        }
+    )
+    return environment
+
+
+def run_bounded_process(
+    command: Sequence[str],
+    *,
+    cwd: str | os.PathLike[str],
+    environment: Mapping[str, str],
+    timeout_seconds: float,
+    input_data: bytes | None = None,
+    max_stdout_bytes: int = DEFAULT_MAX_PROCESS_STDOUT_BYTES,
+    max_stderr_bytes: int = DEFAULT_MAX_PROCESS_STDERR_BYTES,
+    max_stdin_bytes: int = DEFAULT_MAX_PROCESS_STDIN_BYTES,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one process while streaming both outputs into strict byte budgets.
+
+    ``subprocess.run(..., PIPE)`` buffers without a caller-controlled ceiling.
+    This helper drains stdout and stderr concurrently, kills the process as
+    soon as either budget is crossed, tears down the complete descendant tree,
+    and never retains more than the configured bytes for either stream.  A
+    timeout is reported with the bounded partial captures attached to
+    ``TimeoutExpired``.
+    """
+
+    if (
+        not isinstance(command, Sequence)
+        or isinstance(command, (str, bytes, bytearray))
+        or not command
+        or any(type(item) is not str or not item for item in command)
+    ):
+        raise ValueError("command must be a non-empty sequence of strings")
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or timeout_seconds <= 0
+    ):
+        raise ValueError("timeout_seconds must be positive")
+    for name, value in (
+        ("max_stdout_bytes", max_stdout_bytes),
+        ("max_stderr_bytes", max_stderr_bytes),
+        ("max_stdin_bytes", max_stdin_bytes),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"{name} must be a non-negative integer")
+    if input_data is not None and type(input_data) is not bytes:
+        raise ValueError("input_data must be exact bytes or None")
+    if input_data is not None and len(input_data) > max_stdin_bytes:
+        raise BoundedProcessOutputTooLarge("stdin")
+
+    try:
+        result = run_bounded_process_v1(
+            tuple(command),
+            input_data or b"",
+            stdout_max_bytes=max_stdout_bytes,
+            stderr_max_bytes=max_stderr_bytes,
+            timeout_seconds=float(timeout_seconds),
+            env=dict(environment),
+            cwd=os.fspath(cwd),
+        )
+    except BoundedProcessError as error:
+        if error.code == "invalid_argument":
+            raise ValueError("bounded subprocess arguments are invalid") from error
+        raise OSError("bounded subprocess could not be contained") from error
+    if result.stdout_overflow or result.stderr_overflow:
+        raise BoundedProcessOutputTooLarge(
+            "stdout" if result.stdout_overflow else "stderr"
+        )
+    if result.timed_out:
+        raise subprocess.TimeoutExpired(
+            tuple(command),
+            timeout_seconds,
+            output=result.stdout,
+            stderr=result.stderr,
+        )
+    return subprocess.CompletedProcess(
+        tuple(command),
+        result.exit_code,
+        result.stdout,
+        result.stderr,
+    )
+
+
+def _regular_identity(
+    state: os.stat_result,
+) -> tuple[int, int, int, int | None]:
+    return (
+        state.st_dev,
+        state.st_ino,
+        state.st_size,
+        getattr(state, "st_mtime_ns", None),
+    )
+
+
+def _read_safe_regular_file(
+    path: Path,
+    *,
+    max_bytes: int,
+    required: bool,
+) -> tuple[tuple[int, int, int, int | None], bytes] | None:
+    try:
+        before = os.lstat(path)
+    except FileNotFoundError:
+        if required:
+            raise RepositoryUnavailable("required Git metadata is absent")
+        return None
+    except OSError as error:
+        raise RepositoryUnavailable("Git metadata cannot be inspected") from error
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or _is_reparse(before)
+        or before.st_nlink != 1
+        or before.st_size > max_bytes
+    ):
+        raise RepositoryUnavailable("Git metadata is not a bounded direct file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RepositoryUnavailable("Git metadata cannot be opened safely") from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or opened.st_nlink != 1
+            or _regular_identity(opened) != _regular_identity(before)
+        ):
+            raise RepositoryUnavailable("Git metadata changed while opening")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        finished = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    if (
+        len(payload) > max_bytes
+        or _regular_identity(finished) != _regular_identity(opened)
+    ):
+        raise RepositoryUnavailable("Git metadata changed while reading")
+    try:
+        after = os.lstat(path)
+    except OSError as error:
+        raise RepositoryUnavailable("Git metadata changed after reading") from error
+    if (
+        not stat.S_ISREG(after.st_mode)
+        or stat.S_ISLNK(after.st_mode)
+        or _is_reparse(after)
+        or after.st_nlink != 1
+        or _regular_identity(after) != _regular_identity(opened)
+    ):
+        raise RepositoryUnavailable("Git metadata changed after reading")
+    return _regular_identity(opened), payload
+
+
+def _safe_directory_identity(path: Path) -> tuple[int, int]:
+    try:
+        state = os.lstat(path)
+    except OSError as error:
+        raise RepositoryUnavailable("required Git metadata directory is absent") from error
+    if (
+        not stat.S_ISDIR(state.st_mode)
+        or stat.S_ISLNK(state.st_mode)
+        or _is_reparse(state)
+    ):
+        raise RepositoryUnavailable("Git metadata directory is not direct")
+    return state.st_dev, state.st_ino
+
+
 class GitRepository:
     """Read immutable facts from one local Git repository.
 
@@ -221,6 +508,7 @@ class GitRepository:
         max_blob_bytes: int = DEFAULT_MAX_BLOB_BYTES,
         max_diff_input_bytes: int = DEFAULT_MAX_DIFF_INPUT_BYTES,
         max_diff_output_bytes: int = DEFAULT_MAX_DIFF_OUTPUT_BYTES,
+        git_executable: str | os.PathLike[str] | None = None,
     ) -> None:
         if (
             isinstance(timeout_seconds, bool)
@@ -328,31 +616,88 @@ class GitRepository:
         self.path = resolved
         self.git_directory = git_directory
         self.object_directory = object_directory
+        self.refs_directory = git_directory / "refs"
+        self.pack_directory = object_directory / "pack"
+        self.config_path = git_directory / "config"
+        self.head_path = git_directory / "HEAD"
+        self.packed_refs_path = git_directory / "packed-refs"
+        self._git_directory_identity = _safe_directory_identity(git_directory)
+        self._object_directory_identity = _safe_directory_identity(object_directory)
+        self._refs_directory_identity = _safe_directory_identity(self.refs_directory)
+        self._pack_directory_identity = _safe_directory_identity(self.pack_directory)
+        config = _read_safe_regular_file(
+            self.config_path,
+            max_bytes=MAX_CRITICAL_CONFIG_BYTES,
+            required=True,
+        )
+        head = _read_safe_regular_file(
+            self.head_path,
+            max_bytes=MAX_HEAD_BYTES,
+            required=True,
+        )
+        packed_refs = _read_safe_regular_file(
+            self.packed_refs_path,
+            max_bytes=MAX_PACKED_REFS_BYTES,
+            required=False,
+        )
+        if config is None or head is None:
+            raise RepositoryUnavailable("required Git metadata is absent")
+        head_value = head[1]
         try:
-            git_state = os.stat(git_directory)
-            object_state = os.stat(object_directory)
-        except OSError as error:
-            raise RepositoryUnavailable(
-                "repository metadata/object storage cannot be inspected"
-            ) from error
-        self._git_directory_identity = (git_state.st_dev, git_state.st_ino)
-        self._object_directory_identity = (object_state.st_dev, object_state.st_ino)
+            detached_head = head_value.rstrip(b"\r\n").decode(
+                "ascii", errors="strict"
+            )
+        except UnicodeDecodeError:
+            detached_head = ""
+        if not (
+            _SHA_RE.fullmatch(detached_head)
+            or (
+                _HEAD_REF_RE.fullmatch(head_value) is not None
+                and b".." not in head_value
+                and b"//" not in head_value
+                and b"/." not in head_value
+                and not head_value.rstrip(b"\n").endswith((b"/", b"."))
+            )
+        ):
+            raise RepositoryUnavailable("Git HEAD is not canonical")
+        self._config_identity = config[0]
+        self._head_identity = head[0]
+        self._packed_refs_identity = packed_refs[0] if packed_refs is not None else None
+        self._config_sha256 = hashlib.sha256(config[1]).hexdigest()
+        self._head_sha256 = hashlib.sha256(head[1]).hexdigest()
+        self._packed_refs_sha256 = (
+            hashlib.sha256(packed_refs[1]).hexdigest()
+            if packed_refs is not None
+            else None
+        )
+        self.is_bare_repository = is_bare_root
         self.timeout_seconds = float(timeout_seconds)
         self.max_blob_bytes = max_blob_bytes
         self.max_diff_input_bytes = max_diff_input_bytes
         self.max_diff_output_bytes = max_diff_output_bytes
-        self._git_executable = _find_git_executable(resolved)
+        self._git_executable = (
+            _find_git_executable(resolved)
+            if git_executable is None
+            else _resolve_git_executable(git_executable, resolved)
+        )
         self._subprocess_directory = str(Path(self._git_executable).parent)
         self._assert_repository()
         self._assert_history_storage()
+        self._assert_critical_metadata_stable()
+
+    @property
+    def git_executable(self) -> Path:
+        """Return the absolute executable selected for immutable fact reads."""
+
+        return Path(self._git_executable)
 
     def _environment(self) -> dict[str, str]:
-        environment = os.environ.copy()
+        environment = sanitized_git_environment(
+            os.environ,
+            deny_askpass_executable=self._git_executable,
+        )
         # Prevent ambient Git variables from redirecting the object database,
         # repository, config source, trace output, or helper executable path.
-        for key in tuple(environment):
-            if key.startswith("GIT_"):
-                environment.pop(key)
         environment.update(
             {
                 "GIT_ATTR_NOSYSTEM": "1",
@@ -364,7 +709,6 @@ class GitRepository:
                 "GIT_NO_LAZY_FETCH": "1",
                 "GIT_OPTIONAL_LOCKS": "0",
                 "GIT_PAGER": "cat",
-                "GIT_TERMINAL_PROMPT": "0",
             }
         )
         return environment
@@ -391,20 +735,24 @@ class GitRepository:
         operation: str,
         check: bool = True,
         input_data: bytes | None = None,
+        max_stdout_bytes: int = DEFAULT_MAX_PROCESS_STDOUT_BYTES,
+        max_stderr_bytes: int = DEFAULT_MAX_PROCESS_STDERR_BYTES,
     ) -> subprocess.CompletedProcess[bytes]:
         command = (*self._base_command(), *arguments)
         try:
-            result = subprocess.run(
+            result = run_bounded_process(
                 command,
-                input=input_data,
-                stdin=subprocess.DEVNULL if input_data is None else None,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                check=False,
                 cwd=self._subprocess_directory,
-                env=self._environment(),
-                timeout=self.timeout_seconds,
+                environment=self._environment(),
+                timeout_seconds=self.timeout_seconds,
+                input_data=input_data,
+                max_stdout_bytes=max_stdout_bytes,
+                max_stderr_bytes=max_stderr_bytes,
             )
+        except BoundedProcessOutputTooLarge as error:
+            raise GitOutputTooLarge(
+                f"git {operation} exceeded its {error.stream_name} byte budget"
+            ) from error
         except subprocess.TimeoutExpired as error:
             raise GitTimeoutError(
                 f"git {operation} exceeded {self.timeout_seconds:g} seconds"
@@ -495,40 +843,150 @@ class GitRepository:
                     "offline read-only fact gate"
                 )
 
-    def assert_storage_safe(self) -> None:
-        """Re-check the local object-store containment and redirection policy.
-
-        Snapshot preparation calls this both before and after a raw object
-        traversal.  It detects metadata-directory replacement and storage
-        redirections introduced after this wrapper was constructed.
-        """
-
-        for path, expected in (
-            (self.git_directory, self._git_directory_identity),
-            (self.object_directory, self._object_directory_identity),
+    def _assert_critical_metadata_stable(self) -> None:
+        if _safe_directory_identity(self.git_directory) != self._git_directory_identity:
+            raise RepositoryUnavailable("Git metadata directory identity changed")
+        if _safe_directory_identity(self.object_directory) != self._object_directory_identity:
+            raise RepositoryUnavailable("Git object directory identity changed")
+        if _safe_directory_identity(self.refs_directory) != self._refs_directory_identity:
+            raise RepositoryUnavailable("Git refs directory identity changed")
+        if _safe_directory_identity(self.pack_directory) != self._pack_directory_identity:
+            raise RepositoryUnavailable("Git pack directory identity changed")
+        config = _read_safe_regular_file(
+            self.config_path,
+            max_bytes=MAX_CRITICAL_CONFIG_BYTES,
+            required=True,
+        )
+        head = _read_safe_regular_file(
+            self.head_path,
+            max_bytes=MAX_HEAD_BYTES,
+            required=True,
+        )
+        packed_refs = _read_safe_regular_file(
+            self.packed_refs_path,
+            max_bytes=MAX_PACKED_REFS_BYTES,
+            required=False,
+        )
+        if (
+            config is None
+            or head is None
+            or config[0] != self._config_identity
+            or head[0] != self._head_identity
+            or hashlib.sha256(config[1]).hexdigest() != self._config_sha256
+            or hashlib.sha256(head[1]).hexdigest() != self._head_sha256
+            or (
+                packed_refs[0] if packed_refs is not None else None
+            )
+            != self._packed_refs_identity
+            or (
+                hashlib.sha256(packed_refs[1]).hexdigest()
+                if packed_refs is not None
+                else None
+            )
+            != self._packed_refs_sha256
         ):
+            raise RepositoryUnavailable("critical Git metadata identity changed")
+
+    def _scan_metadata_tree(
+        self,
+        root: Path,
+        *,
+        object_storage: bool,
+    ) -> tuple[int, int, str]:
+        pending = [root]
+        scanned = 0
+        total_bytes = 0
+        record_hashes: list[bytes] = []
+        while pending:
+            directory = pending.pop()
             try:
-                state = os.lstat(path)
+                with os.scandir(directory) as iterator:
+                    entries = tuple(iterator)
             except OSError as error:
                 raise RepositoryUnavailable(
-                    "repository metadata/object storage changed"
+                    "Git metadata cannot be scanned safely"
                 ) from error
-            if (
-                not stat.S_ISDIR(state.st_mode)
-                or stat.S_ISLNK(state.st_mode)
-                or _is_reparse(state)
-                or (state.st_dev, state.st_ino) != expected
-            ):
-                raise RepositoryUnavailable(
-                    "repository metadata/object storage changed"
+            for entry in entries:
+                scanned += 1
+                if scanned > MAX_STORAGE_SCAN_ENTRIES:
+                    raise RepositoryUnavailable(
+                        "Git metadata exceeds the entry scan limit"
+                    )
+                try:
+                    state = os.lstat(entry.path)
+                    relative = Path(entry.path).relative_to(root)
+                except (OSError, ValueError) as error:
+                    raise RepositoryUnavailable(
+                        "Git metadata changed during scanning"
+                    ) from error
+                if entry.is_symlink() or stat.S_ISLNK(state.st_mode) or _is_reparse(state):
+                    raise RepositoryUnavailable(
+                        "Git metadata must not contain links or reparse points"
+                    )
+                relative_bytes = os.fsencode(os.fspath(relative)).replace(
+                    os.fsencode(os.sep), b"/"
                 )
-        markers = (
+                if stat.S_ISDIR(state.st_mode):
+                    pending.append(Path(entry.path))
+                    kind = b"d"
+                    size = 0
+                elif stat.S_ISREG(state.st_mode) and state.st_nlink == 1:
+                    kind = b"f"
+                    size = state.st_size
+                    total_bytes += size
+                    if total_bytes > MAX_STORAGE_SCAN_BYTES:
+                        raise RepositoryUnavailable(
+                            "Git metadata exceeds the byte scan limit"
+                        )
+                    name = entry.name
+                    parts = relative.parts
+                    if object_storage and parts and parts[0] == "pack":
+                        if name.endswith(".promisor"):
+                            raise RepositoryUnavailable(
+                                "Git promisor pack metadata is forbidden"
+                            )
+                        if name.startswith("tmp_pack_") or name.endswith(".lock"):
+                            raise RepositoryUnavailable(
+                                "Git pack transaction cleanup is required"
+                            )
+                    if not object_storage and name.endswith(".lock"):
+                        raise RepositoryUnavailable(
+                            "Git ref transaction cleanup is required"
+                        )
+                else:
+                    raise RepositoryUnavailable(
+                        "Git metadata contains an unsafe file"
+                    )
+                identity = (
+                    state.st_dev,
+                    state.st_ino,
+                    size,
+                    getattr(state, "st_mtime_ns", None),
+                )
+                record_hashes.append(
+                    hashlib.sha256(
+                        kind
+                        + b"\0"
+                        + relative_bytes
+                        + b"\0"
+                        + b":".join(
+                            str(value).encode("ascii") for value in identity
+                        )
+                    ).digest()
+                )
+        inventory = hashlib.sha256(b"".join(sorted(record_hashes))).hexdigest()
+        return scanned, total_bytes, inventory
+
+    def capture_storage_seal(self) -> GitStorageSeal:
+        """Return bounded storage facts while closing critical identities."""
+
+        self._assert_critical_metadata_stable()
+        for marker in (
             self.git_directory / "commondir",
             self.object_directory / "info" / "alternates",
             self.object_directory / "info" / "http-alternates",
             self.git_directory / "info" / "grafts",
-        )
-        for marker in markers:
+        ):
             try:
                 os.lstat(marker)
             except FileNotFoundError:
@@ -540,43 +998,74 @@ class GitRepository:
             raise RepositoryUnavailable(
                 "Git storage redirection appeared after repository validation"
             )
-        pending = [self.object_directory]
-        scanned = 0
-        while pending:
-            directory = pending.pop()
+        object_count, object_bytes, object_digest = self._scan_metadata_tree(
+            self.object_directory,
+            object_storage=True,
+        )
+        refs_count, refs_bytes, refs_digest = self._scan_metadata_tree(
+            self.refs_directory,
+            object_storage=False,
+        )
+        shallow = _read_safe_regular_file(
+            self.git_directory / "shallow",
+            max_bytes=MAX_SHALLOW_BYTES,
+            required=False,
+        )
+        shallow_sha256: str | None = None
+        if shallow is not None:
+            payload = shallow[1]
             try:
-                with os.scandir(directory) as iterator:
-                    for entry in iterator:
-                        scanned += 1
-                        if scanned > MAX_STORAGE_SCAN_ENTRIES:
-                            raise RepositoryUnavailable(
-                                "Git object storage exceeds the metadata scan limit"
-                            )
-                        try:
-                            # Direct lstat is required on Windows: directory
-                            # enumeration may report a zero/one link count for
-                            # a hard-linked file even when the path itself has
-                            # multiple names.
-                            state = os.lstat(entry.path)
-                        except OSError as error:
-                            raise RepositoryUnavailable(
-                                "Git object storage changed during scanning"
-                            ) from error
-                        if entry.is_symlink() or _is_reparse(state):
-                            raise RepositoryUnavailable(
-                                "Git object storage must not contain links or reparse points"
-                            )
-                        if stat.S_ISDIR(state.st_mode):
-                            pending.append(Path(entry.path))
-                        elif not stat.S_ISREG(state.st_mode) or state.st_nlink > 1:
-                            raise RepositoryUnavailable(
-                                "Git object storage contains an unsafe object file"
-                            )
-            except OSError as error:
-                raise RepositoryUnavailable(
-                    "Git object storage cannot be scanned safely"
-                ) from error
-        self._assert_history_storage()
+                lines = payload.decode("ascii", errors="strict").splitlines()
+            except UnicodeDecodeError as error:
+                raise RepositoryUnavailable("Git shallow boundary is malformed") from error
+            if not lines or any(_SHA_RE.fullmatch(line) is None for line in lines):
+                raise RepositoryUnavailable("Git shallow boundary is malformed")
+            shallow_sha256 = hashlib.sha256(payload).hexdigest()
+        self._assert_critical_metadata_stable()
+        return GitStorageSeal(
+            git_directory_identity=self._git_directory_identity,
+            object_directory_identity=self._object_directory_identity,
+            refs_directory_identity=self._refs_directory_identity,
+            pack_directory_identity=self._pack_directory_identity,
+            config_identity=self._config_identity,
+            head_identity=self._head_identity,
+            packed_refs_identity=self._packed_refs_identity,
+            object_entry_count=object_count,
+            object_total_bytes=object_bytes,
+            object_inventory_sha256=object_digest,
+            refs_entry_count=refs_count,
+            refs_total_bytes=refs_bytes,
+            refs_inventory_sha256=refs_digest,
+            shallow_sha256=shallow_sha256,
+        )
+
+    def assert_bare_storage_safe(self) -> GitStorageSeal:
+        """Verify this is the same bounded, direct bare Git object store."""
+
+        if not self.is_bare_repository:
+            raise RepositoryUnavailable("source acquisition requires a bare repository")
+        before = self.capture_storage_seal()
+        result = self._run(
+            ("rev-parse", "--is-bare-repository"),
+            operation="rev-parse",
+            max_stdout_bytes=16,
+        )
+        if result.stderr or result.stdout != b"true\n":
+            raise RepositoryUnavailable("source repository is not exactly bare")
+        after = self.capture_storage_seal()
+        if before != after:
+            raise RepositoryUnavailable("Git storage changed during bare verification")
+        return after
+
+    def assert_storage_safe(self) -> None:
+        """Re-check the local object-store containment and redirection policy.
+
+        Snapshot preparation calls this both before and after a raw object
+        traversal.  It detects metadata-directory replacement and storage
+        redirections introduced after this wrapper was constructed.
+        """
+
+        self.capture_storage_seal()
 
     def _read_object_bytes(
         self,
@@ -595,35 +1084,19 @@ class GitRepository:
             or max_bytes < 0
         ):
             raise ValueError("max_bytes must be a non-negative integer")
-        object_type = self.object_type(object_id)
-        if object_type != expected_type:
-            detail = (
-                "object is absent"
-                if object_type is None
-                else f"object has type {object_type!r}"
-            )
-            raise GitCommandError(
-                operation,
-                128,
-                f"{object_id} is not a {expected_type}: {detail}",
-            )
-        size_result = self._run(
-            ("cat-file", "-s", object_id), operation=operation
+        object_size = self.object_size(
+            object_id,
+            expected_type=expected_type,
+            operation=operation,
         )
-        try:
-            object_size = int(size_result.stdout.decode("ascii").strip())
-        except (UnicodeDecodeError, ValueError) as error:
-            raise GitCommandError(
-                operation, 0, "git returned an invalid object size"
-            ) from error
-        if object_size < 0:
-            raise GitCommandError(operation, 0, "git returned a negative object size")
         if object_size > max_bytes:
             raise GitBlobTooLarge(
                 f"{expected_type} object is {object_size} bytes; limit is {max_bytes}"
             )
         value_result = self._run(
-            ("cat-file", expected_type, object_id), operation=operation
+            ("cat-file", expected_type, object_id),
+            operation=operation,
+            max_stdout_bytes=object_size,
         )
         data = value_result.stdout
         if len(data) != object_size:
@@ -635,6 +1108,48 @@ class GitRepository:
                 operation, 0, "Git object content does not match its object ID"
             )
         return data
+
+    def object_size(
+        self,
+        object_id: object,
+        *,
+        expected_type: str | None = None,
+        operation: str = "cat-file",
+    ) -> int:
+        """Return the exact non-negative size of one verified local object."""
+
+        object_id = validate_commit_sha(object_id)
+        if expected_type is not None and expected_type not in {
+            "blob",
+            "commit",
+            "tree",
+        }:
+            raise ValueError("expected_type is not a supported raw Git object type")
+        object_type = self.object_type(object_id)
+        if object_type is None or (
+            expected_type is not None and object_type != expected_type
+        ):
+            wanted = expected_type or "Git"
+            detail = (
+                "object is absent"
+                if object_type is None
+                else f"object has type {object_type!r}"
+            )
+            raise GitCommandError(
+                operation,
+                128,
+                f"{object_id} is not a {wanted} object: {detail}",
+            )
+        size_result = self._run(("cat-file", "-s", object_id), operation=operation)
+        try:
+            object_size = int(size_result.stdout.decode("ascii").strip())
+        except (UnicodeDecodeError, ValueError) as error:
+            raise GitCommandError(
+                operation, 0, "git returned an invalid object size"
+            ) from error
+        if object_size < 0:
+            raise GitCommandError(operation, 0, "git returned a negative object size")
+        return object_size
 
     def commit_tree(self, commit: object) -> str:
         """Return the unique root-tree ID from one exact raw commit object."""
@@ -885,6 +1400,7 @@ class GitRepository:
         result = self._run(
             ("cat-file", "commit", canonical_commit),
             operation="cat-file",
+            max_stdout_bytes=object_size,
         )
         if len(result.stdout) != object_size:
             raise GitCommandError(
@@ -917,28 +1433,19 @@ class GitRepository:
         rejected instead of followed.
         """
 
-        shallow_file = self.git_directory / "shallow"
-        if shallow_file.is_symlink():
-            raise RepositoryUnavailable(
-                f"Git shallow marker must not be a symlink: {shallow_file}"
-            )
-        if not shallow_file.exists():
+        shallow = _read_safe_regular_file(
+            self.git_directory / "shallow",
+            max_bytes=MAX_SHALLOW_BYTES,
+            required=False,
+        )
+        if shallow is None:
             return False
-        if not shallow_file.is_file():
-            raise RepositoryUnavailable(
-                f"Git shallow marker must be a regular file: {shallow_file}"
-            )
         try:
-            resolved = shallow_file.resolve(strict=True)
-        except (OSError, RuntimeError) as error:
-            raise RepositoryUnavailable(
-                f"Git shallow marker cannot be resolved: {shallow_file}"
-            ) from error
-        if resolved.parent != self.git_directory:
-            raise RepositoryUnavailable(
-                "Git shallow marker resolves outside the authorized metadata "
-                f"directory: {resolved}"
-            )
+            lines = shallow[1].decode("ascii", errors="strict").splitlines()
+        except UnicodeDecodeError as error:
+            raise RepositoryUnavailable("Git shallow marker is malformed") from error
+        if not lines or any(_SHA_RE.fullmatch(line) is None for line in lines):
+            raise RepositoryUnavailable("Git shallow marker is malformed")
         return True
 
     def history_may_be_incomplete(self) -> bool:
@@ -1075,6 +1582,7 @@ class GitRepository:
                 specification,
             ),
             operation="show",
+            max_stdout_bytes=size,
         )
         if len(result.stdout) != size:
             raise GitCommandError(

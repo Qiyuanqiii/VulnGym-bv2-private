@@ -17,6 +17,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     GIT_SYMLINK_REPRESENTATION,
     SealedSnapshotError,
     SnapshotPolicy,
+    audit_sealed_snapshot_source,
     prepare_sealed_snapshot,
     verify_sealed_snapshot,
 )
@@ -434,6 +435,65 @@ class SealedSnapshotTests(unittest.TestCase):
 
         with self.assertRaises(SealedSnapshotError):
             self._verify("symlink-substitution", expected_commit=symlink_commit)
+
+    def test_source_audit_accepts_git_symlink_representation_and_blocks_others(self) -> None:
+        symlink_commit = self._commit_git_symlinks(
+            (("link", b"../src/app.py"),), message="Git symlink audit fixture"
+        )
+        ready = audit_sealed_snapshot_source(self.repository, symlink_commit)
+        self.assertTrue(ready.ready)
+        self.assertEqual((), ready.status_codes)
+        self.assertEqual(1, ready.symlink_count)
+        self.assertEqual(0, ready.gitlink_count)
+        self.assertEqual(0, ready.lfs_pointer_count)
+        self.assertEqual(4, ready.regular_file_count)
+        self.assertIn(("120000", 1), ready.mode_counts)
+
+        size_only_cache: dict[str, tuple[int, bool | None]] = {}
+        limited = audit_sealed_snapshot_source(
+            self.repository,
+            symlink_commit,
+            policy=SnapshotPolicy(max_file_bytes=1),
+            blob_cache=size_only_cache,
+        )
+        self.assertFalse(limited.ready)
+        self.assertFalse(limited.lfs_scan_complete)
+        self.assertIn("source_limit_exceeded", limited.status_codes)
+        reused_unknown = audit_sealed_snapshot_source(
+            self.repository, symlink_commit, blob_cache=size_only_cache
+        )
+        self.assertFalse(reused_unknown.ready)
+        self.assertFalse(reused_unknown.lfs_scan_complete)
+
+        self._git("rm", "-q", "--cached", "link")
+        parent = self._git("rev-parse", "HEAD").stdout.strip()
+        self._git(
+            "update-index", "--add", "--cacheinfo", f"160000,{parent},submodule"
+        )
+        self._git("commit", "-q", "-m", "gitlink entry")
+        gitlink_commit = self._git("rev-parse", "HEAD").stdout.strip()
+        blocked_gitlink = audit_sealed_snapshot_source(
+            self.repository, gitlink_commit
+        )
+        self.assertFalse(blocked_gitlink.ready)
+        self.assertEqual(1, blocked_gitlink.gitlink_count)
+        self.assertIn("source_gitlink_rejected", blocked_gitlink.status_codes)
+
+        self._git("rm", "-q", "--cached", "submodule")
+        lfs_pointer = (
+            b"version https://git-lfs.github.com/spec/v1\n"
+            b"oid sha256:" + b"0" * 64 + b"\nsize 999\n"
+        )
+        lfs_commit = self._commit_git_symlinks(
+            (("lfs-link", lfs_pointer),), message="Git symlink LFS pointer"
+        )
+        blocked_lfs = audit_sealed_snapshot_source(self.repository, lfs_commit)
+        self.assertFalse(blocked_lfs.ready)
+        self.assertEqual(1, blocked_lfs.lfs_pointer_count)
+        self.assertEqual(1, blocked_lfs.symlink_count)
+        self.assertIn("source_lfs_rejected", blocked_lfs.status_codes)
+        with self.assertRaisesRegex(SealedSnapshotError, "LFS"):
+            self._prepare("symlink-lfs", commit=lfs_commit)
 
     def test_prepare_still_rejects_gitlink_and_lfs_pointer(self) -> None:
         parent = self._git("rev-parse", "HEAD").stdout.strip()

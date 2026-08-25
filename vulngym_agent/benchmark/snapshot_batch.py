@@ -261,7 +261,13 @@ class SnapshotBatchSummary:
 
 
 @dataclass(frozen=True, slots=True)
-class _TaskExport:
+class VerifiedTaskExport:
+    """One fully authenticated answer-free task export.
+
+    The local root is retained for trusted preparation code, while callers
+    that serialize results must deliberately select the path-free fields.
+    """
+
     root: Path
     profile_id: str
     schema_version: str
@@ -272,13 +278,44 @@ class _TaskExport:
 
 
 @dataclass(frozen=True, slots=True)
-class _SourceMap:
+class VerifiedSnapshotSourceMap:
+    """A strict source map whose repositories have canonical local roots."""
+
     path: Path
     sha256: str
     sources: Mapping[tuple[str, str], Path]
     source_chains: Mapping[
         tuple[str, str], tuple[tuple[Path, tuple[int, int]], ...]
     ]
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotSourceMapDocument:
+    """Canonical source-map bytes prepared from a verified task export."""
+
+    split: str
+    task_count: int
+    tasks_sha256: str
+    payload: bytes
+    sha256: str
+
+    def __post_init__(self) -> None:
+        if self.split not in _OFFICIAL_SPLIT_COUNTS:
+            raise ValueError("split is not an official benchmark split")
+        if self.task_count != _OFFICIAL_SPLIT_COUNTS[self.split]:
+            raise ValueError("task_count does not match the official split")
+        if not isinstance(self.payload, bytes) or not self.payload.endswith(b"\n"):
+            raise ValueError("payload must be newline-terminated bytes")
+        if len(self.payload) > _MAX_SOURCE_MAP_BYTES:
+            raise ValueError("payload exceeds the source-map byte budget")
+        for value, name in (
+            (self.tasks_sha256, "tasks_sha256"),
+            (self.sha256, "sha256"),
+        ):
+            if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+                raise ValueError(f"{name} must be a lower-case SHA-256 digest")
+        if _sha256(self.payload) != self.sha256:
+            raise ValueError("payload does not match its SHA-256 digest")
 
 
 @dataclass(slots=True)
@@ -631,12 +668,14 @@ def _fixed_names(path: Path, expected: set[str], *, status: int) -> None:
     _windows_assert_no_named_streams(path, status=status)
 
 
-def _load_task_export(
+def load_verified_task_export(
     task_export_dir: str | os.PathLike[str],
     *,
     expected_tasks_sha256: str,
     expected_public_manifest_sha256: str,
-) -> _TaskExport:
+) -> VerifiedTaskExport:
+    """Load one exact, digest-pinned answer-free task export."""
+
     expected_tasks_sha256 = _validate_sha256(
         expected_tasks_sha256, name="expected_tasks_sha256"
     )
@@ -736,7 +775,7 @@ def _load_task_export(
         )
     _assert_directory_chain(checked_root, status=2)
     _fixed_names(root, {"manifest.json", "tasks.jsonl"}, status=2)
-    return _TaskExport(
+    return VerifiedTaskExport(
         root=root,
         profile_id=manifest["profile_id"],
         schema_version=manifest["schema_version"],
@@ -770,12 +809,115 @@ def _canonical_repo_root(
     return root, checked
 
 
-def _load_source_map(
+def build_snapshot_source_map_document(
+    task_export: VerifiedTaskExport,
+    source_roots: Mapping[tuple[str, str], str | os.PathLike[str]],
+) -> SnapshotSourceMapDocument:
+    """Build canonical source-map bytes using the batch contract itself.
+
+    Repository roots are resolved and checked before their absolute canonical
+    spelling is serialized.  This intentionally makes the source-map wire
+    digest host/path specific while leaving acquisition receipts free of
+    local paths.
+    """
+
+    if type(task_export) is not VerifiedTaskExport:
+        raise SnapshotBatchError(
+            "invalid_task_export",
+            "verified task-export input has an invalid type",
+            exit_status=2,
+        )
+    if not isinstance(source_roots, Mapping):
+        raise SnapshotBatchError(
+            "invalid_source_map",
+            "source roots must be a mapping",
+            exit_status=2,
+        )
+    try:
+        supplied = dict(source_roots)
+    except (TypeError, ValueError) as error:
+        raise SnapshotBatchError(
+            "invalid_source_map",
+            "source roots cannot be snapshotted",
+            exit_status=2,
+        ) from error
+    required = {(task.repo_url, task.commit) for task in task_export.tasks}
+    if set(supplied) != required:
+        raise SnapshotBatchError(
+            "source_map_coverage_mismatch",
+            "source-map coverage must be exact with no missing or extra sources",
+            exit_status=2,
+        )
+
+    records: list[dict[str, str]] = []
+    checked_roots: list[tuple[tuple[Path, tuple[int, int]], ...]] = []
+    order = sorted(
+        required,
+        key=lambda identity: (
+            identity[0].encode("utf-8"),
+            identity[1].encode("ascii"),
+        ),
+    )
+    for repo_url, commit in order:
+        raw_root = supplied[(repo_url, commit)]
+        try:
+            root_text = os.fspath(raw_root)
+        except TypeError as error:
+            raise SnapshotBatchError(
+                "invalid_source_map",
+                "a source root has an invalid type",
+                exit_status=2,
+            ) from error
+        root, checked = _canonical_repo_root(root_text)
+        checked_roots.append(checked)
+        records.append(
+            {
+                "commit": commit,
+                "repo_root": str(root),
+                "repo_url": repo_url,
+            }
+        )
+
+    value = {
+        "kind": SOURCE_MAP_KIND,
+        "profile_id": task_export.profile_id,
+        "public_manifest_sha256": task_export.public_manifest_sha256,
+        "schema_version": SOURCE_MAP_SCHEMA_VERSION,
+        "sources": records,
+        "tasks_sha256": task_export.tasks_sha256,
+    }
+    payload = _canonical_json(value) + b"\n"
+    if len(payload) > _MAX_SOURCE_MAP_BYTES:
+        raise SnapshotBatchError(
+            "input_limit_exceeded",
+            "source-map output exceeds its byte budget",
+            exit_status=2,
+        )
+    for checked in checked_roots:
+        _assert_directory_chain(checked, status=2)
+    return SnapshotSourceMapDocument(
+        split=task_export.split,
+        task_count=len(task_export.tasks),
+        tasks_sha256=task_export.tasks_sha256,
+        payload=payload,
+        sha256=_sha256(payload),
+    )
+
+
+def load_verified_snapshot_source_map(
     source_map_path: str | os.PathLike[str],
     *,
     expected_source_map_sha256: str,
-    task_export: _TaskExport,
-) -> _SourceMap:
+    task_export: VerifiedTaskExport,
+) -> VerifiedSnapshotSourceMap:
+    """Load one canonical source map against a verified task export."""
+
+    if type(task_export) is not VerifiedTaskExport:
+        raise SnapshotBatchError(
+            "invalid_task_export",
+            "verified task-export input has an invalid type",
+            exit_status=2,
+        )
     expected_source_map_sha256 = _validate_sha256(
         expected_source_map_sha256, name="expected_source_map_sha256"
     )
@@ -867,7 +1009,7 @@ def _load_source_map(
     _assert_directory_chain(checked_parent, status=2)
     for checked in source_chains.values():
         _assert_directory_chain(checked, status=2)
-    return _SourceMap(
+    return VerifiedSnapshotSourceMap(
         path=path,
         sha256=actual_sha256,
         sources=sources,
@@ -1285,8 +1427,8 @@ def _canonical_new_child(
 def _preflight_output(
     output_dir: str | os.PathLike[str],
     *,
-    task_export: _TaskExport,
-    source_map: _SourceMap,
+    task_export: VerifiedTaskExport,
+    source_map: VerifiedSnapshotSourceMap,
 ) -> Path:
     output = _canonical_new_child(output_dir, status=2)
     try:
@@ -2128,7 +2270,7 @@ def _materialized_batch_digest(
 
 
 def _manifest_bytes(
-    task_export: _TaskExport,
+    task_export: VerifiedTaskExport,
     source_map_sha256: str,
     tasks: Sequence[SnapshotBatchTask],
     policy: SnapshotPolicy,
@@ -2197,12 +2339,12 @@ def prepare_snapshot_batch(
         )
     key = _copy_key(attestation_key)
     key_id = _validate_key_id(key_id)
-    task_export = _load_task_export(
+    task_export = load_verified_task_export(
         task_export_dir,
         expected_tasks_sha256=expected_tasks_sha256,
         expected_public_manifest_sha256=expected_public_manifest_sha256,
     )
-    source_map = _load_source_map(
+    source_map = load_verified_snapshot_source_map(
         source_map_path,
         expected_source_map_sha256=expected_source_map_sha256,
         task_export=task_export,
@@ -2828,9 +2970,15 @@ __all__ = [
     "BATCH_CONTRACT_VERSION",
     "SOURCE_MAP_KIND",
     "SOURCE_MAP_SCHEMA_VERSION",
+    "SnapshotSourceMapDocument",
     "SnapshotBatchError",
     "SnapshotBatchSummary",
     "SnapshotBatchTask",
+    "VerifiedSnapshotSourceMap",
+    "VerifiedTaskExport",
+    "build_snapshot_source_map_document",
+    "load_verified_snapshot_source_map",
+    "load_verified_task_export",
     "prepare_snapshot_batch",
     "verify_snapshot_batch",
 ]

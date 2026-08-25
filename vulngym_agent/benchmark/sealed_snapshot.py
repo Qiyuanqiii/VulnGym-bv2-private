@@ -27,7 +27,7 @@ import stat
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import Any, Final, Iterable, Mapping, MutableMapping, Sequence
 
 from vulngym_agent.tools.git.repository import (
     GitBlobTooLarge,
@@ -158,6 +158,104 @@ class SnapshotPolicy:
 
 
 DEFAULT_SNAPSHOT_POLICY: Final[SnapshotPolicy] = SnapshotPolicy()
+
+
+@dataclass(frozen=True, slots=True)
+class SealedSnapshotSourceAudit:
+    """Path-free readiness facts for one exact commit under a snapshot policy."""
+
+    commit: str
+    root_tree: str
+    ready: bool
+    scan_complete: bool
+    lfs_scan_complete: bool
+    status_codes: tuple[str, ...]
+    tree_entry_count: int | None
+    tree_count: int | None
+    regular_file_count: int | None
+    total_regular_bytes: int | None
+    symlink_count: int | None
+    gitlink_count: int | None
+    lfs_pointer_count: int | None
+    oversized_blob_count: int | None
+    unsupported_entry_count: int | None
+    mode_counts: tuple[tuple[str, int], ...]
+    policy: SnapshotPolicy = DEFAULT_SNAPSHOT_POLICY
+
+    def __post_init__(self) -> None:
+        validate_commit_sha(self.commit)
+        validate_commit_sha(self.root_tree)
+        if not isinstance(self.ready, bool) or not isinstance(self.scan_complete, bool):
+            raise ValueError("audit readiness flags must be booleans")
+        if not isinstance(self.lfs_scan_complete, bool):
+            raise ValueError("lfs_scan_complete must be a boolean")
+        codes = tuple(self.status_codes)
+        modes = tuple(self.mode_counts)
+        object.__setattr__(self, "status_codes", codes)
+        object.__setattr__(self, "mode_counts", modes)
+        if len(set(codes)) != len(codes) or any(
+            not isinstance(code, str) or not code for code in codes
+        ):
+            raise ValueError("status_codes must be unique non-empty strings")
+        if self.ready != (
+            self.scan_complete and self.lfs_scan_complete and not codes
+        ):
+            raise ValueError("ready does not close over audit state")
+        counters = (
+            self.tree_entry_count,
+            self.tree_count,
+            self.regular_file_count,
+            self.total_regular_bytes,
+            self.symlink_count,
+            self.gitlink_count,
+            self.lfs_pointer_count,
+            self.oversized_blob_count,
+            self.unsupported_entry_count,
+        )
+        if self.scan_complete:
+            if any(
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+                for value in counters
+            ):
+                raise ValueError("complete audit counters must be non-negative integers")
+        elif any(value is not None for value in counters):
+            raise ValueError("incomplete audit counters must be unavailable")
+        if any(
+            not isinstance(mode, str)
+            or not mode
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count < 1
+            for mode, count in modes
+        ):
+            raise ValueError("mode_counts are invalid")
+        if tuple(sorted(modes)) != modes:
+            raise ValueError("mode_counts must be sorted")
+        if not isinstance(self.policy, SnapshotPolicy):
+            raise ValueError("policy must be a SnapshotPolicy")
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "commit": self.commit,
+            "gitlink_count": self.gitlink_count,
+            "lfs_pointer_count": self.lfs_pointer_count,
+            "lfs_scan_complete": self.lfs_scan_complete,
+            "mode_counts": {mode: count for mode, count in self.mode_counts},
+            "oversized_blob_count": self.oversized_blob_count,
+            "policy": self.policy.to_dict(),
+            "ready": self.ready,
+            "regular_file_count": self.regular_file_count,
+            "root_tree": self.root_tree,
+            "scan_complete": self.scan_complete,
+            "status_codes": list(self.status_codes),
+            "symlink_count": self.symlink_count,
+            "total_regular_bytes": self.total_regular_bytes,
+            "tree_count": self.tree_count,
+            "tree_entry_count": self.tree_entry_count,
+            "unsupported_entry_count": self.unsupported_entry_count,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -713,6 +811,236 @@ def _validate_entries(
 def _is_lfs_pointer(data: bytes) -> bool:
     first_line = data.split(b"\n", 1)[0].rstrip(b"\r")
     return first_line == b"version https://git-lfs.github.com/spec/v1"
+
+
+_SOURCE_AUDIT_STATUS_ORDER: Final[tuple[str, ...]] = (
+    "source_limit_exceeded",
+    "unsafe_source_path",
+    "source_path_collision",
+    "source_gitlink_rejected",
+    "source_lfs_rejected",
+    "invalid_source_tree",
+)
+
+
+def audit_sealed_snapshot_source(
+    repository: GitRepository,
+    commit: str,
+    *,
+    policy: SnapshotPolicy = DEFAULT_SNAPSHOT_POLICY,
+    blob_cache: MutableMapping[str, tuple[int, bool | None]] | None = None,
+) -> SealedSnapshotSourceAudit:
+    """Inspect one commit for sealed-snapshot readiness without materializing it.
+
+    The audit deliberately uses hard traversal bounds before applying the active
+    policy.  This lets a trusted acquisition report distinguish a completely
+    scanned but policy-blocked tree from a tree whose facts could not be
+    enumerated safely.  ``blob_cache`` is an optional evaluator-owned cache of
+    ``blob_oid -> (size, is_lfs_pointer)`` facts; ``None`` means that an
+    oversized blob was not read and its LFS status is therefore unknown.
+    """
+
+    if not isinstance(repository, GitRepository):
+        raise ValueError("repository must be a GitRepository")
+    if not isinstance(policy, SnapshotPolicy):
+        raise ValueError("policy must be a SnapshotPolicy")
+    commit = validate_commit_sha(commit)
+    cache = {} if blob_cache is None else blob_cache
+
+    repository.assert_storage_safe()
+    if repository.history_is_shallow():
+        raise SealedSnapshotError(
+            "shallow_repository_rejected",
+            "sealed snapshots require a complete local repository",
+        )
+    root_tree = repository.commit_tree(commit)
+    try:
+        entries = repository.list_tree_entries(
+            commit,
+            max_entries=_HARD_MAX_FILES,
+            max_output_bytes=_HARD_MAX_TREE_OBJECT_BYTES,
+            include_trees=True,
+        )
+    except GitBlobTooLarge:
+        return SealedSnapshotSourceAudit(
+            commit=commit,
+            root_tree=root_tree,
+            ready=False,
+            scan_complete=False,
+            lfs_scan_complete=False,
+            status_codes=("source_limit_exceeded",),
+            tree_entry_count=None,
+            tree_count=None,
+            regular_file_count=None,
+            total_regular_bytes=None,
+            symlink_count=None,
+            gitlink_count=None,
+            lfs_pointer_count=None,
+            oversized_blob_count=None,
+            unsupported_entry_count=None,
+            mode_counts=(),
+            policy=policy,
+        )
+
+    statuses: set[str] = set()
+    mode_counts: dict[str, int] = {}
+    tree_paths: list[bytes] = []
+    leaf_paths: list[bytes] = []
+    all_paths: list[tuple[bytes, bool]] = []
+    seen_exact: set[bytes] = set()
+    seen_portable: set[str] = set()
+    tree_count = 0
+    regular_file_count = 0
+    total_regular_bytes = 0
+    symlink_count = 0
+    gitlink_count = 0
+    lfs_pointer_count = 0
+    oversized_blob_count = 0
+    unsupported_entry_count = 0
+    lfs_scan_complete = True
+
+    if len(entries) > policy.max_files:
+        statuses.add("source_limit_exceeded")
+    for entry in entries:
+        if not isinstance(entry, TreeEntry):
+            statuses.add("invalid_source_tree")
+            unsupported_entry_count += 1
+            continue
+        mode_counts[entry.mode] = mode_counts.get(entry.mode, 0) + 1
+        raw_path: bytes | None = None
+        try:
+            _, raw_path, collision_key = _validate_portable_path(entry.path, policy)
+        except SealedSnapshotError as error:
+            statuses.add(error.code)
+        else:
+            if raw_path in seen_exact or collision_key in seen_portable:
+                statuses.add("source_path_collision")
+            seen_exact.add(raw_path)
+            seen_portable.add(collision_key)
+
+        is_tree = entry.mode == "40000" and entry.object_type == "tree"
+        if raw_path is not None:
+            all_paths.append((raw_path, is_tree))
+            if is_tree:
+                tree_paths.append(raw_path)
+            else:
+                leaf_paths.append(raw_path)
+        if is_tree:
+            tree_count += 1
+            continue
+        if entry.mode == "120000":
+            symlink_count += 1
+            if entry.object_type != "blob":
+                unsupported_entry_count += 1
+                statuses.add("invalid_source_tree")
+                continue
+        if entry.mode == "160000" or entry.object_type == "commit":
+            gitlink_count += 1
+            statuses.add("source_gitlink_rejected")
+            continue
+        if (
+            entry.mode not in {"100644", "100755", "120000"}
+            or entry.object_type != "blob"
+        ):
+            unsupported_entry_count += 1
+            statuses.add("invalid_source_tree")
+            continue
+        if _SHA1_RE.fullmatch(entry.object_id) is None:
+            unsupported_entry_count += 1
+            statuses.add("invalid_source_tree")
+            continue
+
+        regular_file_count += 1
+        cached = cache.get(entry.object_id)
+        if cached is None:
+            try:
+                data = repository.read_blob_object(
+                    entry.object_id, max_bytes=policy.max_file_bytes
+                )
+            except GitBlobTooLarge:
+                # The bounded reader already performed the type/size gate. A
+                # second size query is needed only for the exceptional blob so
+                # the complete audit can report aggregate policy facts.
+                size = repository.object_size(
+                    entry.object_id,
+                    expected_type="blob",
+                    operation="cat-file",
+                )
+                is_lfs: bool | None = None
+            else:
+                size = len(data)
+                is_lfs = _is_lfs_pointer(data)
+            cache[entry.object_id] = (size, is_lfs)
+        else:
+            size, is_lfs = cached
+            if (
+                isinstance(size, bool)
+                or not isinstance(size, int)
+                or size < 0
+                or (is_lfs is not None and not isinstance(is_lfs, bool))
+            ):
+                raise ValueError("blob_cache contains an invalid fact")
+        total_regular_bytes += size
+        if size > policy.max_file_bytes:
+            oversized_blob_count += 1
+            lfs_scan_complete = False
+            statuses.add("source_limit_exceeded")
+        elif is_lfs is None:
+            # A cache entry produced under a tighter policy may carry only a
+            # size fact. Unknown pointer status must never become readiness.
+            lfs_scan_complete = False
+        elif is_lfs:
+            lfs_pointer_count += 1
+            statuses.add("source_lfs_rejected")
+
+    if total_regular_bytes > policy.max_total_bytes:
+        statuses.add("source_limit_exceeded")
+    if not regular_file_count:
+        statuses.add("invalid_source_tree")
+    for tree_path in tree_paths:
+        if not any(path.startswith(tree_path + b"/") for path in leaf_paths):
+            statuses.add("invalid_source_tree")
+    all_paths.sort(key=lambda item: item[0])
+    previous_path: bytes | None = None
+    previous_is_tree = False
+    for raw_path, is_tree in all_paths:
+        if (
+            previous_path is not None
+            and raw_path.startswith(previous_path + b"/")
+            and not previous_is_tree
+        ):
+            statuses.add("source_path_collision")
+        previous_path = raw_path
+        previous_is_tree = is_tree
+
+    repository.assert_storage_safe()
+    if repository.history_is_shallow():
+        raise SealedSnapshotError(
+            "shallow_repository_rejected",
+            "repository became shallow during source audit",
+        )
+    status_codes = tuple(
+        code for code in _SOURCE_AUDIT_STATUS_ORDER if code in statuses
+    )
+    return SealedSnapshotSourceAudit(
+        commit=commit,
+        root_tree=root_tree,
+        ready=lfs_scan_complete and not status_codes,
+        scan_complete=True,
+        lfs_scan_complete=lfs_scan_complete,
+        status_codes=status_codes,
+        tree_entry_count=len(entries),
+        tree_count=tree_count,
+        regular_file_count=regular_file_count,
+        total_regular_bytes=total_regular_bytes,
+        symlink_count=symlink_count,
+        gitlink_count=gitlink_count,
+        lfs_pointer_count=lfs_pointer_count,
+        oversized_blob_count=oversized_blob_count,
+        unsupported_entry_count=unsupported_entry_count,
+        mode_counts=tuple(sorted(mode_counts.items())),
+        policy=policy,
+    )
 
 
 def _write_all(descriptor: int, payload: bytes) -> None:
@@ -1915,9 +2243,11 @@ __all__ = [
     "SNAPSHOT_POLICY_VERSION",
     "SealedSnapshotError",
     "SealedSnapshotFile",
+    "SealedSnapshotSourceAudit",
     "SealedSnapshotSummary",
     "SnapshotPolicy",
     "VerifiedSealedSnapshot",
+    "audit_sealed_snapshot_source",
     "prepare_sealed_snapshot",
     "verify_sealed_snapshot",
 ]
