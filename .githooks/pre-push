@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+remote_name=${1:-unknown}
+remote_url=${2:-unknown}
+
+case "$remote_url" in
+  git@github.com:Qiyuanqiii/VulnGym-bv2-private.git|\
+  ssh://git@github.com/Qiyuanqiii/VulnGym-bv2-private.git|\
+  https://github.com/Qiyuanqiii/VulnGym-bv2-private.git|\
+  https://github.com/Qiyuanqiii/VulnGym-bv2-private)
+    exit 0
+    ;;
+esac
+
+cat >&2 <<EOF
+VulnGym B-v2 push guard rejected the destination.
+
+Remote name: $remote_name
+Remote URL:  $remote_url
+
+Only Qiyuanqiii/VulnGym-bv2-private is authorized for this worktree.
+Review docs/issue_and_commit_traceability.md before changing this guard.
+EOF
+exit 1
