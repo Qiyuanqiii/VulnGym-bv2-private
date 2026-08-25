@@ -23,6 +23,7 @@ from vulngym_agent.benchmark.sealed_tree_access import (
     bind_worker_tree,
 )
 from vulngym_agent.benchmark.worker_handoff import (
+    WORKER_HANDOFF_CONTRACT_VERSION,
     WORKER_HANDOFF_MAX_BYTES,
     WorkerHandoffError,
     WorkerHandoffV1,
@@ -191,11 +192,18 @@ class WorkerHandoffTests(unittest.TestCase):
             )
         self.assertEqual(captured.exception.code, "digest_mismatch")
 
+        version_prefix = (
+            f'{{"contract_version":{WORKER_HANDOFF_CONTRACT_VERSION},'.encode("ascii")
+        )
         duplicate = payload.replace(
-            b'{"contract_version":1,',
-            b'{"contract_version":1,"contract_version":1,',
+            version_prefix,
+            version_prefix
+            + f'"contract_version":{WORKER_HANDOFF_CONTRACT_VERSION},'.encode(
+                "ascii"
+            ),
             1,
         )
+        self.assertNotEqual(duplicate, payload)
         with self.assertRaises(WorkerHandoffError) as captured:
             WorkerHandoffV1.from_bytes(
                 duplicate,
