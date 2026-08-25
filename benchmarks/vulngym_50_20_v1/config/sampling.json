@@ -1,0 +1,12 @@
+{
+  "algorithm": "deterministic-marginal-local-search-v1",
+  "coverage_expected_count_threshold": 0.35,
+  "dataset_id": "vulngym-50-20-v1",
+  "leakage_code_min_normalized_chars": 40,
+  "max_local_search_iterations": 100,
+  "restarts": 8,
+  "sampling_seed": "VulnGym/v0.1.4/50-train/20-test/2026-08-20/audit-23",
+  "schema_version": "1.0.0",
+  "test_tasks": 20,
+  "train_tasks": 50
+}

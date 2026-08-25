@@ -1,0 +1,76 @@
+{
+  "cross_record_checks": [
+    {
+      "check": "train_rows",
+      "detail": "count=50",
+      "status": "pass"
+    },
+    {
+      "check": "test_rows",
+      "detail": "count=20",
+      "status": "pass"
+    },
+    {
+      "check": "private_gold_rows",
+      "detail": "count=20",
+      "status": "pass"
+    },
+    {
+      "check": "task_ids_unique",
+      "detail": "count=70, unique=70",
+      "status": "pass"
+    },
+    {
+      "check": "selected_advisories_unique",
+      "detail": "advisories=76",
+      "status": "pass"
+    },
+    {
+      "check": "selected_advisories_complete",
+      "detail": "every selected advisory contains exactly all of its source entries",
+      "status": "pass"
+    },
+    {
+      "check": "all_selected_entries_verify_1",
+      "detail": "entries=181",
+      "status": "pass"
+    }
+  ],
+  "dataset_id": "vulngym-50-20-v1",
+  "engine": {
+    "draft": "2020-12",
+    "name": "jsonschema",
+    "requirements": "benchmarks/vulngym_50_20_v1/requirements.txt"
+  },
+  "files": [
+    {
+      "errors": [],
+      "expected_kind": "training_example",
+      "path": "benchmarks/vulngym_50_20_v1/public/train.jsonl",
+      "rows": 50,
+      "status": "pass"
+    },
+    {
+      "errors": [],
+      "expected_kind": "test_task",
+      "path": "benchmarks/vulngym_50_20_v1/public/test.jsonl",
+      "rows": 20,
+      "status": "pass"
+    },
+    {
+      "errors": [],
+      "expected_kind": "test_gold",
+      "path": "benchmarks/vulngym_50_20_v1/private/test_gold.jsonl",
+      "rows": 20,
+      "status": "pass"
+    },
+    {
+      "errors": [],
+      "path": "benchmarks/vulngym_50_20_v1/manifests/source_and_hash_manifest.json",
+      "rows": 1,
+      "status": "pass"
+    }
+  ],
+  "schema_version": "1.0.0",
+  "status": "pass"
+}

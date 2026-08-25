@@ -1,0 +1,103 @@
+{
+  "checks": [
+    {
+      "check": "exact_train_task_count",
+      "detail": "count=50",
+      "status": "pass"
+    },
+    {
+      "check": "exact_test_task_count",
+      "detail": "count=20",
+      "status": "pass"
+    },
+    {
+      "check": "test_gold_task_count",
+      "detail": "count=20",
+      "status": "pass"
+    },
+    {
+      "check": "test_task_gold_bijection",
+      "detail": "public test task IDs equal private gold task IDs one-to-one",
+      "status": "pass"
+    },
+    {
+      "check": "advisory_disjoint",
+      "detail": "train=51, test=25, overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "entry_disjoint",
+      "detail": "train=125, test=56, overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "vulnerability_identifier_disjoint",
+      "detail": "overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "source_link_disjoint",
+      "detail": "overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "repository_commit_snapshot_disjoint",
+      "detail": "overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "role_aware_endpoint_disjoint_without_commit",
+      "detail": "overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "role_aware_endpoint_disjoint_exact_snapshot",
+      "detail": "overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "all_gold_node_locations_disjoint_without_commit",
+      "detail": "overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "normalized_gold_code_disjoint",
+      "detail": "minimum_normalized_characters=40, overlap=0",
+      "status": "pass"
+    },
+    {
+      "check": "public_test_forbidden_fields_absent",
+      "detail": "forbidden_key_count=0",
+      "status": "pass"
+    },
+    {
+      "check": "test_gold_tokens_absent_from_public_datasets",
+      "detail": "exposed_token_count=0",
+      "status": "pass"
+    },
+    {
+      "check": "all_gold_entries_human_verified",
+      "detail": "gold_entries=181",
+      "status": "pass"
+    },
+    {
+      "check": "private_output_outside_public_root",
+      "detail": "private output is not contained by the public output and vice versa",
+      "status": "pass"
+    },
+    {
+      "check": "private_gold_gitignore_rule_present",
+      "detail": "repository .gitignore contains the evaluator-only path rule",
+      "status": "pass"
+    }
+  ],
+  "dataset_id": "vulngym-50-20-v1",
+  "isolation_scope": "artifact-and-runtime",
+  "limitations": [
+    "The upstream VulnGym annotations and GitHub advisories are public; this split cannot make those facts information-theoretically secret.",
+    "A closed-book evaluation must deny the agent access to this checkout, data/, private/, evaluator logs, and the Internet.",
+    "Directory separation in one readable checkout is not an access-control boundary; mount or copy only public/test.jsonl and the target source snapshot."
+  ],
+  "schema_version": "1.0.0",
+  "status": "pass"
+}

@@ -1,0 +1,630 @@
+{
+  "coverage": {
+    "selected_missing_required_labels": 0,
+    "test_missing_required_labels": 0,
+    "train_missing_required_labels": 0
+  },
+  "dataset_id": "vulngym-50-20-v1",
+  "dimensions": {
+    "language": [
+      {
+        "label": "Go",
+        "selected": 4,
+        "selected_target": 3.141026,
+        "test": 1,
+        "test_target": 0.897436,
+        "train": 3,
+        "train_target": 2.24359,
+        "universe": 7
+      },
+      {
+        "label": "Other",
+        "selected": 3,
+        "selected_target": 3.589744,
+        "test": 1,
+        "test_target": 1.025641,
+        "train": 2,
+        "train_target": 2.564103,
+        "universe": 8
+      },
+      {
+        "label": "Python",
+        "selected": 16,
+        "selected_target": 10.769231,
+        "test": 4,
+        "test_target": 3.076923,
+        "train": 12,
+        "train_target": 7.692308,
+        "universe": 24
+      },
+      {
+        "label": "TypeScript",
+        "selected": 47,
+        "selected_target": 52.5,
+        "test": 14,
+        "test_target": 15.0,
+        "train": 33,
+        "train_target": 37.5,
+        "universe": 117
+      }
+    ],
+    "repository": [
+      {
+        "label": "https://github.com/BerriAI/litellm",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/FlowiseAI/Flowise",
+        "selected": 3,
+        "selected_target": 4.038462,
+        "test": 1,
+        "test_target": 1.153846,
+        "train": 2,
+        "train_target": 2.884615,
+        "universe": 9
+      },
+      {
+        "label": "https://github.com/NVIDIA/NeMo",
+        "selected": 3,
+        "selected_target": 1.346154,
+        "test": 1,
+        "test_target": 0.384615,
+        "train": 2,
+        "train_target": 0.961538,
+        "universe": 3
+      },
+      {
+        "label": "https://github.com/Significant-Gravitas/AutoGPT",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/Tencent/WeKnora",
+        "selected": 2,
+        "selected_target": 1.794872,
+        "test": 1,
+        "test_target": 0.512821,
+        "train": 1,
+        "train_target": 1.282051,
+        "universe": 4
+      },
+      {
+        "label": "https://github.com/apache/airflow",
+        "selected": 2,
+        "selected_target": 1.346154,
+        "test": 1,
+        "test_target": 0.384615,
+        "train": 1,
+        "train_target": 0.961538,
+        "universe": 3
+      },
+      {
+        "label": "https://github.com/aquasecurity/trivy",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/czlonkowski/n8n-mcp",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/google/adk-python",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/jlowin/fastmcp",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/langchain-ai/langchain",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/langflow-ai/langflow",
+        "selected": 2,
+        "selected_target": 2.24359,
+        "test": 1,
+        "test_target": 0.641026,
+        "train": 1,
+        "train_target": 1.602564,
+        "universe": 5
+      },
+      {
+        "label": "https://github.com/milvus-io/milvus",
+        "selected": 1,
+        "selected_target": 0.897436,
+        "test": 0,
+        "test_target": 0.25641,
+        "train": 1,
+        "train_target": 0.641026,
+        "universe": 2
+      },
+      {
+        "label": "https://github.com/mlflow/mlflow",
+        "selected": 2,
+        "selected_target": 1.794872,
+        "test": 1,
+        "test_target": 0.512821,
+        "train": 1,
+        "train_target": 1.282051,
+        "universe": 4
+      },
+      {
+        "label": "https://github.com/modelcontextprotocol/typescript-sdk",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/n8n-io/n8n",
+        "selected": 6,
+        "selected_target": 6.730769,
+        "test": 2,
+        "test_target": 1.923077,
+        "train": 4,
+        "train_target": 4.807692,
+        "universe": 15
+      },
+      {
+        "label": "https://github.com/nltk/nltk",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/ollama/ollama",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/onnx/onnx",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "https://github.com/open-webui/open-webui",
+        "selected": 2,
+        "selected_target": 1.794872,
+        "test": 1,
+        "test_target": 0.512821,
+        "train": 1,
+        "train_target": 1.282051,
+        "universe": 4
+      },
+      {
+        "label": "https://github.com/openclaw/openclaw",
+        "selected": 34,
+        "selected_target": 41.730769,
+        "test": 10,
+        "test_target": 11.923077,
+        "train": 24,
+        "train_target": 29.807692,
+        "universe": 93
+      },
+      {
+        "label": "https://github.com/paperclipai/paperclip",
+        "selected": 2,
+        "selected_target": 1.346154,
+        "test": 1,
+        "test_target": 0.384615,
+        "train": 1,
+        "train_target": 0.961538,
+        "universe": 3
+      }
+    ],
+    "vuln_category_l1": [
+      {
+        "label": "SSRF",
+        "selected": 2,
+        "selected_target": 1.346154,
+        "test": 1,
+        "test_target": 0.384615,
+        "train": 1,
+        "train_target": 0.961538,
+        "universe": 3
+      },
+      {
+        "label": "XSS",
+        "selected": 2,
+        "selected_target": 1.346154,
+        "test": 1,
+        "test_target": 0.384615,
+        "train": 1,
+        "train_target": 0.961538,
+        "universe": 3
+      },
+      {
+        "label": "业务逻辑",
+        "selected": 46,
+        "selected_target": 54.294872,
+        "test": 15,
+        "test_target": 15.512821,
+        "train": 31,
+        "train_target": 38.782051,
+        "universe": 121
+      },
+      {
+        "label": "代码注入",
+        "selected": 2,
+        "selected_target": 2.692308,
+        "test": 1,
+        "test_target": 0.769231,
+        "train": 1,
+        "train_target": 1.923077,
+        "universe": 6
+      },
+      {
+        "label": "供应链攻击",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "信息泄露",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "原型链污染",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "反序列化",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 1,
+        "test_target": 0.128205,
+        "train": 0,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "反序列化漏洞",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "命令注入",
+        "selected": 3,
+        "selected_target": 3.141026,
+        "test": 1,
+        "test_target": 0.897436,
+        "train": 2,
+        "train_target": 2.24359,
+        "universe": 7
+      },
+      {
+        "label": "文件操作安全",
+        "selected": 1,
+        "selected_target": 0.897436,
+        "test": 0,
+        "test_target": 0.25641,
+        "train": 1,
+        "train_target": 0.641026,
+        "universe": 2
+      },
+      {
+        "label": "权限绕过",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "模板注入",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "沙箱逃逸",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "注入",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 1,
+        "test_target": 0.128205,
+        "train": 0,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "注入与反序列化",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "注入攻击",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "注入类",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "认证绕过",
+        "selected": 1,
+        "selected_target": 0.897436,
+        "test": 0,
+        "test_target": 0.25641,
+        "train": 1,
+        "train_target": 0.641026,
+        "universe": 2
+      },
+      {
+        "label": "路径穿越",
+        "selected": 2,
+        "selected_target": 1.346154,
+        "test": 1,
+        "test_target": 0.384615,
+        "train": 1,
+        "train_target": 0.961538,
+        "universe": 3
+      },
+      {
+        "label": "路径遍历 / 任意文件读取",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      },
+      {
+        "label": "路径遍历 / 越权写入",
+        "selected": 1,
+        "selected_target": 0.448718,
+        "test": 0,
+        "test_target": 0.128205,
+        "train": 1,
+        "train_target": 0.320513,
+        "universe": 1
+      }
+    ]
+  },
+  "language_derivation": {
+    "detailed_endpoint_labels_are_available_in_primary_language_audit": true,
+    "sampling_groups": [
+      "Go",
+      "Python",
+      "TypeScript",
+      "Other"
+    ],
+    "sampling_uses_primary_language": true,
+    "source_fields": [
+      "entry_point.file",
+      "critical_operation.file"
+    ],
+    "unknown_extensions": "Other"
+  },
+  "metrics": {
+    "language": {
+      "selected_mean_absolute_rate_error": 0.04349817,
+      "test_mean_absolute_rate_error": 0.02564103,
+      "train_mean_absolute_rate_error": 0.05064103
+    },
+    "repository": {
+      "selected_mean_absolute_rate_error": 0.01265401,
+      "test_mean_absolute_rate_error": 0.01701632,
+      "train_mean_absolute_rate_error": 0.0162704
+    },
+    "vuln_category_l1": {
+      "selected_mean_absolute_rate_error": 0.01234599,
+      "test_mean_absolute_rate_error": 0.01474359,
+      "train_mean_absolute_rate_error": 0.01688811
+    }
+  },
+  "objective": {
+    "algorithm": "deterministic-marginal-local-search-v1",
+    "coverage_expected_count_threshold": 0.35,
+    "iterations": 23,
+    "restarts": 8,
+    "score": 2.679454938724,
+    "selected_restart": 5
+  },
+  "primary_language": [
+    {
+      "label": "Go",
+      "test": 1,
+      "train": 3,
+      "universe": 7
+    },
+    {
+      "label": "INI",
+      "test": 1,
+      "train": 0,
+      "universe": 1
+    },
+    {
+      "label": "JavaScript",
+      "test": 0,
+      "train": 0,
+      "universe": 1
+    },
+    {
+      "label": "Python",
+      "test": 4,
+      "train": 12,
+      "universe": 24
+    },
+    {
+      "label": "Shell",
+      "test": 0,
+      "train": 0,
+      "universe": 1
+    },
+    {
+      "label": "Svelte",
+      "test": 0,
+      "train": 1,
+      "universe": 1
+    },
+    {
+      "label": "Swift",
+      "test": 0,
+      "train": 0,
+      "universe": 2
+    },
+    {
+      "label": "TypeScript",
+      "test": 14,
+      "train": 33,
+      "universe": 117
+    },
+    {
+      "label": "Vue",
+      "test": 0,
+      "train": 0,
+      "universe": 1
+    },
+    {
+      "label": "YAML",
+      "test": 0,
+      "train": 1,
+      "universe": 1
+    }
+  ],
+  "schema_version": "1.0.0",
+  "splits": {
+    "selected": {
+      "advisories": 76,
+      "entries": 181,
+      "repositories": 22,
+      "snapshot_tasks": 70
+    },
+    "test": {
+      "advisories": 25,
+      "entries": 56,
+      "repositories": 10,
+      "snapshot_tasks": 20
+    },
+    "train": {
+      "advisories": 51,
+      "entries": 125,
+      "repositories": 22,
+      "snapshot_tasks": 50
+    },
+    "universe": {
+      "advisories": 172,
+      "entries": 380,
+      "repositories": 22,
+      "snapshot_tasks": 156
+    }
+  },
+  "stratification_axes": [
+    "language (multi-label task incidence)",
+    "vuln_category_l1 (multi-label task incidence)",
+    "repository (repo_url task incidence)"
+  ]
+}
