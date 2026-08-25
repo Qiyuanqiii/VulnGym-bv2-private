@@ -265,6 +265,7 @@ class E4DriverTests(unittest.TestCase):
         outcome_plan_image: str | None = None,
         reader_result: _FakeSuccess | None = None,
         abort_error: BaseException | None = None,
+        expected_mount_table: object | None = None,
     ) -> tuple[object, bytearray, list[str], dict[str, object]]:
         public, configs, plan = self._prepared(
             split,
@@ -304,6 +305,7 @@ class E4DriverTests(unittest.TestCase):
         def verify(_docker, **kwargs):
             events.append("verify")
             captured["runtime_policy"] = kwargs["execution_policy"]
+            captured["runtime"] = dict(kwargs)
             return object()
 
         def run(_session, _runtime, _output):
@@ -354,6 +356,7 @@ class E4DriverTests(unittest.TestCase):
                 snapshot_key_id=self.KEY_ID,
                 runtime_image_id=call_image or self.IMAGE_A,
                 docker_executable="docker",
+                expected_mount_table=expected_mount_table,
             )
         return result, key, events, captured
 
@@ -403,6 +406,7 @@ class E4DriverTests(unittest.TestCase):
             replay["expected_manifest_sha256"],
             _sha("test:replay-manifest:semantic"),
         )
+
         self.assertEqual(
             replay["expected_manifest_wire_sha256"],
             _sha("test:replay-manifest:wire"),
@@ -420,6 +424,17 @@ class E4DriverTests(unittest.TestCase):
                 "expected_receipt_sha256": result.receipt_sha256,
                 "expected_wire_sha256": result.wire_sha256,
             },
+        )
+
+    def test_mount_table_identity_is_forwarded_to_linux_oci(self) -> None:
+        mount_table = driver.LinuxMountTableV1(
+            payload=b"bound-mounts\n", entries=()
+        )
+        _result, _key, _events, captured = self._run_success(
+            expected_mount_table=mount_table
+        )
+        self.assertIs(
+            captured["runtime"]["expected_mount_table"], mount_table
         )
 
     def test_public_task_order_mismatch_stops_before_any_oci_probe(self) -> None:

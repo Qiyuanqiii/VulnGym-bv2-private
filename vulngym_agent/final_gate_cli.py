@@ -18,7 +18,7 @@ from pathlib import Path
 import re
 import stat
 import sys
-from typing import Final, Sequence
+from typing import Callable, Final, Literal, Sequence
 
 from vulngym_agent.benchmark.sealed_snapshot import (
     SealedSnapshotError,
@@ -46,11 +46,27 @@ from vulngym_agent.evaluator.e4_driver import (
     E4DriverError,
     fixed_e4_execution_policy_v1,
 )
+from vulngym_agent.evaluator.runtime_evidence import (
+    RuntimeEvidenceError,
+    docker_endpoint_sha256_v1,
+)
 from vulngym_agent.trusted_inputs import (
     TrustedInputError,
     paths_overlap_v1,
     read_attestation_key_file_v1,
     zero_secret_buffer_v1,
+)
+from vulngym_agent.native_linux_final_gate_preflight import (
+    NativeLinuxFinalGatePreflightError,
+    NativeLinuxFinalGateReadinessV2,
+    parse_native_linux_final_gate_readiness_v2,
+)
+from vulngym_agent.linux_host_security import (
+    LinuxHostSecurityError,
+    LinuxMountTableV1,
+    assert_linux_mount_table_stable_v1,
+    capture_linux_mount_table_v1,
+    linux_paths_overlap_v1,
 )
 
 
@@ -120,7 +136,11 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--benchmark-root", type=Path, required=True)
     run.add_argument("--output-root", type=Path, required=True)
     run.add_argument("--docker-executable", type=Path, required=True)
+    run.add_argument("--docker-host", required=True)
     run.add_argument("--runtime-image-id", required=True)
+    run.add_argument("--readiness-file", type=Path, required=True)
+    run.add_argument("--expected-readiness-sha256", required=True)
+    run.add_argument("--expected-readiness-wire-sha256", required=True)
     run.add_argument("--plan-file", type=Path, required=True)
     run.add_argument("--expected-plan-sha256", required=True)
     run.add_argument("--expected-plan-wire-sha256", required=True)
@@ -626,6 +646,22 @@ def _validate_run_scalars(args: argparse.Namespace) -> None:
         args.expected_plan_wire_sha256,
         name="expected_plan_wire_sha256",
     )
+    _require_sha256(
+        args.expected_readiness_sha256,
+        name="expected_readiness_sha256",
+    )
+    _require_sha256(
+        args.expected_readiness_wire_sha256,
+        name="expected_readiness_wire_sha256",
+    )
+    if (
+        type(args.docker_host) is not str
+        or not args.docker_host.startswith("unix:///")
+        or "\x00" in args.docker_host
+    ):
+        raise FinalGateCliError(
+            "invalid_argument", "Docker host must be one explicit Unix endpoint"
+        )
     if (
         type(args.runtime_image_id) is not str
         or _IMAGE_ID_RE.fullmatch(args.runtime_image_id) is None
@@ -648,10 +684,47 @@ def _validate_run_scalars(args: argparse.Namespace) -> None:
         or not docker_text
         or "\x00" in docker_text
         or docker_text.strip() != docker_text
+        or not args.docker_executable.is_absolute()
     ):
         raise FinalGateCliError(
             "invalid_argument", "Docker executable path is invalid"
         )
+
+
+def _read_readiness_file_v2(
+    path: Path,
+    *,
+    expected_report_sha256: str,
+    expected_wire_sha256: str,
+) -> NativeLinuxFinalGateReadinessV2:
+    if type(path) is not _PATH_TYPE:
+        raise FinalGateCliError(
+            "invalid_argument", "readiness file must be an exact path value"
+        )
+    try:
+        absolute = Path(os.path.abspath(os.fspath(path)))
+    except (OSError, TypeError, ValueError):
+        raise FinalGateCliError(
+            "invalid_argument", "readiness file path is invalid"
+        ) from None
+    parent_chain = _checked_parent_chain(absolute)
+    first_payload, first_identity = _read_plan_file_once(absolute)
+    second_payload, second_identity = _read_plan_file_once(absolute)
+    _assert_parent_chain(parent_chain)
+    if first_payload != second_payload or first_identity != second_identity:
+        raise FinalGateCliError(
+            "readiness_input_rejected", "readiness file changed while reading"
+        )
+    try:
+        return parse_native_linux_final_gate_readiness_v2(
+            second_payload,
+            expected_report_sha256=expected_report_sha256,
+            expected_wire_sha256=expected_wire_sha256,
+        )
+    except NativeLinuxFinalGatePreflightError:
+        raise FinalGateCliError(
+            "readiness_input_rejected", "readiness report did not match its pins"
+        ) from None
 
 
 def _validate_plan_runtime_binding(
@@ -713,6 +786,45 @@ def _checked_overlap(
             "trusted path comparison returned an invalid exact type",
         )
     return result
+
+
+def _linux_mount_table() -> LinuxMountTableV1 | None:
+    if os.name != "posix" or sys.platform != "linux":
+        return None
+    try:
+        return capture_linux_mount_table_v1()
+    except LinuxHostSecurityError as error:
+        raise FinalGateCliError(
+            "trusted_input_rejected", "Linux mount namespace could not be bound"
+        ) from error
+
+
+def _physical_overlap(
+    table: LinuxMountTableV1 | None, left: Path, right: Path
+) -> bool:
+    if table is None:
+        return False
+    try:
+        return linux_paths_overlap_v1(
+            table,
+            Path(os.path.abspath(os.fspath(left))),
+            Path(os.path.abspath(os.fspath(right))),
+        )
+    except (LinuxHostSecurityError, OSError, TypeError, ValueError) as error:
+        raise FinalGateCliError(
+            "trusted_input_rejected", "physical path mapping could not be verified"
+        ) from error
+
+
+def _assert_mount_table_stable(table: LinuxMountTableV1 | None) -> None:
+    if table is None:
+        return
+    try:
+        assert_linux_mount_table_stable_v1(table)
+    except LinuxHostSecurityError as error:
+        raise FinalGateCliError(
+            "trusted_input_rejected", "Linux mount namespace changed"
+        ) from error
 
 
 def _preflight_file_identities(paths: tuple[Path, ...]) -> None:
@@ -820,7 +932,9 @@ def _directory_identity_snapshot(
     return tuple(snapshots)
 
 
-def _preflight_run_paths(args: argparse.Namespace) -> None:
+def _preflight_run_paths(
+    args: argparse.Namespace,
+) -> LinuxMountTableV1 | None:
     directories = (
         args.benchmark_root,
         args.test_sealed_batch_root,
@@ -828,7 +942,13 @@ def _preflight_run_paths(args: argparse.Namespace) -> None:
         args.train_sealed_batch_root,
         args.train_replay_config_root,
     )
-    files = (args.plan_file, args.test_key_file, args.train_key_file)
+    files = (
+        args.plan_file,
+        args.readiness_file,
+        args.test_key_file,
+        args.train_key_file,
+    )
+    mount_table = _linux_mount_table()
 
     try:
         os.lstat(args.output_root)
@@ -851,7 +971,7 @@ def _preflight_run_paths(args: argparse.Namespace) -> None:
             directory,
             left_exists=False,
             right_directory=True,
-        ):
+        ) or _physical_overlap(mount_table, args.output_root, directory):
             raise FinalGateCliError(
                 "path_overlap", "final-gate output overlaps a trusted directory"
             )
@@ -861,7 +981,7 @@ def _preflight_run_paths(args: argparse.Namespace) -> None:
             file_path,
             left_exists=False,
             right_directory=False,
-        ):
+        ) or _physical_overlap(mount_table, args.output_root, file_path):
             raise FinalGateCliError(
                 "path_overlap", "final-gate output overlaps a trusted file"
             )
@@ -872,7 +992,7 @@ def _preflight_run_paths(args: argparse.Namespace) -> None:
                 right,
                 left_exists=True,
                 right_directory=True,
-            ):
+            ) or _physical_overlap(mount_table, left, right):
                 raise FinalGateCliError(
                     "path_overlap", "trusted final-gate directories overlap"
                 )
@@ -882,7 +1002,7 @@ def _preflight_run_paths(args: argparse.Namespace) -> None:
                 file_path,
                 left_exists=True,
                 right_directory=False,
-            ):
+            ) or _physical_overlap(mount_table, left, file_path):
                 raise FinalGateCliError(
                     "path_overlap", "trusted directory overlaps a plan or key file"
                 )
@@ -892,9 +1012,18 @@ def _preflight_run_paths(args: argparse.Namespace) -> None:
             "trusted_input_rejected",
             "trusted directory identities changed during preflight",
         )
+    _assert_mount_table_stable(mount_table)
+    return mount_table
 
 
-def _run(args: argparse.Namespace) -> object:
+def _run(
+    args: argparse.Namespace,
+    *,
+    commit_callback: Callable[
+        [Literal["absent", "possible", "committed"]], None
+    ]
+    | None = None,
+) -> object:
     """Read two independent keys, delegate once, and always clear both."""
 
     _validate_namespace(args, command="run")
@@ -904,6 +1033,7 @@ def _run(args: argparse.Namespace) -> object:
             args.benchmark_root,
             args.output_root,
             args.docker_executable,
+            args.readiness_file,
             args.plan_file,
             args.test_sealed_batch_root,
             args.test_replay_config_root,
@@ -913,26 +1043,54 @@ def _run(args: argparse.Namespace) -> object:
             args.train_key_file,
         )
     )
-    _preflight_run_paths(args)
+    mount_table = _preflight_run_paths(args)
     plan = _read_final_gate_plan_file_v1(
         args.plan_file,
         expected_plan_sha256=args.expected_plan_sha256,
         expected_wire_sha256=args.expected_plan_wire_sha256,
     )
+    _assert_mount_table_stable(mount_table)
     _validate_plan_runtime_binding(
         plan, runtime_image_id=args.runtime_image_id
     )
+    readiness = _read_readiness_file_v2(
+        args.readiness_file,
+        expected_report_sha256=args.expected_readiness_sha256,
+        expected_wire_sha256=args.expected_readiness_wire_sha256,
+    )
+    _assert_mount_table_stable(mount_table)
+    try:
+        endpoint_sha256 = docker_endpoint_sha256_v1(args.docker_host)
+    except RuntimeEvidenceError:
+        raise FinalGateCliError(
+            "readiness_binding_mismatch", "Docker endpoint binding is invalid"
+        ) from None
+    if (
+        readiness.final_gate_plan_sha256 != plan.plan_sha256
+        or readiness.final_gate_plan_wire_sha256 != plan.wire_sha256
+        or readiness.execution_policy_sha256 != plan.execution_policy_sha256
+        or readiness.execution_policy_wire_sha256
+        != plan.execution_policy_wire_sha256
+        or readiness.runtime_binding.runtime_image_id != args.runtime_image_id
+        or readiness.runtime_binding.daemon_endpoint_sha256 != endpoint_sha256
+    ):
+        raise FinalGateCliError(
+            "readiness_binding_mismatch",
+            "readiness report is detached from this final-gate invocation",
+        )
 
     test_key: object | None = None
     train_key: object | None = None
     try:
         test_key = read_attestation_key_file_v1(args.test_key_file)
+        _assert_mount_table_stable(mount_table)
         if type(test_key) is not bytearray:
             raise FinalGateCliError(
                 "trusted_key_rejected",
                 "test key reader returned an invalid exact type",
             )
         train_key = read_attestation_key_file_v1(args.train_key_file)
+        _assert_mount_table_stable(mount_table)
         if type(train_key) is not bytearray:
             raise FinalGateCliError(
                 "trusted_key_rejected",
@@ -942,11 +1100,13 @@ def _run(args: argparse.Namespace) -> object:
             raise FinalGateCliError(
                 "trusted_key_rejected", "test and train key buffers are not independent"
             )
-        return run_e4_final_gate_v1(
+        result = run_e4_final_gate_v1(
             args.benchmark_root,
             args.output_root,
             args.docker_executable,
             args.runtime_image_id,
+            docker_endpoint=args.docker_host,
+            expected_runtime_binding=readiness.runtime_binding,
             plan=plan,
             test_sealed_batch_root=args.test_sealed_batch_root,
             test_replay_config_root=args.test_replay_config_root,
@@ -954,7 +1114,12 @@ def _run(args: argparse.Namespace) -> object:
             train_replay_config_root=args.train_replay_config_root,
             test_snapshot_attestation_key=test_key,
             train_snapshot_attestation_key=train_key,
+            expected_mount_table=mount_table,
+            commit_callback=commit_callback,
         )
+        if type(result) is FinalGateReceiptV1 and commit_callback is not None:
+            commit_callback("committed")
+        return result
     finally:
         if type(test_key) is bytearray:
             zero_secret_buffer_v1(test_key)
@@ -966,6 +1131,7 @@ def _verify_output(args: argparse.Namespace) -> FinalGateReceiptV1:
     _validate_namespace(args, command="verify-output")
     _validate_verify_scalars(args)
     _validate_path_values((args.output_root, args.benchmark_root))
+    mount_table = _linux_mount_table()
     directory_snapshot = _directory_identity_snapshot(
         (args.output_root, args.benchmark_root)
     )
@@ -974,7 +1140,7 @@ def _verify_output(args: argparse.Namespace) -> FinalGateReceiptV1:
         args.benchmark_root,
         left_exists=True,
         right_directory=True,
-    ):
+    ) or _physical_overlap(mount_table, args.output_root, args.benchmark_root):
         raise FinalGateCliError(
             "path_overlap", "committed output overlaps the benchmark root"
         )
@@ -988,12 +1154,14 @@ def _verify_output(args: argparse.Namespace) -> FinalGateReceiptV1:
             "trusted_input_rejected",
             "verification directory identities changed during preflight",
         )
+    _assert_mount_table_stable(mount_table)
     result = read_committed_e4_final_gate_v1(
         args.output_root,
         expected_receipt_sha256=args.expected_receipt_sha256,
         expected_wire_sha256=args.expected_wire_sha256,
         benchmark_root=args.benchmark_root,
     )
+    _assert_mount_table_stable(mount_table)
     try:
         if (
             type(result) is not FinalGateReceiptV1
@@ -1040,58 +1208,113 @@ def _emit_success(value: object) -> int:
     return EXIT_SUCCESS
 
 
+def _write_error_summary_best_effort(
+    code: object,
+    *,
+    committed: bool,
+    interrupted: bool = False,
+) -> None:
+    try:
+        payload = _error_summary_bytes(
+            code,
+            committed=committed,
+            interrupted=interrupted,
+        )
+        _write_stdout_bytes(payload)
+    except BaseException:
+        pass
+
+
+def _error_is_committed(
+    args: argparse.Namespace,
+    error: BaseException,
+    *,
+    commit_observation: str,
+) -> bool:
+    if args.command == "verify-output" or commit_observation in {
+        "possible",
+        "committed",
+    }:
+        return True
+    try:
+        return getattr(error, "committed", False) is True
+    except BaseException:
+        return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    commit_observation = "precommit"
+
+    def observe_commit(state: str) -> None:
+        nonlocal commit_observation
+        if commit_observation == "committed":
+            return
+        if state in {"absent", "possible", "committed"}:
+            commit_observation = state
+        else:
+            commit_observation = "possible"
+
     try:
         if args.command == "run":
-            result = _run(args)
+            result = _run(args, commit_callback=observe_commit)
             if type(result) is FinalGateReceiptV1:
+                observe_commit("committed")
                 return _emit_success(result)
             _write_stdout_bytes(_attempt_report_bytes(result))
             return EXIT_ATTEMPT_FAILED
         return _emit_success(_verify_output(args))
     except FinalGateReaderError as error:
-        _write_stdout_bytes(
-            _error_summary_bytes(error.code, committed=True)
+        _write_error_summary_best_effort(
+            error.code,
+            committed=True,
         )
         return EXIT_COMMITTED_UNCERTAIN
     except FinalGateRunnerError as error:
-        committed = error.committed is True
-        _write_stdout_bytes(
-            _error_summary_bytes(error.code, committed=committed)
+        committed = _error_is_committed(
+            args, error, commit_observation=commit_observation
+        )
+        _write_error_summary_best_effort(
+            error.code,
+            committed=committed,
         )
         return EXIT_COMMITTED_UNCERTAIN if committed else EXIT_REJECTED
     except FinalGateCliError as error:
-        committed = error.committed is True
-        _write_stdout_bytes(
-            _error_summary_bytes(error.code, committed=committed)
+        committed = _error_is_committed(
+            args, error, commit_observation=commit_observation
+        )
+        _write_error_summary_best_effort(
+            error.code,
+            committed=committed,
         )
         return EXIT_COMMITTED_UNCERTAIN if committed else EXIT_REJECTED
     except TrustedInputError:
-        _write_stdout_bytes(
-            _error_summary_bytes("trusted_input_rejected", committed=False)
+        _write_error_summary_best_effort(
+            "trusted_input_rejected",
+            committed=commit_observation in {"possible", "committed"},
         )
-        return EXIT_REJECTED
+        return (
+            EXIT_COMMITTED_UNCERTAIN
+            if commit_observation in {"possible", "committed"}
+            else EXIT_REJECTED
+        )
     except Exception as error:
-        committed = (
-            args.command == "verify-output"
-            or getattr(error, "committed", False) is True
+        committed = _error_is_committed(
+            args, error, commit_observation=commit_observation
         )
-        _write_stdout_bytes(
-            _error_summary_bytes("command_rejected", committed=committed)
+        _write_error_summary_best_effort(
+            "command_rejected",
+            committed=committed,
         )
         return EXIT_COMMITTED_UNCERTAIN if committed else EXIT_REJECTED
     except BaseException as error:
-        committed = (
-            args.command == "verify-output"
-            or getattr(error, "committed", False) is True
+        committed = _error_is_committed(
+            args, error, commit_observation=commit_observation
         )
-        _write_stdout_bytes(
-            _error_summary_bytes(
-                "command_interrupted",
-                committed=committed,
-                interrupted=not committed,
-            )
+        _write_error_summary_best_effort(
+            "command_interrupted",
+            committed=committed,
+            interrupted=not committed,
         )
         return EXIT_COMMITTED_UNCERTAIN if committed else EXIT_INTERRUPTED
 

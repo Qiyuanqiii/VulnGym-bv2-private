@@ -21,7 +21,8 @@ import os
 from pathlib import Path
 import secrets
 import stat
-from typing import Final
+import sys
+from typing import Callable, Final, Literal
 
 from vulngym_agent.benchmark.contracts import SnapshotTaskSpec
 from vulngym_agent.benchmark.harness import (
@@ -75,6 +76,18 @@ from vulngym_agent.evaluator.final_gate import (
 from vulngym_agent.evaluator.supervisor import (
     EvaluatorSupervisorError,
     _materialized_identity,
+)
+from vulngym_agent.evaluator.runtime_evidence import (
+    RuntimeBindingPinsV1,
+    RuntimeEvidenceError,
+    docker_endpoint_sha256_v1,
+)
+from vulngym_agent.linux_host_security import (
+    LinuxHostSecurityError,
+    LinuxMountTableV1,
+    assert_linux_mount_table_stable_v1,
+    capture_linux_mount_table_v1,
+    linux_paths_overlap_v1,
 )
 
 
@@ -240,7 +253,59 @@ def _path_contains(root: Path, candidate: Path) -> bool:
     return common == os.path.normcase(str(root))
 
 
-def _assert_output_disjoint(output: Path, inputs: tuple[Path, ...]) -> None:
+def _linux_mount_table() -> LinuxMountTableV1 | None:
+    if os.name != "posix" or sys.platform != "linux":
+        return None
+    try:
+        return capture_linux_mount_table_v1()
+    except LinuxHostSecurityError as error:
+        raise FinalGateRunnerError(
+            "path_overlap", "Linux mount namespace could not be bound"
+        ) from error
+
+
+def _physical_overlap(
+    table: LinuxMountTableV1 | None, left: Path, right: Path
+) -> bool:
+    if table is None:
+        return False
+    try:
+        return linux_paths_overlap_v1(table, left, right)
+    except LinuxHostSecurityError as error:
+        raise FinalGateRunnerError(
+            "path_overlap", "physical path mapping could not be verified"
+        ) from error
+
+
+def _assert_bound_mount_table_stable(
+    mount_table: LinuxMountTableV1 | None,
+    *,
+    committed: bool = False,
+) -> None:
+    if mount_table is None:
+        return
+    try:
+        assert_linux_mount_table_stable_v1(mount_table)
+    except LinuxHostSecurityError as error:
+        raise FinalGateRunnerError(
+            "publication_uncertain" if committed else "path_overlap",
+            "Linux mount namespace changed during the final gate",
+            committed=committed,
+        ) from error
+
+
+def _assert_output_disjoint(
+    output: Path,
+    inputs: tuple[Path, ...],
+    *,
+    expected_mount_table: LinuxMountTableV1 | None = None,
+) -> LinuxMountTableV1 | None:
+    if expected_mount_table is not None and type(expected_mount_table) is not LinuxMountTableV1:
+        raise FinalGateRunnerError(
+            "invalid_argument", "Linux mount binding has an invalid exact type"
+        )
+    mount_table = expected_mount_table or _linux_mount_table()
+    _assert_bound_mount_table_stable(mount_table)
     try:
         output_ancestor_identities = {
             _directory_identity(
@@ -259,13 +324,24 @@ def _assert_output_disjoint(output: Path, inputs: tuple[Path, ...]) -> None:
     if (
         input_identities & output_ancestor_identities
         or any(
-            _path_contains(root, output) or _path_contains(output, root)
+            _path_contains(root, output)
+            or _path_contains(output, root)
+            or _physical_overlap(mount_table, root, output)
             for root in inputs
+        )
+        or any(
+            _path_contains(left, right)
+            or _path_contains(right, left)
+            or _physical_overlap(mount_table, left, right)
+            for index, left in enumerate(inputs)
+            for right in inputs[index + 1 :]
         )
     ):
         raise FinalGateRunnerError(
             "path_overlap", "final-gate output overlaps a trusted input"
         )
+    _assert_bound_mount_table_stable(mount_table)
+    return mount_table
 
 
 def _validate_command(value: object) -> str:
@@ -1055,6 +1131,34 @@ def _outer_composite_identity(root: Path) -> tuple[object, ...]:
     )
 
 
+_PublicationState = Literal["absent", "committed", "unknown"]
+_CommitObservation = Literal["absent", "possible", "committed"]
+
+
+def _classify_publication_state(
+    output: Path,
+    *,
+    staging_identity: tuple[int, int],
+) -> _PublicationState:
+    try:
+        state = os.lstat(output)
+    except FileNotFoundError:
+        return "absent"
+    except BaseException:
+        return "unknown"
+    try:
+        if (
+            stat.S_ISDIR(state.st_mode)
+            and not stat.S_ISLNK(state.st_mode)
+            and not _is_reparse(state)
+            and _directory_identity(state) == staging_identity
+        ):
+            return "committed"
+    except BaseException:
+        return "unknown"
+    return "unknown"
+
+
 def _publish_outer_transaction(
     *,
     staging: Path,
@@ -1065,7 +1169,10 @@ def _publish_outer_transaction(
     benchmark_root: Path,
     plan: FinalGatePlanV1,
     receipt: FinalGateReceiptV1,
+    mount_table: LinuxMountTableV1 | None,
+    commit_callback: Callable[[_CommitObservation], None] | None,
 ) -> FinalGateReceiptV1:
+    _assert_bound_mount_table_stable(mount_table)
     plan_wire = plan.to_bytes()
     receipt_wire = receipt.to_bytes()
     _write_control_file(staging / FINAL_GATE_PLAN_FILENAME, plan_wire)
@@ -1120,11 +1227,17 @@ def _publish_outer_transaction(
             "staging_changed",
             "final-gate transaction changed immediately before publication",
         )
+    _assert_bound_mount_table_stable(mount_table)
 
     rename_returned = False
     try:
+        if commit_callback is not None:
+            commit_callback("possible")
         _rename_directory_noreplace(staging, output)
         rename_returned = True
+        if commit_callback is not None:
+            commit_callback("committed")
+        _assert_bound_mount_table_stable(mount_table, committed=True)
         published = _require_private_directory(
             output, code="publication_uncertain"
         )
@@ -1153,19 +1266,24 @@ def _publish_outer_transaction(
                 "committed final-gate readback differs",
                 committed=True,
             )
+        _assert_bound_mount_table_stable(mount_table, committed=True)
         return result
     except BaseException as error:
         try:
-            state = os.lstat(output)
-            final_name_is_staging = (
-                stat.S_ISDIR(state.st_mode)
-                and not stat.S_ISLNK(state.st_mode)
-                and not _is_reparse(state)
-                and _directory_identity(state) == staging_identity
+            publication_state = _classify_publication_state(
+                output, staging_identity=staging_identity
             )
-        except OSError:
-            final_name_is_staging = False
-        committed = rename_returned or final_name_is_staging
+        except BaseException:
+            publication_state = "unknown"
+        committed = rename_returned or publication_state != "absent"
+        if commit_callback is not None:
+            try:
+                commit_callback("committed" if committed else "absent")
+            except BaseException:
+                # The original publication signal is authoritative.  A
+                # diagnostic callback must neither replace it nor erase the
+                # conservative pre-rename observation already delivered.
+                pass
         if not isinstance(error, Exception):
             if committed:
                 try:
@@ -1192,6 +1310,8 @@ def _run_e4_final_gate(
     docker_executable: object,
     runtime_image_id: object,
     *,
+    docker_endpoint: object,
+    expected_runtime_binding: object,
     plan: object,
     test_sealed_batch_root: object,
     test_replay_config_root: object,
@@ -1199,9 +1319,34 @@ def _run_e4_final_gate(
     train_replay_config_root: object,
     test_snapshot_attestation_key: object,
     train_snapshot_attestation_key: object,
+    expected_mount_table: LinuxMountTableV1 | None = None,
+    commit_callback: Callable[[_CommitObservation], None] | None = None,
 ) -> FinalGateReceiptV1 | DiscoveryBatchAttemptReportV2:
+    if commit_callback is not None and not callable(commit_callback):
+        raise FinalGateRunnerError(
+            "invalid_argument", "final-gate commit callback is invalid"
+        )
     frozen_plan = _freeze_plan(plan)
     _assert_policy_matches_plan(frozen_plan, runtime_image_id)
+    if (
+        type(expected_runtime_binding) is not RuntimeBindingPinsV1
+        or type(docker_endpoint) is not str
+        or expected_runtime_binding.runtime_image_id != runtime_image_id
+    ):
+        raise FinalGateRunnerError(
+            "runtime_binding_invalid", "final-gate runtime binding is invalid"
+        )
+    try:
+        expected_runtime_binding.__post_init__()
+        endpoint_sha256 = docker_endpoint_sha256_v1(docker_endpoint)
+    except RuntimeEvidenceError:
+        raise FinalGateRunnerError(
+            "runtime_binding_invalid", "final-gate runtime binding did not normalize"
+        ) from None
+    if endpoint_sha256 != expected_runtime_binding.daemon_endpoint_sha256:
+        raise FinalGateRunnerError(
+            "runtime_binding_mismatch", "Docker endpoint differs from readiness"
+        )
     docker = _validate_command(docker_executable)
     benchmark = _canonical_existing_directory(
         benchmark_root, name="benchmark_root"
@@ -1219,9 +1364,10 @@ def _run_e4_final_gate(
         train_replay_config_root, name="train_replay_config_root"
     )
     output, parent, parent_identity = _canonical_new_output(output_root)
-    _assert_output_disjoint(
+    mount_table = _assert_output_disjoint(
         output,
         (benchmark, test_sealed, test_replay, train_sealed, train_replay),
+        expected_mount_table=expected_mount_table,
     )
     # Secret material is the final preflight surface.  No key length, alias,
     # or byte is inspected until every public scalar and filesystem binding
@@ -1261,7 +1407,21 @@ def _run_e4_final_gate(
         snapshot_key_id=frozen_plan.test.snapshot_key_id,
         runtime_image_id=runtime_image_id,
         docker_executable=docker,
+        docker_endpoint=docker_endpoint,
+        expected_runtime_binding=expected_runtime_binding,
+        protected_host_paths=(
+            Path(os.path.abspath(docker)),
+            benchmark,
+            test_sealed,
+            test_replay,
+            train_sealed,
+            train_replay,
+            staging,
+            output,
+        ),
+        expected_mount_table=mount_table,
     )
+    _assert_bound_mount_table_stable(mount_table)
     if type(test_result) is DiscoveryBatchAttemptReportV2:
         return test_result
     test_success = _freeze_e4_success(
@@ -1273,6 +1433,7 @@ def _run_e4_final_gate(
         split_plan=frozen_plan.test,
         success=test_success,
     )
+    _assert_bound_mount_table_stable(mount_table)
     _assert_directory_identity(test_root, test_identity)
     _assert_members(test_root, FINAL_GATE_SPLIT_MEMBERS)
     test_closure = _split_closure(
@@ -1304,7 +1465,21 @@ def _run_e4_final_gate(
         snapshot_key_id=frozen_plan.train.snapshot_key_id,
         runtime_image_id=runtime_image_id,
         docker_executable=docker,
+        docker_endpoint=docker_endpoint,
+        expected_runtime_binding=expected_runtime_binding,
+        protected_host_paths=(
+            Path(os.path.abspath(docker)),
+            benchmark,
+            test_sealed,
+            test_replay,
+            train_sealed,
+            train_replay,
+            staging,
+            output,
+        ),
+        expected_mount_table=mount_table,
     )
+    _assert_bound_mount_table_stable(mount_table)
     if type(train_result) is DiscoveryBatchAttemptReportV2:
         return train_result
     train_success = _freeze_e4_success(
@@ -1316,6 +1491,7 @@ def _run_e4_final_gate(
         split_plan=frozen_plan.train,
         success=train_success,
     )
+    _assert_bound_mount_table_stable(mount_table)
     _assert_directory_identity(train_root, train_identity)
     _assert_members(train_root, FINAL_GATE_SPLIT_MEMBERS)
     train_closure = _split_closure(
@@ -1330,6 +1506,7 @@ def _run_e4_final_gate(
             "closure_rejected", "final-gate receipt did not close"
         ) from None
     _assert_directory_identity(staging, staging_identity)
+    _assert_bound_mount_table_stable(mount_table)
     return _publish_outer_transaction(
         staging=staging,
         staging_identity=staging_identity,
@@ -1339,6 +1516,8 @@ def _run_e4_final_gate(
         benchmark_root=benchmark,
         plan=frozen_plan,
         receipt=receipt,
+        mount_table=mount_table,
+        commit_callback=commit_callback,
     )
 
 
@@ -1348,6 +1527,8 @@ def run_e4_final_gate_v1(
     docker_executable: str | Path,
     runtime_image_id: str,
     *,
+    docker_endpoint: str,
+    expected_runtime_binding: RuntimeBindingPinsV1,
     plan: FinalGatePlanV1,
     test_sealed_batch_root: str | Path,
     test_replay_config_root: str | Path,
@@ -1355,6 +1536,8 @@ def run_e4_final_gate_v1(
     train_replay_config_root: str | Path,
     test_snapshot_attestation_key: bytearray,
     train_snapshot_attestation_key: bytearray,
+    expected_mount_table: LinuxMountTableV1 | None = None,
+    commit_callback: Callable[[_CommitObservation], None] | None = None,
 ) -> FinalGateReceiptV1 | DiscoveryBatchAttemptReportV2:
     """Run the fixed blind-test-first 20+50 E4 final-gate transaction."""
 
@@ -1364,6 +1547,8 @@ def run_e4_final_gate_v1(
             output_root,
             docker_executable,
             runtime_image_id,
+            docker_endpoint=docker_endpoint,
+            expected_runtime_binding=expected_runtime_binding,
             plan=plan,
             test_sealed_batch_root=test_sealed_batch_root,
             test_replay_config_root=test_replay_config_root,
@@ -1371,6 +1556,8 @@ def run_e4_final_gate_v1(
             train_replay_config_root=train_replay_config_root,
             test_snapshot_attestation_key=test_snapshot_attestation_key,
             train_snapshot_attestation_key=train_snapshot_attestation_key,
+            expected_mount_table=expected_mount_table,
+            commit_callback=commit_callback,
         )
     except FinalGateRunnerError:
         raise

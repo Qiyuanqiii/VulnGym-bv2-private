@@ -15,6 +15,11 @@ from unittest import mock
 import vulngym_agent.evaluator.linux_oci as linux_oci
 from vulngym_agent.evaluator.bounded_process import BoundedProcessResultV1
 from vulngym_agent.evaluator.contracts import ExecutionPolicyBindingV1
+from vulngym_agent.evaluator.runtime_evidence import (
+    RuntimeBindingPinsV1,
+    docker_endpoint_sha256_v1,
+    docker_info_identity_sha256_v1,
+)
 
 
 def _sha(marker: int) -> str:
@@ -84,6 +89,46 @@ class LinuxOciTests(unittest.TestCase):
                 "Layers": ["sha256:" + "8" * 64, "sha256:" + "9" * 64],
             },
         }
+        self.info = {
+            "Architecture": "x86_64",
+            "CgroupDriver": "systemd",
+            "CgroupVersion": "2",
+            "ContainerdCommit": {"Expected": "one", "ID": "one"},
+            "DefaultRuntime": "runc",
+            "DockerRootDir": "/var/lib/docker",
+            "Driver": "overlay2",
+            "ID": "DAEMON:ONE",
+            "InitBinary": "docker-init",
+            "InitCommit": {"Expected": "two", "ID": "two"},
+            "KernelVersion": "6.8.0",
+            "LiveRestoreEnabled": False,
+            "MemTotal": 32 * 1024**3,
+            "NCPU": 8,
+            "Name": "vulngym-evaluator",
+            "OSType": "linux",
+            "OSVersion": "24.04",
+            "OperatingSystem": "Ubuntu 24.04 LTS",
+            "RuncCommit": {"Expected": "three", "ID": "three"},
+            "Runtimes": {"runc": {"path": "runc"}},
+            "SecurityOptions": ["name=seccomp,profile=builtin"],
+            "ServerVersion": "29.6.2",
+        }
+
+    def _runtime_binding(self) -> RuntimeBindingPinsV1:
+        endpoint = "unix:///run/vulngym/docker.sock"
+        return RuntimeBindingPinsV1(
+            daemon_endpoint_sha256=docker_endpoint_sha256_v1(endpoint),
+            docker_executable_sha256=self.executable.content_sha256,
+            docker_socket_identity_sha256=_sha(8),
+            server_observation_sha256=hashlib.sha256(
+                linux_oci._canonical_json(self.server)
+            ).hexdigest(),
+            daemon_info_sha256=docker_info_identity_sha256_v1(self.info),
+            runtime_image_id=self.policy.runtime_image_id,
+            runtime_image_inspect_sha256=hashlib.sha256(
+                linux_oci._canonical_json(self.image)
+            ).hexdigest(),
+        )
 
     def _runtime(self):
         with mock.patch.object(
@@ -152,6 +197,96 @@ class LinuxOciTests(unittest.TestCase):
                     self.executable.path, execution_policy=self.policy
                 )
             self.assertEqual(caught.exception.code, "image_mismatch")
+
+    def test_readiness_binding_closes_initial_and_fresh_reverification(self) -> None:
+        endpoint = "unix:///run/vulngym/docker.sock"
+        binding = self._runtime_binding()
+        socket_guard = mock.sentinel.socket_guard
+        docker_root_guard = mock.sentinel.docker_root_guard
+        mount_table = linux_oci.LinuxMountTableV1(
+            payload=b"bound-mounts\n", entries=()
+        )
+        with (
+            mock.patch.object(
+                linux_oci, "_bind_executable", return_value=self.executable
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_bind_docker_socket_v1",
+                return_value=(_sha(8), socket_guard),
+            ) as socket_probe,
+            mock.patch.object(
+                linux_oci,
+                "_bind_docker_root_v1",
+                return_value=docker_root_guard,
+            ),
+            mock.patch.object(linux_oci, "_assert_runtime_storage_disjoint_v1"),
+            mock.patch.object(linux_oci, "_assert_linux_host_guards_v1"),
+            mock.patch.object(
+                linux_oci,
+                "_run_probe",
+                side_effect=(
+                    _json(self.server),
+                    _json(self.info),
+                    _json(self.image),
+                    _json(self.server),
+                    _json(self.info),
+                    _json(self.image),
+                ),
+            ) as probe,
+        ):
+            runtime = linux_oci.verify_linux_oci_runtime_v1(
+                self.executable.path,
+                execution_policy=self.policy,
+                docker_endpoint=endpoint,
+                expected_runtime_binding=binding,
+                expected_mount_table=mount_table,
+            )
+            linux_oci.reverify_linux_oci_runtime_v1(runtime)
+        self.assertIs(runtime.runtime_binding, binding)
+        self.assertEqual(socket_probe.call_count, 2)
+        self.assertEqual(probe.call_count, 6)
+        self.assertTrue(
+            all(
+                call.kwargs["mount_table"] is mount_table
+                for call in probe.call_args_list
+            )
+        )
+
+    def test_readiness_binding_mismatch_rejects_before_daemon_probe(self) -> None:
+        endpoint = "unix:///run/vulngym/docker.sock"
+        expected = self._runtime_binding()
+        detached = RuntimeBindingPinsV1(
+            **{
+                **expected.to_dict(),
+                "docker_executable_sha256": _sha(99),
+            }
+        )
+        daemon_probe = mock.Mock()
+        mount_table = linux_oci.LinuxMountTableV1(
+            payload=b"bound-mounts\n", entries=()
+        )
+        with (
+            mock.patch.object(
+                linux_oci, "_bind_executable", return_value=self.executable
+            ),
+            mock.patch.object(
+                linux_oci,
+                "_docker_socket_identity_digest_v1",
+                return_value=_sha(8),
+            ),
+            mock.patch.object(linux_oci, "_run_probe", daemon_probe),
+            self.assertRaises(linux_oci.LinuxOciProviderError) as captured,
+        ):
+            linux_oci.verify_linux_oci_runtime_v1(
+                self.executable.path,
+                execution_policy=self.policy,
+                docker_endpoint=endpoint,
+                expected_runtime_binding=detached,
+                expected_mount_table=mount_table,
+            )
+        self.assertEqual(captured.exception.code, "runtime_binding_mismatch")
+        daemon_probe.assert_not_called()
 
     def test_create_argv_is_fixed_and_task_values_cannot_supply_commands(self) -> None:
         runtime = self._runtime()
@@ -1115,6 +1250,91 @@ class LinuxOciTests(unittest.TestCase):
             "USERPROFILE",
         ):
             self.assertNotIn(name, env)
+
+    def test_probe_and_runtime_command_guard_host_before_and_after(self) -> None:
+        result = BoundedProcessResultV1(0, b"ok", b"", False, False, False)
+        socket_guard = mock.sentinel.socket_guard
+        docker_root_guard = mock.sentinel.docker_root_guard
+        mount_table = mock.sentinel.mount_table
+        guards = (socket_guard, docker_root_guard, mount_table)
+        with (
+            mock.patch.object(
+                linux_oci, "run_bounded_process_v1", return_value=result
+            ),
+            mock.patch.object(linux_oci, "_assert_linux_host_guards_v1") as checked,
+        ):
+            self.assertEqual(
+                linux_oci._run_probe(
+                    self.executable,
+                    {},
+                    ("version",),
+                    endpoint="unix:///run/vulngym/docker.sock",
+                    socket_guard=socket_guard,
+                    docker_root_guard=docker_root_guard,
+                    mount_table=mount_table,
+                ),
+                b"ok",
+            )
+        self.assertEqual(checked.call_args_list, [mock.call(*guards)] * 2)
+
+        runtime = self._runtime()
+        with (
+            mock.patch.object(
+                linux_oci.VerifiedLinuxOciRuntimeV1,
+                "_linux_host_guards",
+                return_value=guards,
+            ),
+            mock.patch.object(
+                linux_oci, "run_bounded_process_v1", return_value=result
+            ),
+            mock.patch.object(linux_oci, "_assert_linux_host_guards_v1") as checked,
+        ):
+            self.assertIs(linux_oci._runtime_command(runtime, ("version",)), result)
+        self.assertEqual(checked.call_args_list, [mock.call(*guards)] * 2)
+
+    def test_probe_rechecks_host_after_interrupt(self) -> None:
+        guards = (
+            mock.sentinel.socket_guard,
+            mock.sentinel.docker_root_guard,
+            mock.sentinel.mount_table,
+        )
+        with (
+            mock.patch.object(
+                linux_oci,
+                "run_bounded_process_v1",
+                side_effect=KeyboardInterrupt,
+            ),
+            mock.patch.object(linux_oci, "_assert_linux_host_guards_v1") as checked,
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            linux_oci._run_probe(
+                self.executable,
+                {},
+                ("version",),
+                endpoint="unix:///run/vulngym/docker.sock",
+                socket_guard=guards[0],
+                docker_root_guard=guards[1],
+                mount_table=guards[2],
+            )
+        self.assertEqual(checked.call_args_list, [mock.call(*guards)] * 2)
+
+    def test_runtime_storage_rejects_physical_aliases(self) -> None:
+        mount_table = mock.sentinel.mount_table
+        socket_guard = SimpleNamespace(path=Path("/run/vulngym/docker.sock"))
+        docker_root_guard = SimpleNamespace(path=Path("/var/lib/docker"))
+        with (
+            mock.patch.object(
+                linux_oci, "linux_paths_overlap_v1", return_value=True
+            ),
+            self.assertRaises(linux_oci.LinuxOciProviderError) as captured,
+        ):
+            linux_oci._assert_runtime_storage_disjoint_v1(
+                mount_table,
+                socket_guard,
+                docker_root_guard,
+                (Path("/srv/vulngym/benchmark"),),
+            )
+        self.assertEqual(captured.exception.code, "runtime_path_overlap")
 
     @unittest.skipUnless(os.name == "nt", "requires Windows mandatory sharing")
     def test_windows_binding_denies_write_and_replace_through_start(self) -> None:

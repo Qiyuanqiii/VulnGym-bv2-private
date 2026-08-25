@@ -53,9 +53,12 @@ from vulngym_agent.evaluator.runtime_evidence import (
     DockerServerIdentityV1,
     RuntimeEvidenceError,
     RuntimeEvidenceV1,
+    RuntimeBindingPinsV1,
     RuntimeIsolationV1,
     RuntimeResourceLimitsV1,
     docker_endpoint_sha256_v1,
+    docker_info_identity_sha256_v1,
+    docker_socket_identity_sha256_v1,
 )
 from vulngym_agent.evaluator.worker_completion import (
     CompletedWorkerExecutionV1,
@@ -63,6 +66,18 @@ from vulngym_agent.evaluator.worker_completion import (
     _issue_completed_worker_execution_v1,
 )
 from vulngym_agent.orchestrator.discovery_pipeline import SourceDiscoveryRunV1
+from vulngym_agent.linux_host_security import (
+    DockerSocketGuardV1,
+    LinuxDirectoryGuardV1,
+    LinuxHostSecurityError,
+    LinuxMountTableV1,
+    assert_docker_socket_guard_stable_v1,
+    assert_linux_mount_table_stable_v1,
+    assert_root_owned_directory_guard_stable_v1,
+    bind_docker_socket_guard_v1,
+    bind_root_owned_directory_chain_v1,
+    linux_paths_overlap_v1,
+)
 
 
 LINUX_OCI_PROVIDER_VERSION: Final[str] = "linux-oci-provider-v1"
@@ -315,6 +330,111 @@ def _local_docker_endpoint(value: object) -> str:
     raise LinuxOciProviderError(
         "unsupported_runtime", "OCI endpoint is not a supported local endpoint"
     )
+
+
+def _docker_socket_identity_digest_v1(endpoint: str) -> str:
+    digest, _guard = _bind_docker_socket_v1(endpoint)
+    return digest
+
+
+def _bind_docker_socket_v1(
+    endpoint: str,
+) -> tuple[str, DockerSocketGuardV1]:
+    bound = _local_docker_endpoint(endpoint)
+    if not bound.startswith("unix:///"):
+        raise LinuxOciProviderError(
+            "unsupported_runtime", "pinned final-gate endpoint must be a Unix socket"
+        )
+    path = Path(bound[len("unix://") :])
+    try:
+        guard = bind_docker_socket_guard_v1(path)
+    except LinuxHostSecurityError as error:
+        raise LinuxOciProviderError(
+            "runtime_unavailable", "pinned Docker socket binding is unsafe"
+        ) from error
+    identity = guard.socket_identity
+    try:
+        digest = docker_socket_identity_sha256_v1(
+            device=identity[0],
+            inode=identity[1],
+            uid=identity[2],
+            gid=identity[3],
+            mode=identity[4],
+        )
+    except RuntimeEvidenceError:
+        raise LinuxOciProviderError(
+            "runtime_unavailable", "pinned Docker socket identity is invalid"
+        ) from None
+    return digest, guard
+
+
+def _assert_linux_host_guards_v1(
+    socket_guard: DockerSocketGuardV1 | None,
+    docker_root_guard: LinuxDirectoryGuardV1 | None,
+    mount_table: LinuxMountTableV1 | None,
+) -> None:
+    try:
+        if mount_table is not None:
+            assert_linux_mount_table_stable_v1(mount_table)
+        if socket_guard is not None:
+            assert_docker_socket_guard_stable_v1(socket_guard)
+        if docker_root_guard is not None:
+            assert_root_owned_directory_guard_stable_v1(docker_root_guard)
+    except LinuxHostSecurityError as error:
+        raise LinuxOciProviderError(
+            "runtime_changed", "pinned Linux host binding changed"
+        ) from error
+
+
+def _bind_docker_root_v1(info: object) -> LinuxDirectoryGuardV1:
+    try:
+        docker_root = info.get("DockerRootDir")
+    except AttributeError:
+        docker_root = None
+    if type(docker_root) is not str or not docker_root.startswith("/"):
+        raise LinuxOciProviderError(
+            "runtime_unavailable", "Docker data root is invalid"
+        )
+    try:
+        return bind_root_owned_directory_chain_v1(Path(docker_root))
+    except LinuxHostSecurityError as error:
+        raise LinuxOciProviderError(
+            "runtime_unavailable", "Docker data root binding is unsafe"
+        ) from error
+
+
+def _assert_runtime_storage_disjoint_v1(
+    mount_table: LinuxMountTableV1,
+    socket_guard: DockerSocketGuardV1,
+    docker_root_guard: LinuxDirectoryGuardV1,
+    protected_host_paths: tuple[str | Path, ...],
+) -> None:
+    try:
+        protected = tuple(
+            Path(os.path.abspath(os.fspath(path))) for path in protected_host_paths
+        )
+        def overlaps(left: Path, right: Path) -> bool:
+            try:
+                common = os.path.commonpath((os.fspath(left), os.fspath(right)))
+            except ValueError:
+                common = ""
+            return common in {os.fspath(left), os.fspath(right)} or linux_paths_overlap_v1(
+                mount_table, left, right
+            )
+
+        if overlaps(socket_guard.path, docker_root_guard.path) or any(
+            overlaps(candidate, guarded)
+            for candidate in (socket_guard.path, docker_root_guard.path)
+            for guarded in protected
+        ):
+            raise LinuxHostSecurityError(
+                "path_overlap", "runtime storage overlaps a protected host path"
+            )
+        assert_linux_mount_table_stable_v1(mount_table)
+    except (LinuxHostSecurityError, OSError, TypeError, ValueError) as error:
+        raise LinuxOciProviderError(
+            "runtime_path_overlap", "runtime storage is not physically isolated"
+        ) from error
 
 
 _ExecutableIdentity = tuple[int, int, int, int | None, int | None]
@@ -822,28 +942,35 @@ def _run_probe(
     arguments: tuple[str, ...],
     *,
     endpoint: str,
+    socket_guard: DockerSocketGuardV1 | None = None,
+    docker_root_guard: LinuxDirectoryGuardV1 | None = None,
+    mount_table: LinuxMountTableV1 | None = None,
 ) -> bytes:
     bound_endpoint = _local_docker_endpoint(endpoint)
     execution_path, inherited_fds, config_path = executable.execution_spec()
+    _assert_linux_host_guards_v1(socket_guard, docker_root_guard, mount_table)
     try:
-        result = run_bounded_process_v1(
-            (
-                executable.path,
-                f"--host={bound_endpoint}",
-                f"--config={config_path}",
-                *arguments,
-            ),
-            stdout_max_bytes=_PROBE_STDOUT_BYTES,
-            stderr_max_bytes=_PROBE_STDERR_BYTES,
-            timeout_seconds=_PROBE_TIMEOUT_SECONDS,
-            env=env,
-            executable=execution_path,
-            inherited_fds=inherited_fds,
-        )
-    except BoundedProcessError as error:
-        raise LinuxOciProviderError(
-            "runtime_unavailable", "OCI runtime probe could not be completed"
-        ) from error
+        try:
+            result = run_bounded_process_v1(
+                (
+                    executable.path,
+                    f"--host={bound_endpoint}",
+                    f"--config={config_path}",
+                    *arguments,
+                ),
+                stdout_max_bytes=_PROBE_STDOUT_BYTES,
+                stderr_max_bytes=_PROBE_STDERR_BYTES,
+                timeout_seconds=_PROBE_TIMEOUT_SECONDS,
+                env=env,
+                executable=execution_path,
+                inherited_fds=inherited_fds,
+            )
+        except BoundedProcessError as error:
+            raise LinuxOciProviderError(
+                "runtime_unavailable", "OCI runtime probe could not be completed"
+            ) from error
+    finally:
+        _assert_linux_host_guards_v1(socket_guard, docker_root_guard, mount_table)
     if (
         result.exit_code != 0
         or result.timed_out
@@ -907,13 +1034,19 @@ class VerifiedLinuxOciRuntimeV1:
         "__env",
         "__endpoint",
         "__executable",
+        "__docker_root_guard",
         "__image_config_payload",
         "__image_inspect_sha256",
+        "__info_sha256",
         "__policy_payload",
         "__policy_sha256",
         "__server_api_version",
         "__server_sha256",
         "__server_version",
+        "__socket_identity_sha256",
+        "__runtime_binding",
+        "__mount_table",
+        "__socket_guard",
     )
 
     def __init__(
@@ -928,6 +1061,12 @@ class VerifiedLinuxOciRuntimeV1:
         image_config: dict[str, object],
         image_inspect_sha256: str,
         policy: ExecutionPolicyBindingV1,
+        info_sha256: str | None = None,
+        socket_identity_sha256: str | None = None,
+        runtime_binding: RuntimeBindingPinsV1 | None = None,
+        socket_guard: DockerSocketGuardV1 | None = None,
+        docker_root_guard: LinuxDirectoryGuardV1 | None = None,
+        mount_table: LinuxMountTableV1 | None = None,
     ) -> None:
         if token is not _RUNTIME_TOKEN:
             raise TypeError("verified OCI runtimes are provider-created")
@@ -940,6 +1079,12 @@ class VerifiedLinuxOciRuntimeV1:
         self.__server_sha256 = server_sha256
         self.__image_config_payload = _canonical_json(image_config)
         self.__image_inspect_sha256 = image_inspect_sha256
+        self.__info_sha256 = info_sha256
+        self.__socket_identity_sha256 = socket_identity_sha256
+        self.__runtime_binding = runtime_binding
+        self.__socket_guard = socket_guard
+        self.__docker_root_guard = docker_root_guard
+        self.__mount_table = mount_table
         self.__policy_payload = policy.to_bytes()
         self.__policy_sha256 = policy.policy_sha256
 
@@ -975,6 +1120,18 @@ class VerifiedLinuxOciRuntimeV1:
     def image_inspect_sha256(self) -> str:
         return self.__image_inspect_sha256
 
+    @property
+    def runtime_binding(self) -> RuntimeBindingPinsV1 | None:
+        return self.__runtime_binding
+
+    @property
+    def info_sha256(self) -> str | None:
+        return self.__info_sha256
+
+    @property
+    def socket_identity_sha256(self) -> str | None:
+        return self.__socket_identity_sha256
+
     def _base_image_config(self) -> dict[str, object]:
         try:
             value = json.loads(
@@ -1006,6 +1163,15 @@ class VerifiedLinuxOciRuntimeV1:
         self.__executable.execution_spec()
         return self.__executable, dict(self.__env), self.__endpoint
 
+    def _linux_host_guards(
+        self,
+    ) -> tuple[
+        DockerSocketGuardV1 | None,
+        LinuxDirectoryGuardV1 | None,
+        LinuxMountTableV1 | None,
+    ]:
+        return self.__socket_guard, self.__docker_root_guard, self.__mount_table
+
     def __reduce__(self):
         raise TypeError("verified OCI runtimes are not serializable")
 
@@ -1014,10 +1180,23 @@ def verify_linux_oci_runtime_v1(
     docker_executable: str | Path,
     *,
     execution_policy: ExecutionPolicyBindingV1,
+    docker_endpoint: str | None = None,
+    expected_runtime_binding: RuntimeBindingPinsV1 | None = None,
+    protected_host_paths: tuple[str | Path, ...] = (),
+    expected_mount_table: LinuxMountTableV1 | None = None,
 ) -> VerifiedLinuxOciRuntimeV1:
     """Bind an exact Docker CLI, Linux daemon, image ID, and execution policy."""
 
-    if type(execution_policy) is not ExecutionPolicyBindingV1:
+    if (
+        type(execution_policy) is not ExecutionPolicyBindingV1
+        or type(protected_host_paths) is not tuple
+        or any(type(path) not in {str, type(Path())} for path in protected_host_paths)
+        or (
+            expected_mount_table is not None
+            and type(expected_mount_table) is not LinuxMountTableV1
+        )
+        or (expected_runtime_binding is None) != (expected_mount_table is None)
+    ):
         raise LinuxOciProviderError(
             "invalid_argument", "execution policy must have an exact type"
         )
@@ -1033,16 +1212,72 @@ def verify_linux_oci_runtime_v1(
             "invalid_argument", "execution policy did not pass strict normalization"
         ) from None
     executable = _bind_executable(docker_executable)
-    endpoint = _resolve_local_docker_endpoint(
-        executable,
-        _bootstrap_runtime_environment(Path(executable.path)),
-    )
+    if expected_runtime_binding is not None:
+        if type(expected_runtime_binding) is not RuntimeBindingPinsV1:
+            raise LinuxOciProviderError(
+                "invalid_argument", "runtime binding must have an exact type"
+            )
+        try:
+            expected_runtime_binding.__post_init__()
+        except RuntimeEvidenceError:
+            raise LinuxOciProviderError(
+                "invalid_argument", "runtime binding did not normalize"
+            ) from None
+        if docker_endpoint is None:
+            raise LinuxOciProviderError(
+                "invalid_argument", "pinned runtime requires an explicit endpoint"
+            )
+    if docker_endpoint is None:
+        endpoint = _resolve_local_docker_endpoint(
+            executable,
+            _bootstrap_runtime_environment(Path(executable.path)),
+        )
+    else:
+        endpoint = _local_docker_endpoint(docker_endpoint)
     env = _clean_runtime_environment(Path(executable.path))
+    socket_identity_sha256: str | None = None
+    socket_guard: DockerSocketGuardV1 | None = None
+    docker_root_guard: LinuxDirectoryGuardV1 | None = None
+    mount_table = expected_mount_table
+    if expected_runtime_binding is not None:
+        try:
+            endpoint_sha256 = docker_endpoint_sha256_v1(endpoint)
+        except RuntimeEvidenceError:
+            raise LinuxOciProviderError(
+                "runtime_binding_mismatch", "Docker endpoint binding is invalid"
+            ) from None
+        if (
+            endpoint_sha256
+            != expected_runtime_binding.daemon_endpoint_sha256
+            or executable.content_sha256
+            != expected_runtime_binding.docker_executable_sha256
+            or policy.runtime_image_id != expected_runtime_binding.runtime_image_id
+        ):
+            raise LinuxOciProviderError(
+                "runtime_binding_mismatch",
+                "CLI, endpoint, socket, or image differs from readiness",
+            )
+        socket_identity_sha256, socket_guard = _bind_docker_socket_v1(endpoint)
+        if (
+            socket_identity_sha256
+            != expected_runtime_binding.docker_socket_identity_sha256
+        ):
+            raise LinuxOciProviderError(
+                "runtime_binding_mismatch",
+                "CLI, endpoint, socket, or image differs from readiness",
+            )
+        if mount_table is None:
+            raise LinuxOciProviderError(
+                "runtime_unavailable", "Linux mount namespace binding is missing"
+            )
+        _assert_linux_host_guards_v1(socket_guard, None, mount_table)
     server_payload = _run_probe(
         executable,
         env,
         ("version", "--format", "{{json .Server}}"),
         endpoint=endpoint,
+        socket_guard=socket_guard,
+        mount_table=mount_table,
     )
     server = _strict_json_document(server_payload, name="OCI server")
     if type(server) is not dict:
@@ -1059,6 +1294,36 @@ def verify_linux_oci_runtime_v1(
             "unsupported_runtime", "OCI server is not a supported Linux runtime"
         )
     server_sha256 = hashlib.sha256(_canonical_json(server)).hexdigest()
+    info_sha256: str | None = None
+    if expected_runtime_binding is not None:
+        info = _strict_json_document(
+            _run_probe(
+                executable,
+                env,
+                ("info", "--format", "{{json .}}"),
+                endpoint=endpoint,
+                socket_guard=socket_guard,
+                mount_table=mount_table,
+            ),
+            name="OCI daemon info",
+        )
+        try:
+            info_sha256 = docker_info_identity_sha256_v1(info)
+        except RuntimeEvidenceError:
+            raise LinuxOciProviderError(
+                "runtime_binding_mismatch", "Docker daemon info is incomplete"
+            ) from None
+        docker_root_guard = _bind_docker_root_v1(info)
+        if socket_guard is None or mount_table is None:
+            raise LinuxOciProviderError(
+                "runtime_unavailable", "Linux runtime host binding is incomplete"
+            )
+        _assert_runtime_storage_disjoint_v1(
+            mount_table,
+            socket_guard,
+            docker_root_guard,
+            protected_host_paths,
+        )
     image_payload = _run_probe(
         executable,
         env,
@@ -1070,6 +1335,9 @@ def verify_linux_oci_runtime_v1(
             "{{json .}}",
         ),
         endpoint=endpoint,
+        socket_guard=socket_guard,
+        docker_root_guard=docker_root_guard,
+        mount_table=mount_table,
     )
     image = _strict_json_document(image_payload, name="OCI image")
     if (
@@ -1082,6 +1350,18 @@ def verify_linux_oci_runtime_v1(
         raise LinuxOciProviderError(
             "image_mismatch", "OCI image does not match the pinned Linux image"
         )
+    image_inspect_sha256 = hashlib.sha256(_canonical_json(image)).hexdigest()
+    if expected_runtime_binding is not None and (
+        server_sha256 != expected_runtime_binding.server_observation_sha256
+        or info_sha256 != expected_runtime_binding.daemon_info_sha256
+        or image_inspect_sha256
+        != expected_runtime_binding.runtime_image_inspect_sha256
+    ):
+        raise LinuxOciProviderError(
+            "runtime_binding_mismatch",
+            "daemon or image differs from the readiness binding",
+        )
+    _assert_linux_host_guards_v1(socket_guard, docker_root_guard, mount_table)
     return VerifiedLinuxOciRuntimeV1(
         _RUNTIME_TOKEN,
         executable=executable,
@@ -1090,8 +1370,14 @@ def verify_linux_oci_runtime_v1(
         server=server,
         server_sha256=server_sha256,
         image_config=image["Config"],
-        image_inspect_sha256=hashlib.sha256(_canonical_json(image)).hexdigest(),
+        image_inspect_sha256=image_inspect_sha256,
         policy=policy,
+        info_sha256=info_sha256,
+        socket_identity_sha256=socket_identity_sha256,
+        runtime_binding=expected_runtime_binding,
+        socket_guard=socket_guard,
+        docker_root_guard=docker_root_guard,
+        mount_table=mount_table,
     )
 
 
@@ -1850,26 +2136,31 @@ def _runtime_command(
         )
     executable, env, endpoint = runtime._command_context()
     execution_path, inherited_fds, config_path = executable.execution_spec()
+    socket_guard, docker_root_guard, mount_table = runtime._linux_host_guards()
+    _assert_linux_host_guards_v1(socket_guard, docker_root_guard, mount_table)
     try:
-        return run_bounded_process_v1(
-            (
-                executable.path,
-                f"--host={endpoint}",
-                f"--config={config_path}",
-                *arguments,
-            ),
-            stdin,
-            stdout_max_bytes=stdout_max_bytes,
-            stderr_max_bytes=stderr_max_bytes,
-            timeout_seconds=timeout_seconds,
-            env=env,
-            executable=execution_path,
-            inherited_fds=inherited_fds,
-        )
-    except BoundedProcessError as error:
-        raise LinuxOciProviderError(
-            "runtime_command_failed", "OCI runtime command transport failed"
-        ) from error
+        try:
+            return run_bounded_process_v1(
+                (
+                    executable.path,
+                    f"--host={endpoint}",
+                    f"--config={config_path}",
+                    *arguments,
+                ),
+                stdin,
+                stdout_max_bytes=stdout_max_bytes,
+                stderr_max_bytes=stderr_max_bytes,
+                timeout_seconds=timeout_seconds,
+                env=env,
+                executable=execution_path,
+                inherited_fds=inherited_fds,
+            )
+        except BoundedProcessError as error:
+            raise LinuxOciProviderError(
+                "runtime_command_failed", "OCI runtime command transport failed"
+            ) from error
+    finally:
+        _assert_linux_host_guards_v1(socket_guard, docker_root_guard, mount_table)
 
 
 def _clean_command_output(result: object, *, code: str, message: str) -> bytes:
@@ -3938,15 +4229,56 @@ def _reverify_linux_oci_runtime_v1(
     execution_image: _DerivedExecutionImageV1 | None = None,
 ) -> None:
     executable, env, endpoint = runtime._command_context()
+    socket_guard, docker_root_guard, mount_table = runtime._linux_host_guards()
+    _assert_linux_host_guards_v1(socket_guard, docker_root_guard, mount_table)
     server = _strict_json_document(
         _run_probe(
             executable,
             env,
             ("version", "--format", "{{json .Server}}"),
             endpoint=endpoint,
+            socket_guard=socket_guard,
+            docker_root_guard=docker_root_guard,
+            mount_table=mount_table,
         ),
         name="OCI server",
     )
+    binding = runtime.runtime_binding
+    info_sha256: str | None = None
+    socket_identity_sha256: str | None = None
+    endpoint_sha256: str | None = None
+    if binding is not None:
+        socket_identity_sha256, current_socket_guard = _bind_docker_socket_v1(
+            endpoint
+        )
+        if current_socket_guard != socket_guard:
+            raise LinuxOciProviderError(
+                "runtime_changed", "Docker socket binding changed"
+            )
+        try:
+            endpoint_sha256 = docker_endpoint_sha256_v1(endpoint)
+            info = _strict_json_document(
+                _run_probe(
+                    executable,
+                    env,
+                    ("info", "--format", "{{json .}}"),
+                    endpoint=endpoint,
+                    socket_guard=socket_guard,
+                    docker_root_guard=docker_root_guard,
+                    mount_table=mount_table,
+                ),
+                name="OCI daemon info",
+            )
+            info_sha256 = docker_info_identity_sha256_v1(info)
+        except RuntimeEvidenceError:
+            raise LinuxOciProviderError(
+                "runtime_changed", "runtime readiness binding no longer closes"
+            ) from None
+        current_root_guard = _bind_docker_root_v1(info)
+        if current_root_guard != docker_root_guard:
+            raise LinuxOciProviderError(
+                "runtime_changed", "Docker data root binding changed"
+            )
     image = _strict_json_document(
         _run_probe(
             executable,
@@ -3959,6 +4291,9 @@ def _reverify_linux_oci_runtime_v1(
                 "{{json .}}",
             ),
             endpoint=endpoint,
+            socket_guard=socket_guard,
+            docker_root_guard=docker_root_guard,
+            mount_table=mount_table,
         ),
         name="OCI image",
     )
@@ -3969,10 +4304,28 @@ def _reverify_linux_oci_runtime_v1(
         != runtime.server_sha256
         or hashlib.sha256(_canonical_json(image)).hexdigest()
         != runtime.image_inspect_sha256
+        or (
+            binding is not None
+            and (
+                runtime.docker_executable_sha256
+                != binding.docker_executable_sha256
+                or endpoint_sha256 != binding.daemon_endpoint_sha256
+                or socket_identity_sha256
+                != binding.docker_socket_identity_sha256
+                or hashlib.sha256(_canonical_json(server)).hexdigest()
+                != binding.server_observation_sha256
+                or info_sha256 != binding.daemon_info_sha256
+                or hashlib.sha256(_canonical_json(image)).hexdigest()
+                != binding.runtime_image_inspect_sha256
+                or runtime.execution_policy.runtime_image_id
+                != binding.runtime_image_id
+            )
+        )
     ):
         raise LinuxOciProviderError(
             "runtime_changed", "OCI runtime changed during worker execution"
         )
+    _assert_linux_host_guards_v1(socket_guard, docker_root_guard, mount_table)
     if execution_image is not None:
         if (
             type(execution_image) is not _DerivedExecutionImageV1

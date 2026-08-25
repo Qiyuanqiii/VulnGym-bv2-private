@@ -39,6 +39,10 @@ from vulngym_agent.evaluator.final_gate_runner import (
     FinalGateRunnerError,
     run_e4_final_gate_v1,
 )
+from vulngym_agent.evaluator.runtime_evidence import (
+    RuntimeBindingPinsV1,
+    docker_endpoint_sha256_v1,
+)
 
 
 def _sha(label: str) -> str:
@@ -182,6 +186,17 @@ class FinalGateRunnerTests(unittest.TestCase):
             self.paths[name] = path
         policy = fixed_e4_execution_policy_v1(self.IMAGE)
         self.policy = policy
+        self.runtime_binding = RuntimeBindingPinsV1(
+            daemon_endpoint_sha256=docker_endpoint_sha256_v1(
+                "unix:///run/vulngym/docker.sock"
+            ),
+            docker_executable_sha256=_sha("docker-cli"),
+            docker_socket_identity_sha256=_sha("docker-socket"),
+            server_observation_sha256=_sha("docker-server"),
+            daemon_info_sha256=_sha("docker-info"),
+            runtime_image_id=self.IMAGE,
+            runtime_image_inspect_sha256=_sha("runtime-image"),
+        )
         replay_manifests = {
             split: BatchReplayConfigManifestV1(
                 split=split,
@@ -264,6 +279,8 @@ class FinalGateRunnerTests(unittest.TestCase):
             "output_root": output or (self.base / "final-output"),
             "docker_executable": "docker",
             "runtime_image_id": self.IMAGE,
+            "docker_endpoint": "unix:///run/vulngym/docker.sock",
+            "expected_runtime_binding": self.runtime_binding,
             "plan": plan or self.plan,
             "test_sealed_batch_root": self.paths["test-sealed"],
             "test_replay_config_root": self.paths["test-replay"],
@@ -309,6 +326,7 @@ class FinalGateRunnerTests(unittest.TestCase):
         driver_override=None,
         projection_reader_override=None,
         final_reader_override=None,
+        expected_mount_table=None,
     ) -> ExitStack:
         successes = self._successes()
         summaries = {
@@ -319,6 +337,10 @@ class FinalGateRunnerTests(unittest.TestCase):
         def drive(_benchmark, _sealed, _replay, output, **kwargs):
             split = kwargs["split"]
             events.append(f"execute:{split}")
+            if expected_mount_table is not None:
+                self.assertIs(
+                    kwargs["expected_mount_table"], expected_mount_table
+                )
             self.assertNotEqual(bytes(kwargs["snapshot_attestation_key"]), bytes(40))
             Path(output).mkdir(mode=0o700)
             if driver_override is not None:
@@ -606,26 +628,125 @@ class FinalGateRunnerTests(unittest.TestCase):
         self.assertNotIn(str(output), str(captured.exception))
 
     def test_interrupted_rename_that_committed_is_reported_committed(self) -> None:
-        events: list[str] = []
+        for failure in (KeyboardInterrupt(), SystemExit(9)):
+            with self.subTest(failure=type(failure).__name__):
+                events: list[str] = []
 
-        def rename_then_interrupt(source, destination):
+                def rename_then_interrupt(source, destination):
+                    os.rename(source, destination)
+                    raise failure
+
+                output = self.base / f"rename-{type(failure).__name__}"
+                with (
+                    self._patch_success_pipeline(events),
+                    mock.patch.object(
+                        runner,
+                        "_rename_directory_noreplace",
+                        side_effect=rename_then_interrupt,
+                    ),
+                    self.assertRaises(type(failure)) as captured,
+                ):
+                    run_e4_final_gate_v1(**self._arguments(output=output))
+
+                self.assertTrue(
+                    getattr(captured.exception, "committed", False)
+                )
+                self.assertTrue(output.is_dir())
+
+    def test_rigid_baseexception_after_rename_uses_shared_commit_state(self) -> None:
+        class RigidFatal(BaseException):
+            def __setattr__(self, _name, _value):
+                raise TypeError("rigid exception")
+
+        failure = RigidFatal("rename returned by side effect only")
+        observations: list[str] = []
+
+        def rename_then_fail(source, destination):
             os.rename(source, destination)
-            raise KeyboardInterrupt()
+            raise failure
 
-        output = self.base / "rename-interrupted"
+        output = self.base / "rename-rigid-baseexception"
         with (
-            self._patch_success_pipeline(events),
+            self._patch_success_pipeline([]),
             mock.patch.object(
                 runner,
                 "_rename_directory_noreplace",
-                side_effect=rename_then_interrupt,
+                side_effect=rename_then_fail,
             ),
+            self.assertRaises(RigidFatal) as captured,
         ):
-            with self.assertRaises(KeyboardInterrupt) as captured:
-                run_e4_final_gate_v1(**self._arguments(output=output))
+            run_e4_final_gate_v1(
+                **self._arguments(output=output),
+                commit_callback=observations.append,
+            )
 
-        self.assertTrue(getattr(captured.exception, "committed", False))
+        self.assertIs(captured.exception, failure)
+        self.assertEqual(observations, ["possible", "committed"])
         self.assertTrue(output.is_dir())
+
+    def test_rename_failure_uses_strict_three_state_classification(self) -> None:
+        def fail_rename(_source, _destination):
+            raise OSError("rename failed")
+
+        output = self.base / "rename-confirmed-absent"
+        with (
+            self._patch_success_pipeline([]),
+            mock.patch.object(
+                runner, "_rename_directory_noreplace", side_effect=fail_rename
+            ),
+            self.assertRaises(FinalGateRunnerError) as captured,
+        ):
+            run_e4_final_gate_v1(**self._arguments(output=output))
+        self.assertFalse(captured.exception.committed)
+        self.assertEqual(captured.exception.code, "publication_failed")
+        self.assertFalse(output.exists())
+
+        for classifier in (
+            mock.Mock(return_value="unknown"),
+            mock.Mock(side_effect=KeyboardInterrupt()),
+        ):
+            with self.subTest(classifier=repr(classifier.side_effect)):
+                output = self.base / f"rename-unknown-{id(classifier)}"
+                with (
+                    self._patch_success_pipeline([]),
+                    mock.patch.object(
+                        runner,
+                        "_rename_directory_noreplace",
+                        side_effect=fail_rename,
+                    ),
+                    mock.patch.object(
+                        runner,
+                        "_classify_publication_state",
+                        side_effect=classifier,
+                    ),
+                    self.assertRaises(FinalGateRunnerError) as captured,
+                ):
+                    run_e4_final_gate_v1(**self._arguments(output=output))
+                self.assertTrue(captured.exception.committed)
+                self.assertEqual(
+                    captured.exception.code, "publication_uncertain"
+                )
+
+    def test_classifier_baseexception_preserves_original_interrupt(self) -> None:
+        original = KeyboardInterrupt()
+        output = self.base / "rename-classifier-interrupted"
+        with (
+            self._patch_success_pipeline([]),
+            mock.patch.object(
+                runner,
+                "_rename_directory_noreplace",
+                side_effect=original,
+            ),
+            mock.patch.object(
+                runner,
+                "_classify_publication_state",
+                side_effect=SystemExit(7),
+            ),
+            self.assertRaises(KeyboardInterrupt) as captured,
+        ):
+            run_e4_final_gate_v1(**self._arguments(output=output))
+        self.assertIs(captured.exception, original)
+        self.assertTrue(getattr(captured.exception, "committed", False))
 
     def test_baseexception_before_commit_zeros_both_keys_and_preserves_signal(self) -> None:
         events: list[str] = []
@@ -882,6 +1003,69 @@ class FinalGateRunnerTests(unittest.TestCase):
             run_e4_final_gate_v1(**arguments)
         self.assertEqual(captured.exception.code, "policy_mismatch")
         self.assertFalse((self.base / "wrong-policy").exists())
+
+    def test_bind_mount_alias_overlap_is_fail_closed(self) -> None:
+        with (
+            mock.patch.object(
+                runner, "_linux_mount_table", return_value=mock.sentinel.mounts
+            ),
+            mock.patch.object(runner, "_physical_overlap", return_value=True),
+            self.assertRaises(FinalGateRunnerError) as captured,
+        ):
+            runner._assert_output_disjoint(
+                self.base / "physical-alias-output",
+                (self.paths["benchmark"], self.paths["test-sealed"]),
+            )
+        self.assertEqual(captured.exception.code, "path_overlap")
+
+    def test_one_mount_binding_spans_execution_and_publication(self) -> None:
+        events: list[str] = []
+        mount_table = runner.LinuxMountTableV1(payload=b"bound\n", entries=())
+        arguments = self._arguments(output=self.base / "mount-bound")
+        arguments["expected_mount_table"] = mount_table
+        with (
+            self._patch_success_pipeline(
+                events, expected_mount_table=mount_table
+            ),
+            mock.patch.object(runner, "_physical_overlap", return_value=False),
+            mock.patch.object(
+                runner, "assert_linux_mount_table_stable_v1"
+            ) as stable,
+        ):
+            result = run_e4_final_gate_v1(**arguments)
+        self.assertIs(type(result), FinalGateReceiptV1)
+        self.assertGreaterEqual(stable.call_count, 10)
+        self.assertTrue(
+            all(call.args == (mount_table,) for call in stable.call_args_list)
+        )
+
+    def test_postrename_mount_change_is_committed_uncertainty(self) -> None:
+        events: list[str] = []
+        output = self.base / "postrename-mount-change"
+        mount_table = runner.LinuxMountTableV1(payload=b"bound\n", entries=())
+        arguments = self._arguments(output=output)
+        arguments["expected_mount_table"] = mount_table
+
+        def stable(_table, *, committed=False):
+            if committed:
+                raise FinalGateRunnerError(
+                    "publication_uncertain",
+                    "mount namespace changed",
+                    committed=True,
+                )
+
+        with (
+            self._patch_success_pipeline(events),
+            mock.patch.object(runner, "_physical_overlap", return_value=False),
+            mock.patch.object(
+                runner, "_assert_bound_mount_table_stable", side_effect=stable
+            ),
+            self.assertRaises(FinalGateRunnerError) as captured,
+        ):
+            run_e4_final_gate_v1(**arguments)
+        self.assertTrue(captured.exception.committed)
+        self.assertEqual(captured.exception.code, "publication_uncertain")
+        self.assertTrue(output.exists())
 
     def test_public_path_preflight_finishes_before_key_validation(self) -> None:
         test_key = bytearray(b"T" * 8)

@@ -57,6 +57,7 @@ from vulngym_agent.evaluator.publication_reader import (
     E4PublicationReaderError,
     read_committed_e4_discovery_execution_v1,
 )
+from vulngym_agent.evaluator.runtime_evidence import RuntimeBindingPinsV1
 from vulngym_agent.evaluator.supervisor import (
     DiscoveryExecutionSession,
     EvaluatorSupervisorError,
@@ -68,6 +69,7 @@ from vulngym_agent.evaluator.worker import (
     DEFAULT_D2_WORKER_BUDGET_LIMITS,
     DEFAULT_D3_WORKER_BUDGET_LIMITS,
 )
+from vulngym_agent.linux_host_security import LinuxMountTableV1
 
 
 E4_DRIVER_VERSION: Final[str] = "discovery-e4-single-split-driver-v1"
@@ -497,6 +499,10 @@ def run_e4_discovery_split_v1(
     snapshot_key_id: str,
     runtime_image_id: str,
     docker_executable: str | Path,
+    docker_endpoint: str | None = None,
+    expected_runtime_binding: RuntimeBindingPinsV1 | None = None,
+    protected_host_paths: tuple[str | Path, ...] = (),
+    expected_mount_table: LinuxMountTableV1 | None = None,
 ) -> E4BatchSuccessReceiptV2 | DiscoveryBatchAttemptReportV2:
     """Run and close one exact public test or train E4 batch."""
 
@@ -563,7 +569,12 @@ def run_e4_discovery_split_v1(
         # No Docker CLI/daemon probe is reachable before every trusted input
         # and the complete prepared plan have passed the checks above.
         runtime = verify_linux_oci_runtime_v1(
-            docker_executable, execution_policy=policy
+            docker_executable,
+            execution_policy=policy,
+            docker_endpoint=docker_endpoint,
+            expected_runtime_binding=expected_runtime_binding,
+            protected_host_paths=protected_host_paths,
+            expected_mount_table=expected_mount_table,
         )
         outcome = run_prepared_discovery_batch_v1(
             session, runtime, output_root

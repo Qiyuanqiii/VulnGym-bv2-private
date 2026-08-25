@@ -590,14 +590,14 @@ python -m vulngym_agent.snapshot_cli prepare \
   --source-map /srv/vulngym/source-controls/test-source-map.json \
   --expected-source-map-sha256 <source-map-file-sha256> \
   --output-dir /srv/vulngym/sealed/test \
-  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --key-file /srv/vulngym/control/secrets/snapshot-hmac.key \
   --key-id evaluator-snapshot-v1
 
 # Authenticate the outer manifest and deeply re-verify every task bundle.
 python -m vulngym_agent.snapshot_cli verify-batch \
   --sealed-root /srv/vulngym/sealed/test \
   --expected-manifest-sha256 <sealed-batch-manifest-sha256> \
-  --key-file /srv/vulngym/secrets/snapshot-hmac.key \
+  --key-file /srv/vulngym/control/secrets/snapshot-hmac.key \
   --expected-key-id evaluator-snapshot-v1
 ```
 
@@ -702,7 +702,7 @@ python -m vulngym_agent.replay_authoring_cli next-request \
   --expected-task-wire-sha256 <task-file-sha256> \
   --sealed-bundle-root /srv/vulngym/sealed/VG-TRAIN-00000000000000000000 \
   --draft-root /srv/vulngym/replay-drafts/VG-TRAIN-00000000000000000000 \
-  --key-file /srv/vulngym/secrets/snapshot.key \
+  --key-file /srv/vulngym/control/secrets/snapshot.key \
   --key-id evaluator-snapshot-v1 > pending-request.json
 ```
 
@@ -795,7 +795,11 @@ python -m vulngym_agent.final_gate_cli run \
   --benchmark-root /srv/vulngym/benchmark \
   --output-root /srv/vulngym/final-gates/gate-001 \
   --docker-executable /usr/bin/docker \
+  --docker-host unix:///run/vulngym/docker.sock \
   --runtime-image-id sha256:<64-lowercase-hex> \
+  --readiness-file /srv/vulngym/control/readiness-report.json \
+  --expected-readiness-sha256 <64-lowercase-hex> \
+  --expected-readiness-wire-sha256 <64-lowercase-hex> \
   --plan-file /srv/vulngym/control/final-gate-plan.json \
   --expected-plan-sha256 <64-lowercase-hex> \
   --expected-plan-wire-sha256 <64-lowercase-hex> \
@@ -803,8 +807,8 @@ python -m vulngym_agent.final_gate_cli run \
   --test-replay-config-root /srv/vulngym/inputs/test-replay \
   --train-sealed-batch-root /srv/vulngym/inputs/train-sealed \
   --train-replay-config-root /srv/vulngym/inputs/train-replay \
-  --test-key-file /srv/vulngym/secrets/test.key \
-  --train-key-file /srv/vulngym/secrets/train.key
+  --test-key-file /srv/vulngym/control/secrets/test.key \
+  --train-key-file /srv/vulngym/control/secrets/train.key
 
 python -m vulngym_agent.final_gate_cli verify-output \
   --output-root /srv/vulngym/final-gates/gate-001 \
@@ -817,6 +821,8 @@ The run command writes a path-free canonical summary on success. A clean but
 non-publishable batch attempt is emitted verbatim with exit code 10; a state
 that may already have crossed a publication point uses exit code 11. Keep the
 test/training key files owner-only and outside every input/output tree.
+See the [native-Linux final-gate runbook](docs/native_linux_final_gate_runbook.md)
+for the complete host, socket, storage, and secret-layout contract.
 
 The deterministic T1 CLI writes separate validation, evidence, and
 run-manifest files:

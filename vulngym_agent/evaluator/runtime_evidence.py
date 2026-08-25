@@ -32,6 +32,12 @@ RUNTIME_EVIDENCE_DIGEST_DOMAIN: Final[bytes] = (
 DOCKER_ENDPOINT_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym evaluator Docker endpoint v1\0"
 )
+DOCKER_SOCKET_IDENTITY_DIGEST_DOMAIN: Final[bytes] = (
+    b"VulnGym evaluator Docker socket identity v1\0"
+)
+DOCKER_INFO_IDENTITY_DIGEST_DOMAIN: Final[bytes] = (
+    b"VulnGym evaluator Docker info identity v1\0"
+)
 RUNTIME_EVIDENCE_MAX_WIRE_BYTES: Final[int] = 4 * 1024 * 1024
 RUNTIME_EVIDENCE_MAX_JSON_NODES: Final[int] = 200_000
 RUNTIME_EVIDENCE_MAX_JSON_DEPTH: Final[int] = 16
@@ -48,6 +54,30 @@ _RUNTIME_COMPONENT_RE: Final[re.Pattern[str]] = re.compile(
 )
 _ARCHITECTURE_RE: Final[re.Pattern[str]] = re.compile(
     r"[a-z0-9][a-z0-9._-]{0,31}\Z"
+)
+_DOCKER_INFO_IDENTITY_FIELDS: Final[tuple[str, ...]] = (
+    "Architecture",
+    "CgroupDriver",
+    "CgroupVersion",
+    "ContainerdCommit",
+    "DefaultRuntime",
+    "DockerRootDir",
+    "Driver",
+    "ID",
+    "InitBinary",
+    "InitCommit",
+    "KernelVersion",
+    "LiveRestoreEnabled",
+    "MemTotal",
+    "NCPU",
+    "Name",
+    "OSType",
+    "OSVersion",
+    "OperatingSystem",
+    "RuncCommit",
+    "Runtimes",
+    "SecurityOptions",
+    "ServerVersion",
 )
 
 _DOCKER_SERVER_KEYS: Final[frozenset[str]] = frozenset(
@@ -207,6 +237,46 @@ def docker_endpoint_sha256_v1(endpoint: str) -> str:
     return hashlib.sha256(DOCKER_ENDPOINT_DIGEST_DOMAIN + payload).hexdigest()
 
 
+def docker_info_identity_sha256_v1(value: object) -> str:
+    """Digest the stable daemon/cgroup/runtime subset of ``docker info``."""
+
+    if type(value) is not dict or any(
+        name not in value for name in _DOCKER_INFO_IDENTITY_FIELDS
+    ):
+        raise RuntimeEvidenceError(
+            "invalid_contract", "Docker info identity is incomplete"
+        )
+    identity = {name: value[name] for name in _DOCKER_INFO_IDENTITY_FIELDS}
+    _validate_json_shape(identity, count=[0])
+    return hashlib.sha256(
+        DOCKER_INFO_IDENTITY_DIGEST_DOMAIN + _canonical_json(identity)
+    ).hexdigest()
+
+
+def docker_socket_identity_sha256_v1(
+    *, device: int, inode: int, uid: int, gid: int, mode: int
+) -> str:
+    """Return a path-free binding for one exact local Unix socket inode."""
+
+    values = (device, inode, uid, gid, mode)
+    if any(type(item) is not int or item < 0 for item in values):
+        raise RuntimeEvidenceError(
+            "invalid_argument", "Docker socket identity is invalid"
+        )
+    return hashlib.sha256(
+        DOCKER_SOCKET_IDENTITY_DIGEST_DOMAIN
+        + _canonical_json(
+            {
+                "device": device,
+                "gid": gid,
+                "inode": inode,
+                "mode": mode,
+                "uid": uid,
+            }
+        )
+    ).hexdigest()
+
+
 def _reject_constant(value: str) -> None:
     _ = value
     raise RuntimeEvidenceError(
@@ -314,6 +384,63 @@ def _parse_pinned_line(payload: bytes, *, expected_wire_sha256: str) -> dict[str
             "invalid_contract", "runtime evidence root must be an object"
         )
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeBindingPinsV1:
+    """Unsigned expected runtime observations carried from readiness to OCI.
+
+    This value is deliberately not a self-authenticating wire contract. The
+    caller obtains it only by double-pin parsing the canonical readiness
+    artifact, then the provider compares every field against fresh local
+    observations at initial binding and each existing runtime reverify point.
+    """
+
+    daemon_endpoint_sha256: str
+    docker_executable_sha256: str
+    docker_socket_identity_sha256: str
+    server_observation_sha256: str
+    daemon_info_sha256: str
+    runtime_image_id: str
+    runtime_image_inspect_sha256: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.daemon_endpoint_sha256, "daemon_endpoint_sha256"),
+            (self.docker_executable_sha256, "docker_executable_sha256"),
+            (
+                self.docker_socket_identity_sha256,
+                "docker_socket_identity_sha256",
+            ),
+            (self.server_observation_sha256, "server_observation_sha256"),
+            (self.daemon_info_sha256, "daemon_info_sha256"),
+            (
+                self.runtime_image_inspect_sha256,
+                "runtime_image_inspect_sha256",
+            ),
+        ):
+            _require_sha256(value, name=name)
+        if (
+            type(self.runtime_image_id) is not str
+            or _IMAGE_ID_RE.fullmatch(self.runtime_image_id) is None
+        ):
+            raise RuntimeEvidenceError(
+                "invalid_contract", "runtime binding image ID is invalid"
+            )
+
+    def to_dict(self) -> dict[str, str]:
+        self.__post_init__()
+        return {
+            "daemon_endpoint_sha256": self.daemon_endpoint_sha256,
+            "daemon_info_sha256": self.daemon_info_sha256,
+            "docker_executable_sha256": self.docker_executable_sha256,
+            "docker_socket_identity_sha256": (
+                self.docker_socket_identity_sha256
+            ),
+            "runtime_image_id": self.runtime_image_id,
+            "runtime_image_inspect_sha256": self.runtime_image_inspect_sha256,
+            "server_observation_sha256": self.server_observation_sha256,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -838,6 +965,8 @@ class RuntimeEvidenceV1:
 
 __all__ = [
     "DOCKER_ENDPOINT_DIGEST_DOMAIN",
+    "DOCKER_INFO_IDENTITY_DIGEST_DOMAIN",
+    "DOCKER_SOCKET_IDENTITY_DIGEST_DOMAIN",
     "DockerServerIdentityV1",
     "RUNTIME_EVIDENCE_CONTRACT_VERSION",
     "RUNTIME_EVIDENCE_DIGEST_DOMAIN",
@@ -847,8 +976,11 @@ __all__ = [
     "RUNTIME_EVIDENCE_MAX_WIRE_BYTES",
     "RuntimeEvidenceError",
     "RuntimeEvidenceV1",
+    "RuntimeBindingPinsV1",
     "RuntimeIsolationV1",
     "RuntimeResourceLimitsV1",
     "docker_endpoint_sha256_v1",
+    "docker_info_identity_sha256_v1",
+    "docker_socket_identity_sha256_v1",
     "runtime_evidence_wire_sha256_v1",
 ]

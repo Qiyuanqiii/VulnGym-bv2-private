@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import dis
 import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 from unittest import mock
 
@@ -19,6 +21,13 @@ from vulngym_agent.evaluator.final_gate import (
 )
 from vulngym_agent.evaluator.final_gate_runner import FinalGateRunnerError
 from vulngym_agent.evaluator.e4_driver import fixed_e4_execution_policy_v1
+from vulngym_agent.evaluator.runtime_evidence import (
+    RuntimeBindingPinsV1,
+    docker_endpoint_sha256_v1,
+)
+from vulngym_agent.native_linux_final_gate_preflight import (
+    NativeLinuxFinalGateReadinessV2,
+)
 
 
 def _sha(label: str) -> str:
@@ -40,9 +49,49 @@ class _FatalSignal(BaseException):
 
 
 class FinalGateCliTests(unittest.TestCase):
+    def test_readme_formal_run_command_includes_runtime_readiness_pins(self) -> None:
+        readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(
+            encoding="utf-8"
+        )
+        marker = "python -m vulngym_agent.final_gate_cli run"
+        command = readme.split(marker, 1)[1].split("```", 1)[0]
+        for required in (
+            "--docker-host unix:///run/vulngym/docker.sock",
+            "--readiness-file /srv/vulngym/control/readiness-report.json",
+            "--expected-readiness-sha256 <64-lowercase-hex>",
+            "--expected-readiness-wire-sha256 <64-lowercase-hex>",
+            "--test-key-file /srv/vulngym/control/secrets/test.key",
+            "--train-key-file /srv/vulngym/control/secrets/train.key",
+        ):
+            with self.subTest(required=required):
+                self.assertIn(required, command)
+        self.assertIn(
+            "[native-Linux final-gate runbook](docs/native_linux_final_gate_runbook.md)",
+            readme,
+        )
+
     def setUp(self) -> None:
         self.plan = self._plan()
         self.receipt = self._receipt(self.plan)
+        self.readiness = NativeLinuxFinalGateReadinessV2(
+            runtime_binding=RuntimeBindingPinsV1(
+                daemon_endpoint_sha256=docker_endpoint_sha256_v1(
+                    "unix:///run/vulngym/docker.sock"
+                ),
+                docker_executable_sha256=_sha("docker-cli"),
+                docker_socket_identity_sha256=_sha("docker-socket"),
+                server_observation_sha256=_sha("docker-server"),
+                daemon_info_sha256=_sha("docker-info"),
+                runtime_image_id="sha256:" + "a" * 64,
+                runtime_image_inspect_sha256=_sha("runtime-image"),
+            ),
+            final_gate_plan_sha256=self.plan.plan_sha256,
+            final_gate_plan_wire_sha256=self.plan.wire_sha256,
+            execution_policy_sha256=self.plan.execution_policy_sha256,
+            execution_policy_wire_sha256=self.plan.execution_policy_wire_sha256,
+            report_sha256=_sha("readiness-report"),
+            wire_sha256=_sha("readiness-wire"),
+        )
 
     @staticmethod
     def _split_plan(split: str) -> FinalGateSplitPlanV1:
@@ -107,9 +156,17 @@ class FinalGateCliTests(unittest.TestCase):
             "--output-root",
             "final-output",
             "--docker-executable",
-            "docker",
+            "C:\\docker\\docker.exe",
+            "--docker-host",
+            "unix:///run/vulngym/docker.sock",
             "--runtime-image-id",
             "sha256:" + "a" * 64,
+            "--readiness-file",
+            "readiness.json",
+            "--expected-readiness-sha256",
+            _sha("readiness-report"),
+            "--expected-readiness-wire-sha256",
+            _sha("readiness-wire"),
             "--plan-file",
             "final-plan.json",
             "--expected-plan-sha256",
@@ -162,9 +219,12 @@ class FinalGateCliTests(unittest.TestCase):
         runner_side_effect: BaseException | None = None,
     ):
         return (
-            mock.patch.object(cli, "_preflight_run_paths"),
+            mock.patch.object(cli, "_preflight_run_paths", return_value=None),
             mock.patch.object(
                 cli, "_read_final_gate_plan_file_v1", return_value=self.plan
+            ),
+            mock.patch.object(
+                cli, "_read_readiness_file_v2", return_value=self.readiness
             ),
             mock.patch.object(
                 cli,
@@ -199,7 +259,11 @@ class FinalGateCliTests(unittest.TestCase):
                 "--benchmark-root",
                 "--output-root",
                 "--docker-executable",
+                "--docker-host",
                 "--runtime-image-id",
+                "--readiness-file",
+                "--expected-readiness-sha256",
+                "--expected-readiness-wire-sha256",
                 "--plan-file",
                 "--expected-plan-sha256",
                 "--expected-plan-wire-sha256",
@@ -290,7 +354,7 @@ class FinalGateCliTests(unittest.TestCase):
         key_reader = mock.Mock()
         runner = mock.Mock()
         with (
-            mock.patch.object(cli, "_preflight_run_paths"),
+            mock.patch.object(cli, "_preflight_run_paths", return_value=None),
             mock.patch.object(
                 cli, "_read_final_gate_plan_file_v1", return_value=self.plan
             ),
@@ -302,6 +366,53 @@ class FinalGateCliTests(unittest.TestCase):
         self.assertEqual("policy_mismatch", captured.exception.code)
         key_reader.assert_not_called()
         runner.assert_not_called()
+
+    def test_readiness_pin_or_binding_bypass_rejects_before_key_reads(self) -> None:
+        detached = NativeLinuxFinalGateReadinessV2(
+            runtime_binding=self.readiness.runtime_binding,
+            final_gate_plan_sha256=_sha("detached-plan"),
+            final_gate_plan_wire_sha256=self.readiness.final_gate_plan_wire_sha256,
+            execution_policy_sha256=self.readiness.execution_policy_sha256,
+            execution_policy_wire_sha256=self.readiness.execution_policy_wire_sha256,
+            report_sha256=self.readiness.report_sha256,
+            wire_sha256=self.readiness.wire_sha256,
+        )
+        cases = (
+            cli.FinalGateCliError(
+                "readiness_input_rejected", "readiness wire pin mismatch"
+            ),
+            detached,
+        )
+        for result in cases:
+            with self.subTest(result=type(result).__name__):
+                key_reader = mock.Mock()
+                runner = mock.Mock()
+                with (
+                    mock.patch.object(
+                        cli, "_preflight_run_paths", return_value=None
+                    ),
+                    mock.patch.object(
+                        cli, "_read_final_gate_plan_file_v1", return_value=self.plan
+                    ),
+                    mock.patch.object(
+                        cli,
+                        "_read_readiness_file_v2",
+                        return_value=(None if isinstance(result, BaseException) else result),
+                        side_effect=(result if isinstance(result, BaseException) else None),
+                    ),
+                    mock.patch.object(
+                        cli, "read_attestation_key_file_v1", key_reader
+                    ),
+                    mock.patch.object(cli, "run_e4_final_gate_v1", runner),
+                    self.assertRaises(cli.FinalGateCliError) as captured,
+                ):
+                    cli._run(self._run_args())
+                self.assertIn(
+                    captured.exception.code,
+                    {"readiness_input_rejected", "readiness_binding_mismatch"},
+                )
+                key_reader.assert_not_called()
+                runner.assert_not_called()
 
     def test_path_preflight_and_plan_read_finish_before_either_key_read(self) -> None:
         timeline: list[str] = []
@@ -315,6 +426,10 @@ class FinalGateCliTests(unittest.TestCase):
             timeline.append("plan")
             return self.plan
 
+        def readiness_reader(*_args: object, **_kwargs: object):
+            timeline.append("readiness")
+            return self.readiness
+
         def key_reader(_path: Path) -> bytearray:
             timeline.append("key")
             return test_key if timeline.count("key") == 1 else train_key
@@ -327,6 +442,11 @@ class FinalGateCliTests(unittest.TestCase):
                 side_effect=plan_reader,
             ),
             mock.patch.object(
+                cli,
+                "_read_readiness_file_v2",
+                side_effect=readiness_reader,
+            ),
+            mock.patch.object(
                 cli, "read_attestation_key_file_v1", side_effect=key_reader
             ),
             mock.patch.object(
@@ -335,9 +455,41 @@ class FinalGateCliTests(unittest.TestCase):
         ):
             result = cli._run(self._run_args())
         self.assertIs(result, self.receipt)
-        self.assertEqual(timeline, ["paths", "plan", "key", "key"])
+        self.assertEqual(
+            timeline, ["paths", "plan", "readiness", "key", "key"]
+        )
         self.assertEqual(test_key, bytearray(40))
         self.assertEqual(train_key, bytearray(40))
+
+    def test_mount_table_binding_is_forwarded_to_the_runner(self) -> None:
+        mount_table = cli.LinuxMountTableV1(payload=b"bound\n", entries=())
+        test_key = bytearray(b"T" * 40)
+        train_key = bytearray(b"R" * 40)
+        with (
+            mock.patch.object(
+                cli, "_preflight_run_paths", return_value=mount_table
+            ),
+            mock.patch.object(cli, "_assert_mount_table_stable") as stable,
+            mock.patch.object(
+                cli, "_read_final_gate_plan_file_v1", return_value=self.plan
+            ),
+            mock.patch.object(
+                cli, "_read_readiness_file_v2", return_value=self.readiness
+            ),
+            mock.patch.object(
+                cli,
+                "read_attestation_key_file_v1",
+                side_effect=(test_key, train_key),
+            ),
+            mock.patch.object(
+                cli, "run_e4_final_gate_v1", return_value=self.receipt
+            ) as runner,
+        ):
+            self.assertIs(cli._run(self._run_args()), self.receipt)
+        self.assertIs(
+            runner.call_args.kwargs["expected_mount_table"], mount_table
+        )
+        self.assertEqual(stable.call_args_list, [mock.call(mount_table)] * 4)
 
     def test_overlap_rejects_before_plan_or_key_reads(self) -> None:
         plan_reader = mock.Mock()
@@ -365,6 +517,24 @@ class FinalGateCliTests(unittest.TestCase):
         self.assertEqual("path_overlap", captured.exception.code)
         plan_reader.assert_not_called()
         key_reader.assert_not_called()
+
+    def test_bind_mount_alias_overlap_is_fail_closed(self) -> None:
+        args = self._run_args()
+        snapshot = tuple(
+            ((1, index), frozenset({(1, index)})) for index in range(1, 6)
+        )
+        with (
+            mock.patch.object(cli, "_linux_mount_table", return_value=mock.sentinel.mounts),
+            mock.patch.object(cli.os, "lstat", side_effect=FileNotFoundError),
+            mock.patch.object(
+                cli, "_directory_identity_snapshot", return_value=snapshot
+            ),
+            mock.patch.object(cli, "_checked_overlap", return_value=False),
+            mock.patch.object(cli, "_physical_overlap", return_value=True),
+            self.assertRaises(cli.FinalGateCliError) as captured,
+        ):
+            cli._preflight_run_paths(args)
+        self.assertEqual(captured.exception.code, "path_overlap")
 
     def test_existing_directory_identity_and_ancestry_aliases_are_rejected(
         self,
@@ -420,7 +590,7 @@ class FinalGateCliTests(unittest.TestCase):
                     runner_return=(None if side_effect is not None else outcome),
                     runner_side_effect=side_effect,
                 )
-                with patches[0], patches[1], patches[2], patches[3]:
+                with patches[0], patches[1], patches[2], patches[3], patches[4]:
                     if side_effect is None:
                         self.assertIs(outcome, cli._run(self._run_args()))
                     else:
@@ -432,9 +602,12 @@ class FinalGateCliTests(unittest.TestCase):
     def test_key_buffers_must_be_independent_and_partial_read_is_cleared(self) -> None:
         shared = bytearray(b"S" * 40)
         with (
-            mock.patch.object(cli, "_preflight_run_paths"),
+            mock.patch.object(cli, "_preflight_run_paths", return_value=None),
             mock.patch.object(
                 cli, "_read_final_gate_plan_file_v1", return_value=self.plan
+            ),
+            mock.patch.object(
+                cli, "_read_readiness_file_v2", return_value=self.readiness
             ),
             mock.patch.object(
                 cli,
@@ -451,9 +624,12 @@ class FinalGateCliTests(unittest.TestCase):
 
         first = bytearray(b"F" * 40)
         with (
-            mock.patch.object(cli, "_preflight_run_paths"),
+            mock.patch.object(cli, "_preflight_run_paths", return_value=None),
             mock.patch.object(
                 cli, "_read_final_gate_plan_file_v1", return_value=self.plan
+            ),
+            mock.patch.object(
+                cli, "_read_readiness_file_v2", return_value=self.readiness
             ),
             mock.patch.object(
                 cli,
@@ -566,6 +742,83 @@ class FinalGateCliTests(unittest.TestCase):
             + "\n",
         )
 
+    def test_postcommit_summary_exception_and_baseexception_exit_11(self) -> None:
+        for failure in (RuntimeError("summary"), KeyboardInterrupt()):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                mock.patch.object(cli, "_run", return_value=self.receipt),
+                mock.patch.object(
+                    cli, "_success_summary_v1", side_effect=failure
+                ),
+            ):
+                status, payload = self._capture_main(self._run_argv())
+            self.assertEqual(status, cli.EXIT_COMMITTED_UNCERTAIN)
+            self.assertEqual(json.loads(payload)["status"], "committed_uncertain")
+
+    def test_postcommit_persistent_broken_pipe_still_returns_exit_11(self) -> None:
+        with (
+            mock.patch.object(cli, "_run", return_value=self.receipt),
+            mock.patch.object(
+                cli, "_write_stdout_bytes", side_effect=BrokenPipeError
+            ) as writer,
+        ):
+            status = cli.main(self._run_argv())
+        self.assertEqual(status, cli.EXIT_COMMITTED_UNCERTAIN)
+        self.assertEqual(writer.call_count, 2)
+
+    def test_run_return_store_opcode_interrupt_keeps_committed_state(self) -> None:
+        target_offset = next(
+            instruction.offset
+            for instruction in dis.get_instructions(cli.main)
+            if instruction.opname == "STORE_FAST" and instruction.argval == "result"
+        )
+        triggered = False
+
+        def committed_run(_args, *, commit_callback):
+            commit_callback("committed")
+            return self.receipt
+
+        def interrupt(frame, event, argument):
+            del argument
+            nonlocal triggered
+            if frame.f_code is cli.main.__code__:
+                frame.f_trace_opcodes = True
+                if event == "opcode" and frame.f_lasti == target_offset:
+                    triggered = True
+                    sys.settrace(None)
+                    raise KeyboardInterrupt()
+            return interrupt
+
+        previous_trace = sys.gettrace()
+        with mock.patch.object(cli, "_run", side_effect=committed_run):
+            sys.settrace(interrupt)
+            try:
+                status, payload = self._capture_main(self._run_argv())
+            finally:
+                sys.settrace(previous_trace)
+        self.assertTrue(triggered)
+        self.assertEqual(status, cli.EXIT_COMMITTED_UNCERTAIN)
+        self.assertEqual(json.loads(payload)["status"], "committed_uncertain")
+
+    def test_rigid_postrename_baseexception_with_broken_pipe_exits_11(self) -> None:
+        class RigidFatal(BaseException):
+            def __setattr__(self, _name, _value):
+                raise TypeError("rigid exception")
+
+        def rename_may_have_committed(_args, *, commit_callback):
+            commit_callback("possible")
+            raise RigidFatal("post-rename failure")
+
+        with (
+            mock.patch.object(cli, "_run", side_effect=rename_may_have_committed),
+            mock.patch.object(
+                cli, "_write_stdout_bytes", side_effect=BrokenPipeError
+            ) as writer,
+        ):
+            status = cli.main(self._run_argv())
+        self.assertEqual(status, cli.EXIT_COMMITTED_UNCERTAIN)
+        self.assertEqual(writer.call_count, 1)
+
     def test_attempt_report_is_written_as_raw_canonical_bytes_with_exit_10(self) -> None:
         report = _FakeAttempt()
         with (
@@ -576,6 +829,19 @@ class FinalGateCliTests(unittest.TestCase):
         self.assertEqual(cli.EXIT_ATTEMPT_FAILED, status)
         self.assertEqual(report.to_bytes().decode("utf-8"), payload)
         self.assertNotIn("receipt_sha256", payload)
+
+    def test_attempt_report_failure_remains_uncommitted(self) -> None:
+        report = _FakeAttempt()
+        with (
+            mock.patch.object(cli, "DiscoveryBatchAttemptReportV2", _FakeAttempt),
+            mock.patch.object(cli, "_run", return_value=report),
+            mock.patch.object(
+                cli, "_attempt_report_bytes", side_effect=KeyboardInterrupt
+            ),
+        ):
+            status, payload = self._capture_main(self._run_argv())
+        self.assertEqual(status, cli.EXIT_INTERRUPTED)
+        self.assertEqual(json.loads(payload)["status"], "interrupted")
 
     def test_verify_output_passes_double_pins_and_emits_same_summary(self) -> None:
         with (
