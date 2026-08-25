@@ -31,7 +31,7 @@ may summarize progress, but they do not replace the native relationship graph.
 | Phase | [#13](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/13) | Run the fixed OCI and native Linux gates |
 | Phase | [#14](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/14) | External validation and final submission |
 
-The leaf ranges are intentionally stable:
+Historical number ranges remain stable for audit purposes:
 
 - historical completed capabilities: #15-#28;
 - current engineering stabilization: #29-#36;
@@ -41,6 +41,26 @@ The leaf ranges are intentionally stable:
 - native Linux runtime gates: #91-#96;
 - external validation and submission: #97-#102;
 - governance: #103-#106.
+
+The active tracker was consolidated after the initial exhaustive breakdown.
+There are now 21 open Issues; the repository- and batch-level records remain
+closed, archived sub-issues under their aggregate owner:
+
+| Active layer | Issues |
+| --- | --- |
+| Epic | #7 |
+| Open phases | #9, #11, #12, #13, #14 |
+| Engineering | #29, #30, #31, #33, #34, #36 |
+| Source aggregate | #60 |
+| Replay aggregate | #90 |
+| Native runtime and gates | #91, #92, #94, #95 |
+| Evaluation and release | #97, #99, #102 |
+
+Governance phase #8 and benchmark/T2 phase #10 are complete. Source details
+#38-#59 are archived under #60, replay details #61-#89 under #90, and the other
+superseded leaf Issues are archived under their active aggregate. This keeps
+the main view human-readable while retaining the fixed task IDs and earlier
+acceptance criteria for audit.
 
 ## Dependency direction
 
