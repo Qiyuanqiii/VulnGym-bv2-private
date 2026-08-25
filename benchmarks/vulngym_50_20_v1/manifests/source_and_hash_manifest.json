@@ -1,0 +1,121 @@
+{
+  "artifacts": [
+    {
+      "bytes": 1305,
+      "path": ".gitignore",
+      "sha256": "98f62287d3ad7e7a92e38c2ff255884d46d17307637c3c868b1a6f3f1a941d07"
+    },
+    {
+      "bytes": 811,
+      "path": "benchmarks/vulngym_50_20_v1/NOTICE.md",
+      "sha256": "1e4e0ce656ff429da90a5a3198686e4111bfe00f0dbbd470fbfe850da358037e"
+    },
+    {
+      "bytes": 4603,
+      "path": "benchmarks/vulngym_50_20_v1/README.md",
+      "sha256": "42260dc3532302a6e929f3c4994a4e5110eef90afa0677705f50aadc00d95e21"
+    },
+    {
+      "bytes": 1080,
+      "path": "benchmarks/vulngym_50_20_v1/config/language_extensions.json",
+      "sha256": "a254bb34fe577ab598fe215658c4677d262a9ef57d72c1ec6d4e5e39072eea93"
+    },
+    {
+      "bytes": 383,
+      "path": "benchmarks/vulngym_50_20_v1/config/sampling.json",
+      "sha256": "056b9ed05fe02d0186ceedec5a87ff8be3f97fa12ee447c3029beb12ebf720ff"
+    },
+    {
+      "bytes": 5162,
+      "path": "benchmarks/vulngym_50_20_v1/public/test.jsonl",
+      "rows": 20,
+      "sha256": "56439ac24552de9d83fe980f99306326603c99309e077b3e1fe966f3aa891011"
+    },
+    {
+      "bytes": 556892,
+      "path": "benchmarks/vulngym_50_20_v1/public/train.jsonl",
+      "rows": 50,
+      "sha256": "8c48e5c5fba671b54f35c87214da1935a756fb7c2612c6981eef4daa033936fd"
+    },
+    {
+      "bytes": 19,
+      "path": "benchmarks/vulngym_50_20_v1/requirements.txt",
+      "sha256": "44ff0dc2f1e40311b8239e83146749ab9d9cee2a650e699f5464755d552ee20d"
+    },
+    {
+      "bytes": 7663,
+      "path": "benchmarks/vulngym_50_20_v1/schemas/benchmark-record.schema.json",
+      "sha256": "ace5816e32de7c4d065e8dd887f010384a9187d55c92a5b570bf7b9e68d1c9df"
+    },
+    {
+      "bytes": 4537,
+      "path": "benchmarks/vulngym_50_20_v1/schemas/public-manifest.schema.json",
+      "sha256": "b444d47e27280fb404a462292f584481c00fba40ac32350ec0bb35e29a8eda37"
+    },
+    {
+      "bytes": 72493,
+      "path": "scripts/build_vulngym_50_20.py",
+      "sha256": "079e44b4727058332f4aa4017aec8e3f7f42d42e9b3b4bf7ebe31b723113941e"
+    }
+  ],
+  "build": {
+    "algorithm": "deterministic-marginal-local-search-v1",
+    "dataset_id": "vulngym-50-20-v1",
+    "eligibility_policy": "advisory-complete verify=1 and snapshot-complete; task unit is repo_url+commit",
+    "sampling_seed": "VulnGym/v0.1.4/50-train/20-test/2026-08-20/audit-23",
+    "task_unit": "repo_url+commit snapshot",
+    "test_tasks": 20,
+    "train_tasks": 50
+  },
+  "license": {
+    "name": "CC-BY-4.0",
+    "notice": "See benchmarks/vulngym_50_20_v1/NOTICE.md; upstream source snippets may carry separate project licenses.",
+    "path": "LICENSE"
+  },
+  "schema_version": "1.0.0",
+  "source": {
+    "files": [
+      {
+        "bytes": 34805,
+        "git_blob_sha1": "32707e2bd4fe5229fc3960c27b8a8500c5d5d596",
+        "path": "LICENSE",
+        "sha256": "8c566172d3cd40ac7dbc8c1dc4d5babe4b485e1947252ccff26b59f5a2d27679",
+        "url": "https://github.com/Tencent/VulnGym/blob/cd69f7e163e08485ab5496115ae03439cda6e27e/LICENSE"
+      },
+      {
+        "bytes": 9461,
+        "git_blob_sha1": "f6066edae1130ef8f2453459b1ae135a63e5c925",
+        "path": "SCHEMA.md",
+        "sha256": "ad3a35029bebbc9be197b0ff325d4b49d9ed5c64d9c755a6b652cbf4b619624a",
+        "url": "https://github.com/Tencent/VulnGym/blob/cd69f7e163e08485ab5496115ae03439cda6e27e/SCHEMA.md"
+      },
+      {
+        "bytes": 1831985,
+        "git_blob_sha1": "43f86b3155635053253acfea0e1bdb87b1a8b773",
+        "path": "data/entries.jsonl",
+        "rows": 408,
+        "sha256": "2158b6bfef0be1812e7a6a77b32ad32b65964c2546c83018ff20a9a6f706c7b1",
+        "url": "https://github.com/Tencent/VulnGym/blob/cd69f7e163e08485ab5496115ae03439cda6e27e/data/entries.jsonl"
+      },
+      {
+        "bytes": 91961,
+        "git_blob_sha1": "6c6d23449e702b3fc4920817ea512c5243ac3997",
+        "path": "data/reports.jsonl",
+        "rows": 184,
+        "sha256": "5d29ce523441eb1739bddca3e4550514171b1b2b1f9d38bd922933408d25fbb9",
+        "url": "https://github.com/Tencent/VulnGym/blob/cd69f7e163e08485ab5496115ae03439cda6e27e/data/reports.jsonl"
+      }
+    ],
+    "repository": "https://github.com/Tencent/VulnGym",
+    "revision": "cd69f7e163e08485ab5496115ae03439cda6e27e",
+    "tag": "v0.1.4",
+    "visibility": "public"
+  },
+  "source_population": {
+    "eligible_advisories": 172,
+    "eligible_entries": 380,
+    "eligible_snapshot_tasks": 156,
+    "fully_verified_advisories": 174,
+    "verified_entries": 393
+  }
+}

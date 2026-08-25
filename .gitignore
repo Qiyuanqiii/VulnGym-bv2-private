@@ -91,3 +91,9 @@ coverage.xml
 *.tmp
 *.bak
 *.orig
+
+# Evaluator-only artifacts for the reproducible 50/20 benchmark split.
+# Only private/README.md is publishable. Never mount the repository root or
+# this directory into the environment of an evaluated agent.
+/benchmarks/vulngym_50_20_v1/private/*
+!/benchmarks/vulngym_50_20_v1/private/README.md

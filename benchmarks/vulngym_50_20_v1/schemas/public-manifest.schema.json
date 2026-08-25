@@ -1,0 +1,213 @@
+{
+  "$id": "https://vulngym.example/benchmarks/vulngym-50-20-v1/public-manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/file"
+      },
+      "minItems": 2,
+      "type": "array"
+    },
+    "build": {
+      "additionalProperties": false,
+      "properties": {
+        "algorithm": {
+          "type": "string"
+        },
+        "dataset_id": {
+          "const": "vulngym-50-20-v1"
+        },
+        "eligibility_policy": {
+          "type": "string"
+        },
+        "sampling_seed": {
+          "type": "string"
+        },
+        "task_unit": {
+          "const": "repo_url+commit snapshot"
+        },
+        "test_tasks": {
+          "const": 20
+        },
+        "train_tasks": {
+          "const": 50
+        }
+      },
+      "required": [
+        "algorithm",
+        "dataset_id",
+        "eligibility_policy",
+        "sampling_seed",
+        "task_unit",
+        "test_tasks",
+        "train_tasks"
+      ],
+      "type": "object"
+    },
+    "license": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "const": "CC-BY-4.0"
+        },
+        "notice": {
+          "type": "string"
+        },
+        "path": {
+          "const": "LICENSE"
+        }
+      },
+      "required": [
+        "name",
+        "notice",
+        "path"
+      ],
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "source": {
+      "additionalProperties": false,
+      "properties": {
+        "files": {
+          "items": {
+            "$ref": "#/$defs/sourceFile"
+          },
+          "minItems": 4,
+          "type": "array"
+        },
+        "repository": {
+          "const": "https://github.com/Tencent/VulnGym"
+        },
+        "revision": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "tag": {
+          "const": "v0.1.4"
+        },
+        "visibility": {
+          "const": "public"
+        }
+      },
+      "required": [
+        "files",
+        "repository",
+        "revision",
+        "tag",
+        "visibility"
+      ],
+      "type": "object"
+    },
+    "source_population": {
+      "additionalProperties": false,
+      "properties": {
+        "eligible_advisories": {
+          "minimum": 70,
+          "type": "integer"
+        },
+        "eligible_entries": {
+          "minimum": 70,
+          "type": "integer"
+        },
+        "eligible_snapshot_tasks": {
+          "minimum": 70,
+          "type": "integer"
+        },
+        "fully_verified_advisories": {
+          "minimum": 70,
+          "type": "integer"
+        },
+        "verified_entries": {
+          "minimum": 70,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "eligible_advisories",
+        "eligible_entries",
+        "eligible_snapshot_tasks",
+        "fully_verified_advisories",
+        "verified_entries"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "artifacts",
+    "build",
+    "license",
+    "schema_version",
+    "source",
+    "source_population"
+  ],
+  "type": "object",
+  "$defs": {
+    "file": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rows": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes",
+        "path",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "sourceFile": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "git_blob_sha1": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "rows": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "url": {
+          "pattern": "^https://github\\.com/Tencent/VulnGym/blob/",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bytes",
+        "git_blob_sha1",
+        "path",
+        "sha256",
+        "url"
+      ],
+      "type": "object"
+    }
+  },
+  "title": "VulnGym 50/20 public source and hash manifest"
+}

@@ -1,0 +1,45 @@
+{
+  "extensions": {
+    ".bash": "Shell",
+    ".c": "C",
+    ".cc": "C++",
+    ".cpp": "C++",
+    ".cs": "C#",
+    ".cxx": "C++",
+    ".go": "Go",
+    ".h": "C/C++",
+    ".hpp": "C++",
+    ".ini": "INI",
+    ".java": "Java",
+    ".js": "JavaScript",
+    ".jsx": "JavaScript",
+    ".mjs": "JavaScript",
+    ".php": "PHP",
+    ".py": "Python",
+    ".pyi": "Python",
+    ".pyw": "Python",
+    ".rb": "Ruby",
+    ".rs": "Rust",
+    ".sh": "Shell",
+    ".svelte": "Svelte",
+    ".swift": "Swift",
+    ".ts": "TypeScript",
+    ".tsx": "TypeScript",
+    ".vue": "Vue",
+    ".yaml": "YAML",
+    ".yml": "YAML"
+  },
+  "primary_language_rule": "Count mapped extensions from entry_point.file and critical_operation.file for every verified entry in the snapshot; choose the greatest count and break ties by the Unicode code-point order of the label.",
+  "sampling_other_label": "Other",
+  "sampling_primary_languages": [
+    "Go",
+    "Python",
+    "TypeScript"
+  ],
+  "sources": [
+    "entry_point.file",
+    "critical_operation.file"
+  ],
+  "unknown_label": "Other",
+  "version": "1.0.0"
+}

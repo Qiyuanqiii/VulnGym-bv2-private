@@ -1,0 +1,342 @@
+{
+  "$defs": {
+    "advisoryGold": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "origin": {
+          "const": "GitHub Advisory Database (reviewed)"
+        },
+        "project": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "repo_url": {
+          "pattern": "^https://github\\.com/",
+          "type": "string"
+        },
+        "report_id": {
+          "pattern": "^GHSA-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$",
+          "type": "string"
+        },
+        "source_link": {
+          "pattern": "^https://github\\.com/advisories/GHSA-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}/?$",
+          "type": "string"
+        },
+        "verified_entries": {
+          "items": {
+            "$ref": "#/$defs/entry"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "vuln_category_l1": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "vuln_category_l2": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "vuln_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "vuln_title": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "origin",
+        "project",
+        "repo_url",
+        "report_id",
+        "source_link",
+        "verified_entries",
+        "vuln_category_l1",
+        "vuln_category_l2",
+        "vuln_ids",
+        "vuln_title"
+      ],
+      "type": "object"
+    },
+    "entry": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "critical_operation": {
+          "$ref": "#/$defs/location"
+        },
+        "entry_id": {
+          "pattern": "^entry-[0-9]{5}$",
+          "type": "string"
+        },
+        "entry_point": {
+          "$ref": "#/$defs/location"
+        },
+        "origin": {
+          "const": "GitHub Advisory Database (reviewed)"
+        },
+        "project": {
+          "type": "string"
+        },
+        "repo_url": {
+          "pattern": "^https://github\\.com/",
+          "type": "string"
+        },
+        "report_id": {
+          "pattern": "^GHSA-[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}$",
+          "type": "string"
+        },
+        "source_link": {
+          "pattern": "^https://github\\.com/advisories/GHSA-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}-[0-9A-Za-z]{4}/?$",
+          "type": "string"
+        },
+        "trace": {
+          "items": {
+            "$ref": "#/$defs/location"
+          },
+          "type": "array"
+        },
+        "verify": {
+          "const": 1
+        },
+        "vuln_category_l1": {
+          "type": "string"
+        },
+        "vuln_category_l2": {
+          "type": "string"
+        },
+        "vuln_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "vuln_title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "critical_operation",
+        "entry_id",
+        "entry_point",
+        "origin",
+        "project",
+        "repo_url",
+        "report_id",
+        "source_link",
+        "trace",
+        "verify",
+        "vuln_category_l1",
+        "vuln_category_l2",
+        "vuln_ids",
+        "vuln_title"
+      ],
+      "type": "object"
+    },
+    "gold": {
+      "additionalProperties": false,
+      "properties": {
+        "advisories": {
+          "items": {
+            "$ref": "#/$defs/advisoryGold"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "advisories"
+      ],
+      "type": "object"
+    },
+    "line": {
+      "oneOf": [
+        {
+          "minimum": 1,
+          "type": "integer"
+        },
+        {
+          "$comment": "The generator and cross-record validator additionally enforce start <= end.",
+          "pattern": "^[1-9][0-9]*-[1-9][0-9]*$",
+          "type": "string"
+        }
+      ]
+    },
+    "location": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "desc": {
+          "type": "string"
+        },
+        "file": {
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$",
+          "type": "string"
+        },
+        "line": {
+          "$ref": "#/$defs/line"
+        }
+      },
+      "required": [
+        "code",
+        "file",
+        "line"
+      ],
+      "type": "object"
+    },
+    "task": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {
+          "pattern": "^[0-9a-f]{40}$",
+          "type": "string"
+        },
+        "instruction_id": {
+          "const": "vulngym-whitebox-locate-v1"
+        },
+        "repo_url": {
+          "pattern": "^https://github\\.com/",
+          "type": "string"
+        },
+        "split": {
+          "enum": [
+            "train",
+            "test"
+          ]
+        },
+        "task_id": {
+          "pattern": "^VG-(TRAIN|TEST)-[0-9A-F]{20}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "instruction_id",
+        "repo_url",
+        "split",
+        "task_id"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://vulngym.example/benchmarks/vulngym-50-20-v1/benchmark-record.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "gold": {
+          "$ref": "#/$defs/gold"
+        },
+        "kind": {
+          "const": "training_example"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "task": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/task"
+            },
+            {
+              "properties": {
+                "split": {
+                  "const": "train"
+                },
+                "task_id": {
+                  "pattern": "^VG-TRAIN-"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "gold",
+        "kind",
+        "schema_version",
+        "task"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "test_task"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "task": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/task"
+            },
+            {
+              "properties": {
+                "split": {
+                  "const": "test"
+                },
+                "task_id": {
+                  "pattern": "^VG-TEST-"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "schema_version",
+        "task"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "gold": {
+          "$ref": "#/$defs/gold"
+        },
+        "kind": {
+          "const": "test_gold"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "task_id": {
+          "pattern": "^VG-TEST-[0-9A-F]{20}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "gold",
+        "kind",
+        "schema_version",
+        "task_id"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "VulnGym 50/20 benchmark record"
+}
