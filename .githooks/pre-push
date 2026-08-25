@@ -13,13 +13,12 @@ case "$remote_url" in
     ;;
 esac
 
-cat >&2 <<EOF
-VulnGym B-v2 push guard rejected the destination.
-
-Remote name: $remote_name
-Remote URL:  $remote_url
-
-Only Qiyuanqiii/VulnGym-bv2-private is authorized for this worktree.
-Review docs/issue_and_commit_traceability.md before changing this guard.
-EOF
+printf '%s\n' \
+  'VulnGym B-v2 push guard rejected the destination.' \
+  '' \
+  "Remote name: $remote_name" \
+  "Remote URL:  $remote_url" \
+  '' \
+  'Only Qiyuanqiii/VulnGym-bv2-private is authorized for this worktree.' \
+  'Review docs/issue_and_commit_traceability.md before changing this guard.' >&2
 exit 1
