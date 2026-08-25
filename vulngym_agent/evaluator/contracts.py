@@ -31,7 +31,7 @@ from vulngym_agent.benchmark.snapshot_batch import (
     SnapshotBatchSummary,
     SnapshotBatchTask,
 )
-from vulngym_agent.benchmark.worker_handoff import WorkerHandoffV1
+from vulngym_agent.benchmark.worker_handoff import WorkerHandoffV2
 from vulngym_agent.evaluator.runtime_evidence import (
     RuntimeEvidenceError,
     RuntimeEvidenceV1,
@@ -39,8 +39,9 @@ from vulngym_agent.evaluator.runtime_evidence import (
 
 
 EVALUATOR_CONTRACT_VERSION: Final[int] = 1
+BATCH_ENVELOPE_CONTRACT_VERSION: Final[int] = 2
 SNAPSHOT_BATCH_BINDING_KIND: Final[str] = (
-    "vulngym.snapshot-batch-binding.v1"
+    "vulngym.snapshot-batch-binding.v2"
 )
 EXECUTION_POLICY_BINDING_KIND: Final[str] = (
     "vulngym.discovery-execution-policy.v1"
@@ -49,35 +50,35 @@ DISCOVERY_TASK_EXECUTION_PLAN_KIND: Final[str] = (
     "vulngym.discovery-task-execution-plan.v1"
 )
 DISCOVERY_BATCH_EXECUTION_PLAN_KIND: Final[str] = (
-    "vulngym.discovery-batch-execution-plan.v1"
+    "vulngym.discovery-batch-execution-plan.v2"
 )
 DISCOVERY_TASK_EXECUTION_RECEIPT_KIND: Final[str] = (
     "vulngym.discovery-task-execution-receipt.v1"
 )
 DISCOVERY_BATCH_EXECUTION_RECEIPT_KIND: Final[str] = (
-    "vulngym.discovery-batch-execution-receipt.v1"
+    "vulngym.discovery-batch-execution-receipt.v2"
 )
 
 SNAPSHOT_BATCH_BINDING_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym evaluator snapshot batch binding v1\0"
+    b"VulnGym evaluator snapshot batch binding v2\0"
 )
 EXECUTION_POLICY_BINDING_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym evaluator execution policy binding v1\0"
 )
 SNAPSHOT_POLICY_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym evaluator snapshot policy v1\0"
+    b"VulnGym evaluator snapshot policy v2\0"
 )
 DISCOVERY_TASK_EXECUTION_PLAN_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym evaluator discovery task plan v1\0"
 )
 DISCOVERY_BATCH_EXECUTION_PLAN_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym evaluator discovery batch plan v1\0"
+    b"VulnGym evaluator discovery batch plan v2\0"
 )
 DISCOVERY_TASK_EXECUTION_RECEIPT_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym evaluator discovery task receipt v1\0"
 )
 DISCOVERY_BATCH_EXECUTION_RECEIPT_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym evaluator discovery batch receipt v1\0"
+    b"VulnGym evaluator discovery batch receipt v2\0"
 )
 
 EVALUATOR_CONTRACT_MAX_WIRE_BYTES: Final[int] = 4 * 1024 * 1024
@@ -108,6 +109,7 @@ _POLICY_KEYS: Final[frozenset[str]] = frozenset(
         "max_path_bytes",
         "max_total_bytes",
         "max_tree_object_bytes",
+        "git_symlink_representation",
         "policy_version",
     }
 )
@@ -333,14 +335,18 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             value.max_depth,
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
+            value.git_symlink_representation,
         )
     except (AttributeError, TypeError):
         raise EvaluatorContractError(
             "invalid_contract", "snapshot policy fields are incomplete"
         ) from None
-    if any(type(item) is not int for item in fields):
+    if (
+        any(type(item) is not int for item in fields[:-1])
+        or type(fields[-1]) is not str
+    ):
         raise EvaluatorContractError(
-            "invalid_contract", "snapshot policy fields must be exact integers"
+            "invalid_contract", "snapshot policy fields have invalid exact types"
         )
     try:
         return SnapshotPolicy(
@@ -352,6 +358,7 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             max_depth=fields[5],
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
+            git_symlink_representation=fields[8],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorContractError(
@@ -359,7 +366,7 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
         ) from None
 
 
-def snapshot_policy_sha256_v1(value: SnapshotPolicy) -> str:
+def snapshot_policy_sha256_v2(value: SnapshotPolicy) -> str:
     """Return the domain-separated digest of one exact snapshot policy."""
 
     policy = _canonical_policy(value)
@@ -380,6 +387,7 @@ def _policy_from_dict(value: object) -> SnapshotPolicy:
             max_depth=raw["max_depth"],
             max_tree_object_bytes=raw["max_tree_object_bytes"],
             max_manifest_bytes=raw["max_manifest_bytes"],
+            git_symlink_representation=raw["git_symlink_representation"],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorContractError(
@@ -476,7 +484,7 @@ def _batch_task_from_record(value: object) -> SnapshotBatchTask:
 
 
 @dataclass(frozen=True, slots=True)
-class SnapshotBatchBindingV1:
+class SnapshotBatchBindingV2:
     """Path-free closure of one fresh, complete batch verification."""
 
     profile_id: str
@@ -495,14 +503,14 @@ class SnapshotBatchBindingV1:
     snapshot_policy: SnapshotPolicy
     tasks: tuple[SnapshotBatchTask, ...]
     batch_contract_version: str = BATCH_CONTRACT_VERSION
-    contract_version: int = EVALUATOR_CONTRACT_VERSION
+    contract_version: int = BATCH_ENVELOPE_CONTRACT_VERSION
     kind: str = SNAPSHOT_BATCH_BINDING_KIND
     binding_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
         if (
             type(self.contract_version) is not int
-            or self.contract_version != EVALUATOR_CONTRACT_VERSION
+            or self.contract_version != BATCH_ENVELOPE_CONTRACT_VERSION
             or type(self.kind) is not str
             or self.kind != SNAPSHOT_BATCH_BINDING_KIND
             or type(self.batch_contract_version) is not str
@@ -623,7 +631,7 @@ class SnapshotBatchBindingV1:
         summary: SnapshotBatchSummary,
         *,
         snapshot_policy: SnapshotPolicy,
-    ) -> "SnapshotBatchBindingV1":
+    ) -> "SnapshotBatchBindingV2":
         if type(summary) is not SnapshotBatchSummary:
             raise EvaluatorContractError(
                 "invalid_argument", "verified batch summary must have an exact type"
@@ -677,7 +685,7 @@ class SnapshotBatchBindingV1:
         *,
         expected_binding_sha256: str,
         expected_wire_sha256: str,
-    ) -> "SnapshotBatchBindingV1":
+    ) -> "SnapshotBatchBindingV2":
         _require_sha256(expected_binding_sha256, name="expected_binding_sha256")
         raw = _parse_pinned_line(
             payload, expected_wire_sha256=expected_wire_sha256
@@ -1042,9 +1050,9 @@ class DiscoveryTaskExecutionPlanV1:
     @classmethod
     def from_handoff(
         cls,
-        batch: SnapshotBatchBindingV1,
+        batch: SnapshotBatchBindingV2,
         execution_policy: ExecutionPolicyBindingV1,
-        handoff: WorkerHandoffV1,
+        handoff: WorkerHandoffV2,
         *,
         d2_replay_sha256: str,
         d2_replay_wire_sha256: str,
@@ -1052,9 +1060,9 @@ class DiscoveryTaskExecutionPlanV1:
         d3_replay_wire_sha256: str,
     ) -> "DiscoveryTaskExecutionPlanV1":
         if (
-            type(batch) is not SnapshotBatchBindingV1
+            type(batch) is not SnapshotBatchBindingV2
             or type(execution_policy) is not ExecutionPolicyBindingV1
-            or type(handoff) is not WorkerHandoffV1
+            or type(handoff) is not WorkerHandoffV2
         ):
             raise EvaluatorContractError(
                 "invalid_argument", "task plan inputs must have exact types"
@@ -1063,7 +1071,7 @@ class DiscoveryTaskExecutionPlanV1:
         # its scalar bindings.  This avoids retaining caller-owned references
         # across the plan-construction boundary.
         batch_wire = batch.to_bytes()
-        batch = SnapshotBatchBindingV1.from_bytes(
+        batch = SnapshotBatchBindingV2.from_bytes(
             batch_wire,
             expected_binding_sha256=_embedded_sha256_from_canonical_wire(
                 batch_wire, field="binding_sha256"
@@ -1079,7 +1087,7 @@ class DiscoveryTaskExecutionPlanV1:
             expected_wire_sha256=hashlib.sha256(policy_wire).hexdigest(),
         )
         handoff_wire = handoff.to_bytes()
-        handoff = WorkerHandoffV1.from_bytes(
+        handoff = WorkerHandoffV2.from_bytes(
             handoff_wire,
             expected_sha256=_embedded_sha256_from_canonical_wire(
                 handoff_wire, field="handoff_sha256"
@@ -1200,23 +1208,23 @@ def _nested_payload(value: object, *, name: str) -> bytes:
 
 
 @dataclass(frozen=True, slots=True)
-class DiscoveryBatchExecutionPlanV1:
+class DiscoveryBatchExecutionPlanV2:
     """Complete pre-launch plan covering every task in one batch exactly once."""
 
-    batch: SnapshotBatchBindingV1
+    batch: SnapshotBatchBindingV2
     execution_policy: ExecutionPolicyBindingV1
     tasks: tuple[DiscoveryTaskExecutionPlanV1, ...]
-    contract_version: int = EVALUATOR_CONTRACT_VERSION
+    contract_version: int = BATCH_ENVELOPE_CONTRACT_VERSION
     kind: str = DISCOVERY_BATCH_EXECUTION_PLAN_KIND
     plan_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
         if (
             type(self.contract_version) is not int
-            or self.contract_version != EVALUATOR_CONTRACT_VERSION
+            or self.contract_version != BATCH_ENVELOPE_CONTRACT_VERSION
             or type(self.kind) is not str
             or self.kind != DISCOVERY_BATCH_EXECUTION_PLAN_KIND
-            or type(self.batch) is not SnapshotBatchBindingV1
+            or type(self.batch) is not SnapshotBatchBindingV2
             or type(self.execution_policy) is not ExecutionPolicyBindingV1
             or type(self.tasks) is not tuple
         ):
@@ -1224,7 +1232,7 @@ class DiscoveryBatchExecutionPlanV1:
                 "invalid_contract", "batch execution plan root is invalid"
             )
         batch_wire = self.batch.to_bytes()
-        batch = SnapshotBatchBindingV1.from_bytes(
+        batch = SnapshotBatchBindingV2.from_bytes(
             batch_wire,
             expected_binding_sha256=_embedded_sha256_from_canonical_wire(
                 batch_wire, field="binding_sha256"
@@ -1256,7 +1264,7 @@ class DiscoveryBatchExecutionPlanV1:
                 )
             )
         tasks = tuple(task_plans)
-        if policy.snapshot_policy_sha256 != snapshot_policy_sha256_v1(
+        if policy.snapshot_policy_sha256 != snapshot_policy_sha256_v2(
             batch.snapshot_policy
         ):
             raise EvaluatorContractError(
@@ -1356,7 +1364,7 @@ class DiscoveryBatchExecutionPlanV1:
         *,
         expected_plan_sha256: str,
         expected_wire_sha256: str,
-    ) -> "DiscoveryBatchExecutionPlanV1":
+    ) -> "DiscoveryBatchExecutionPlanV2":
         _require_sha256(expected_plan_sha256, name="expected_plan_sha256")
         value = _strict_object(
             _parse_pinned_line(
@@ -1388,7 +1396,7 @@ class DiscoveryBatchExecutionPlanV1:
                 "invalid_contract", "batch execution plan nested roots are invalid"
             )
         batch_payload = _nested_payload(raw_batch, name="batch binding")
-        batch = SnapshotBatchBindingV1.from_bytes(
+        batch = SnapshotBatchBindingV2.from_bytes(
             batch_payload,
             expected_binding_sha256=_require_sha256(
                 raw_batch.get("binding_sha256"), name="binding_sha256"
@@ -1648,31 +1656,31 @@ class DiscoveryTaskExecutionReceiptV1:
 
 
 @dataclass(frozen=True, slots=True)
-class DiscoveryBatchExecutionReceiptV1:
+class DiscoveryBatchExecutionReceiptV2:
     """Self-contained closure of pre/post batch verification and publication."""
 
-    plan: DiscoveryBatchExecutionPlanV1
+    plan: DiscoveryBatchExecutionPlanV2
     pre_batch_binding_sha256: str
     post_batch_binding_sha256: str
     artifact_index_sha256: str
     tasks: tuple[DiscoveryTaskExecutionReceiptV1, ...]
     result_bundle_version: str = "source-discovery-result-bundle-v1"
     artifact_index_contract_version: int = 1
-    contract_version: int = EVALUATOR_CONTRACT_VERSION
+    contract_version: int = BATCH_ENVELOPE_CONTRACT_VERSION
     kind: str = DISCOVERY_BATCH_EXECUTION_RECEIPT_KIND
     receipt_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
         if (
             type(self.contract_version) is not int
-            or self.contract_version != EVALUATOR_CONTRACT_VERSION
+            or self.contract_version != BATCH_ENVELOPE_CONTRACT_VERSION
             or type(self.kind) is not str
             or self.kind != DISCOVERY_BATCH_EXECUTION_RECEIPT_KIND
             or type(self.result_bundle_version) is not str
             or self.result_bundle_version != "source-discovery-result-bundle-v1"
             or type(self.artifact_index_contract_version) is not int
             or self.artifact_index_contract_version != 1
-            or type(self.plan) is not DiscoveryBatchExecutionPlanV1
+            or type(self.plan) is not DiscoveryBatchExecutionPlanV2
             or type(self.tasks) is not tuple
         ):
             raise EvaluatorContractError(
@@ -1685,7 +1693,7 @@ class DiscoveryBatchExecutionReceiptV1:
         ):
             _require_sha256(value, name=name)
         plan_wire = self.plan.to_bytes()
-        plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+        plan = DiscoveryBatchExecutionPlanV2.from_bytes(
             plan_wire,
             expected_plan_sha256=_embedded_sha256_from_canonical_wire(
                 plan_wire, field="plan_sha256"
@@ -1880,7 +1888,7 @@ class DiscoveryBatchExecutionReceiptV1:
         *,
         expected_receipt_sha256: str,
         expected_wire_sha256: str,
-    ) -> "DiscoveryBatchExecutionReceiptV1":
+    ) -> "DiscoveryBatchExecutionReceiptV2":
         _require_sha256(expected_receipt_sha256, name="expected_receipt_sha256")
         value = _strict_object(
             _parse_pinned_line(
@@ -1915,7 +1923,7 @@ class DiscoveryBatchExecutionReceiptV1:
                 "invalid_contract", "batch receipt plan must be an object"
             )
         plan_payload = _nested_payload(raw_plan, name="batch plan")
-        plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+        plan = DiscoveryBatchExecutionPlanV2.from_bytes(
             plan_payload,
             expected_plan_sha256=_require_sha256(
                 raw_plan.get("plan_sha256"), name="batch plan digest"
@@ -1974,11 +1982,12 @@ __all__ = [
     "DISCOVERY_TASK_EXECUTION_PLAN_KIND",
     "DISCOVERY_TASK_EXECUTION_RECEIPT_DIGEST_DOMAIN",
     "DISCOVERY_TASK_EXECUTION_RECEIPT_KIND",
-    "DiscoveryBatchExecutionPlanV1",
-    "DiscoveryBatchExecutionReceiptV1",
+    "DiscoveryBatchExecutionPlanV2",
+    "DiscoveryBatchExecutionReceiptV2",
     "DiscoveryTaskExecutionPlanV1",
     "DiscoveryTaskExecutionReceiptV1",
     "EVALUATOR_CONTRACT_MAX_WIRE_BYTES",
+    "BATCH_ENVELOPE_CONTRACT_VERSION",
     "EVALUATOR_CONTRACT_VERSION",
     "EXECUTION_POLICY_BINDING_DIGEST_DOMAIN",
     "EXECUTION_POLICY_BINDING_KIND",
@@ -1987,6 +1996,6 @@ __all__ = [
     "SNAPSHOT_BATCH_BINDING_DIGEST_DOMAIN",
     "SNAPSHOT_BATCH_BINDING_KIND",
     "SNAPSHOT_POLICY_DIGEST_DOMAIN",
-    "SnapshotBatchBindingV1",
-    "snapshot_policy_sha256_v1",
+    "SnapshotBatchBindingV2",
+    "snapshot_policy_sha256_v2",
 ]

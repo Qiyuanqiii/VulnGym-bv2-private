@@ -28,7 +28,7 @@ from vulngym_agent.benchmark.worker_handoff import build_worker_handoff
 from vulngym_agent.evaluator.contracts import (
     DiscoveryTaskExecutionPlanV1,
     ExecutionPolicyBindingV1,
-    snapshot_policy_sha256_v1,
+    snapshot_policy_sha256_v2,
 )
 import vulngym_agent.evaluator.oci_worker_entry as entry_module
 from vulngym_agent.evaluator.oci_worker_entry import (
@@ -266,7 +266,7 @@ class OciWorkerEntryTests(unittest.TestCase):
             d2_model_id=self.d2_config.model_id,
             d3_backend_id=self.d3_config.backend_id,
             d3_model_id=self.d3_config.model_id,
-            snapshot_policy_sha256=snapshot_policy_sha256_v1(
+            snapshot_policy_sha256=snapshot_policy_sha256_v2(
                 DEFAULT_SNAPSHOT_POLICY
             ),
             d2_budget_sha256=budget_limits_sha256_v1(

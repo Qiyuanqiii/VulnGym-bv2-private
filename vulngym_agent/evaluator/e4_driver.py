@@ -34,16 +34,16 @@ from vulngym_agent.evaluator.batch_configs import (
 )
 from vulngym_agent.evaluator.batch_runner import (
     BatchRunnerError,
-    DiscoveryBatchAttemptReportV1,
+    DiscoveryBatchAttemptReportV2,
     run_prepared_discovery_batch_v1,
 )
 from vulngym_agent.evaluator.contracts import (
-    DiscoveryBatchExecutionPlanV1,
+    DiscoveryBatchExecutionPlanV2,
     EvaluatorContractError,
     ExecutionPolicyBindingV1,
-    snapshot_policy_sha256_v1,
+    snapshot_policy_sha256_v2,
 )
-from vulngym_agent.evaluator.e4_receipt import E4BatchSuccessReceiptV1
+from vulngym_agent.evaluator.e4_receipt import E4BatchSuccessReceiptV2
 from vulngym_agent.evaluator.linux_oci import (
     LinuxOciProviderError,
     verify_linux_oci_runtime_v1,
@@ -117,7 +117,7 @@ def fixed_e4_execution_policy_v1(
             d2_model_id=REPLAY_MODEL_ID,
             d3_backend_id=REPLAY_BACKEND_ID,
             d3_model_id=REPLAY_MODEL_ID,
-            snapshot_policy_sha256=snapshot_policy_sha256_v1(
+            snapshot_policy_sha256=snapshot_policy_sha256_v2(
                 DEFAULT_SNAPSHOT_POLICY
             ),
             d2_budget_sha256=budget_limits_sha256_v1(
@@ -189,14 +189,14 @@ def _validate_arguments(
     return split
 
 
-def _freeze_plan(value: object) -> DiscoveryBatchExecutionPlanV1:
-    if type(value) is not DiscoveryBatchExecutionPlanV1:
+def _freeze_plan(value: object) -> DiscoveryBatchExecutionPlanV2:
+    if type(value) is not DiscoveryBatchExecutionPlanV2:
         raise E4DriverError(
             "plan_mismatch", "prepared E4 plan has an invalid exact type"
         )
     try:
         wire = value.to_bytes()
-        return DiscoveryBatchExecutionPlanV1.from_bytes(
+        return DiscoveryBatchExecutionPlanV2.from_bytes(
             wire,
             expected_plan_sha256=value.plan_sha256,
             expected_wire_sha256=hashlib.sha256(wire).hexdigest(),
@@ -216,7 +216,7 @@ def _assert_prepared_plan_matches_public_tasks(
     expected_sealed_batch_manifest_sha256: str,
     snapshot_key_id: str,
     execution_policy: ExecutionPolicyBindingV1,
-) -> DiscoveryBatchExecutionPlanV1:
+) -> DiscoveryBatchExecutionPlanV2:
     if type(session) is not DiscoveryExecutionSession:
         raise E4DriverError(
             "plan_mismatch", "supervisor returned an invalid execution session"
@@ -334,15 +334,15 @@ def _assert_prepared_plan_matches_public_tasks(
 def _freeze_attempt_report(
     value: object,
     *,
-    expected_plan: DiscoveryBatchExecutionPlanV1,
-) -> DiscoveryBatchAttemptReportV1:
-    if type(value) is not DiscoveryBatchAttemptReportV1:
+    expected_plan: DiscoveryBatchExecutionPlanV2,
+) -> DiscoveryBatchAttemptReportV2:
+    if type(value) is not DiscoveryBatchAttemptReportV2:
         raise E4DriverError(
             "runner_contract_mismatch", "E4 runner returned an invalid result"
         )
     try:
         wire = value.to_bytes()
-        result = DiscoveryBatchAttemptReportV1.from_bytes(
+        result = DiscoveryBatchAttemptReportV2.from_bytes(
             wire,
             expected_report_sha256=value.report_sha256,
             expected_wire_sha256=hashlib.sha256(wire).hexdigest(),
@@ -372,9 +372,9 @@ def _read_back_success(
     output_root: str | Path,
     value: object,
     *,
-    expected_plan: DiscoveryBatchExecutionPlanV1,
-) -> E4BatchSuccessReceiptV1:
-    if type(value) is not E4BatchSuccessReceiptV1:
+    expected_plan: DiscoveryBatchExecutionPlanV2,
+) -> E4BatchSuccessReceiptV2:
+    if type(value) is not E4BatchSuccessReceiptV2:
         raise E4DriverError(
             "runner_contract_mismatch", "E4 runner returned an invalid result"
         )
@@ -384,7 +384,7 @@ def _read_back_success(
         supplied_plan = value.execution_receipt.plan
         expected_plan_wire = expected_plan.to_bytes()
         if (
-            type(supplied_plan) is not DiscoveryBatchExecutionPlanV1
+            type(supplied_plan) is not DiscoveryBatchExecutionPlanV2
             or supplied_plan.plan_sha256 != expected_plan.plan_sha256
             or supplied_plan.wire_sha256
             != hashlib.sha256(expected_plan_wire).hexdigest()
@@ -418,12 +418,12 @@ def _read_back_success(
             committed=True,
         ) from None
     if (
-        type(result) is not E4BatchSuccessReceiptV1
+        type(result) is not E4BatchSuccessReceiptV2
         or result != value
         or result.receipt_sha256 != value.receipt_sha256
         or result.wire_sha256 != expected_wire_sha256
         or result.to_bytes() != wire
-        or type(result_plan) is not DiscoveryBatchExecutionPlanV1
+        or type(result_plan) is not DiscoveryBatchExecutionPlanV2
         or result_plan.plan_sha256 != expected_plan.plan_sha256
         or result_plan.wire_sha256
         != hashlib.sha256(expected_plan_wire).hexdigest()
@@ -497,7 +497,7 @@ def run_e4_discovery_split_v1(
     snapshot_key_id: str,
     runtime_image_id: str,
     docker_executable: str | Path,
-) -> E4BatchSuccessReceiptV1 | DiscoveryBatchAttemptReportV1:
+) -> E4BatchSuccessReceiptV2 | DiscoveryBatchAttemptReportV2:
     """Run and close one exact public test or train E4 batch."""
 
     session: DiscoveryExecutionSession | None = None
@@ -568,11 +568,11 @@ def run_e4_discovery_split_v1(
         outcome = run_prepared_discovery_batch_v1(
             session, runtime, output_root
         )
-        if type(outcome) is E4BatchSuccessReceiptV1:
+        if type(outcome) is E4BatchSuccessReceiptV2:
             result = _read_back_success(
                 output_root, outcome, expected_plan=prepared_plan
             )
-        elif type(outcome) is DiscoveryBatchAttemptReportV1:
+        elif type(outcome) is DiscoveryBatchAttemptReportV2:
             # A failed attempt is non-publishable.  Deliberately do not open
             # or inspect the requested success directory on this branch.
             result = _freeze_attempt_report(
@@ -617,8 +617,8 @@ def run_e4_discovery_split_v1(
             ) from None
         raise cleanup_error
     if type(result) not in {
-        E4BatchSuccessReceiptV1,
-        DiscoveryBatchAttemptReportV1,
+        E4BatchSuccessReceiptV2,
+        DiscoveryBatchAttemptReportV2,
     }:
         raise E4DriverError(
             "driver_failed", "E4 driver produced no closed result"

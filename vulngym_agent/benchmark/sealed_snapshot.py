@@ -38,12 +38,13 @@ from vulngym_agent.tools.git.repository import (
 )
 
 
-SNAPSHOT_CONTRACT_VERSION: Final[str] = "vulngym.sealed-source-snapshot.v1"
-SNAPSHOT_POLICY_VERSION: Final[str] = "vulngym.portable-source-tree.v1"
+SNAPSHOT_CONTRACT_VERSION: Final[str] = "vulngym.sealed-source-snapshot.v2"
+SNAPSHOT_POLICY_VERSION: Final[str] = "vulngym.portable-source-tree.v2"
+GIT_SYMLINK_REPRESENTATION: Final[str] = "regular-file-raw-target-bytes"
 ATTESTATION_ALGORITHM: Final[str] = "HMAC-SHA256"
 
-_CONTENT_DOMAIN: Final[bytes] = b"VulnGym sealed source content root v1\0"
-_ATTESTATION_DOMAIN: Final[bytes] = b"VulnGym sealed source attestation v1\0"
+_CONTENT_DOMAIN: Final[bytes] = b"VulnGym sealed source content root v2\0"
+_ATTESTATION_DOMAIN: Final[bytes] = b"VulnGym sealed source attestation v2\0"
 _TASK_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"VG-(?:TRAIN|TEST)-[0-9A-F]{20}\Z"
 )
@@ -95,6 +96,7 @@ class SnapshotPolicy:
     max_depth: int = 64
     max_tree_object_bytes: int = 16 * 1024 * 1024
     max_manifest_bytes: int = 64 * 1024 * 1024
+    git_symlink_representation: str = GIT_SYMLINK_REPRESENTATION
 
     def __post_init__(self) -> None:
         limits = (
@@ -132,6 +134,13 @@ class SnapshotPolicy:
             raise ValueError("max_file_bytes must not exceed max_total_bytes")
         if self.max_component_bytes > self.max_path_bytes:
             raise ValueError("max_component_bytes must not exceed max_path_bytes")
+        if (
+            type(self.git_symlink_representation) is not str
+            or self.git_symlink_representation != GIT_SYMLINK_REPRESENTATION
+        ):
+            raise ValueError(
+                "git_symlink_representation must name the fixed safe representation"
+            )
 
     def to_dict(self) -> dict[str, int | str]:
         return {
@@ -143,6 +152,7 @@ class SnapshotPolicy:
             "max_path_bytes": self.max_path_bytes,
             "max_total_bytes": self.max_total_bytes,
             "max_tree_object_bytes": self.max_tree_object_bytes,
+            "git_symlink_representation": self.git_symlink_representation,
             "policy_version": SNAPSHOT_POLICY_VERSION,
         }
 
@@ -653,15 +663,14 @@ def _validate_entries(
             tree_paths.append(raw_path)
             all_paths.append((raw_path, True))
             continue
-        if entry.mode == "120000":
-            raise SealedSnapshotError(
-                "source_link_rejected", "symbolic links are forbidden"
-            )
         if entry.mode == "160000" or entry.object_type == "commit":
             raise SealedSnapshotError(
                 "source_gitlink_rejected", "Git links are forbidden"
             )
-        if entry.mode not in {"100644", "100755"} or entry.object_type != "blob":
+        if (
+            entry.mode not in {"100644", "100755", "120000"}
+            or entry.object_type != "blob"
+        ):
             raise SealedSnapshotError(
                 "invalid_source_tree", "Git tree contains an unsupported entry"
             )
@@ -1231,7 +1240,9 @@ def prepare_sealed_snapshot(
 
     The output directory must not already exist and is never overwritten.  Git
     content is read only by raw object ID; checkout, attributes, filters,
-    hooks, submodules, and Git LFS hydration are deliberately absent.
+    hooks, submodules, and Git LFS hydration are deliberately absent. Git mode
+    ``120000`` blobs are never resolved or created as host links: their target
+    bytes are materialized as ordinary files under the fixed v2 policy.
     """
 
     if not isinstance(repository, GitRepository):
@@ -1292,6 +1303,10 @@ def prepare_sealed_snapshot(
                 size=len(data),
                 sha256=hashlib.sha256(data).hexdigest(),
             )
+            # `_write_staging_file` always creates a no-follow regular 0600
+            # node. This is intentional for every entry and is the complete
+            # representation transform for Git mode 120000: `data` remains
+            # the raw target blob and is never interpreted as a path.
             _write_staging_file(staging, "tree/" + "/".join(components), data)
             file_records.append(record)
 
@@ -1580,7 +1595,7 @@ def _parse_manifest(
         seen_portable.add(collision)
         size = record.get("size")
         if (
-            record.get("git_mode") not in {"100644", "100755"}
+            record.get("git_mode") not in {"100644", "100755", "120000"}
             or not isinstance(record.get("blob_oid"), str)
             or _SHA1_RE.fullmatch(record["blob_oid"]) is None
             or not isinstance(record.get("sha256"), str)
@@ -1895,6 +1910,7 @@ def verify_sealed_snapshot(
 __all__ = [
     "ATTESTATION_ALGORITHM",
     "DEFAULT_SNAPSHOT_POLICY",
+    "GIT_SYMLINK_REPRESENTATION",
     "SNAPSHOT_CONTRACT_VERSION",
     "SNAPSHOT_POLICY_VERSION",
     "SealedSnapshotError",

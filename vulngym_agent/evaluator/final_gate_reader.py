@@ -30,7 +30,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     _windows_assert_no_named_streams,
 )
 from vulngym_agent.evaluator.e4_receipt import (
-    E4BatchSuccessReceiptV1,
+    E4BatchSuccessReceiptV2,
     E4ReceiptError,
 )
 from vulngym_agent.evaluator.contracts import DiscoveryTaskExecutionPlanV1
@@ -127,7 +127,7 @@ def _is_private_contract_file(value: os.stat_result) -> bool:
     )
 
 
-def _e4_wire_sha256_exact(value: E4BatchSuccessReceiptV1) -> str:
+def _e4_wire_sha256_exact(value: E4BatchSuccessReceiptV2) -> str:
     payload = value.to_bytes()
     if type(payload) is not bytes:
         raise FinalGateReaderError(
@@ -405,7 +405,7 @@ def _read_and_parse_contracts(
 
 
 def _projection_bindings(
-    e4_receipt: E4BatchSuccessReceiptV1,
+    e4_receipt: E4BatchSuccessReceiptV2,
 ) -> tuple[DiscoveryProjectionTaskBindingV1, ...]:
     execution_receipt = e4_receipt.execution_receipt
     execution_plan = execution_receipt.plan
@@ -527,7 +527,7 @@ def _verify_split(
         expected_receipt_sha256=closure.e4_receipt_sha256,
         expected_wire_sha256=closure.e4_receipt_wire_sha256,
     )
-    if type(e4_receipt) is not E4BatchSuccessReceiptV1:
+    if type(e4_receipt) is not E4BatchSuccessReceiptV2:
         raise FinalGateReaderError(
             "binding_mismatch", "E4 reader returned an invalid exact type"
         )

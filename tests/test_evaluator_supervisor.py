@@ -27,7 +27,7 @@ from vulngym_agent.benchmark.snapshot_batch import (
 from vulngym_agent.benchmark.worker_handoff import build_worker_handoff
 from vulngym_agent.evaluator.contracts import (
     ExecutionPolicyBindingV1,
-    snapshot_policy_sha256_v1,
+    snapshot_policy_sha256_v2,
 )
 from vulngym_agent.evaluator.oci_worker_entry import (
     OciReplayConfigV1,
@@ -181,7 +181,7 @@ class EvaluatorSupervisorTests(unittest.TestCase):
             d2_model_id=REPLAY_MODEL_ID,
             d3_backend_id=REPLAY_BACKEND_ID,
             d3_model_id=REPLAY_MODEL_ID,
-            snapshot_policy_sha256=snapshot_policy_sha256_v1(
+            snapshot_policy_sha256=snapshot_policy_sha256_v2(
                 DEFAULT_SNAPSHOT_POLICY
             ),
             d2_budget_sha256=budget_limits_sha256_v1(

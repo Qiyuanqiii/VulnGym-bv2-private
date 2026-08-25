@@ -15,11 +15,11 @@ from vulngym_agent.benchmark.contracts import INSTRUCTION_ID
 from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskInputV1
 from vulngym_agent.benchmark.snapshot_batch import SnapshotBatchTask
 from vulngym_agent.evaluator.contracts import (
-    DiscoveryBatchExecutionPlanV1,
-    DiscoveryBatchExecutionReceiptV1,
+    DiscoveryBatchExecutionPlanV2,
+    DiscoveryBatchExecutionReceiptV2,
     DiscoveryTaskExecutionPlanV1,
     EvaluatorContractError,
-    SnapshotBatchBindingV1,
+    SnapshotBatchBindingV2,
 )
 from vulngym_agent.evaluator.e4_receipt import (
     E4_BATCH_SUCCESS_RECEIPT_KIND,
@@ -27,11 +27,11 @@ from vulngym_agent.evaluator.e4_receipt import (
     E4_SCHEDULER_VERSION,
     E4_SUCCESS_RECEIPT_FILENAME,
     E4_TASK_SUCCESS_CLOSURE_KIND,
-    E4BatchSuccessReceiptV1,
+    E4BatchSuccessReceiptV2,
     E4ReceiptError,
-    E4SuccessReceiptAuthorityV1,
+    E4SuccessReceiptAuthorityV2,
     E4TaskSuccessClosureV1,
-    claim_e4_success_receipt_authority_v1,
+    claim_e4_success_receipt_authority_v2,
 )
 
 
@@ -59,7 +59,7 @@ def _contract_fixture() -> contract_fixtures.EvaluatorContractTests:
 
 
 def _success_closures(
-    receipt: DiscoveryBatchExecutionReceiptV1,
+    receipt: DiscoveryBatchExecutionReceiptV2,
 ) -> tuple[E4TaskSuccessClosureV1, ...]:
     return tuple(
         E4TaskSuccessClosureV1(
@@ -74,7 +74,7 @@ def _success_closures(
     )
 
 
-def _train_plan() -> DiscoveryBatchExecutionPlanV1:
+def _train_plan() -> DiscoveryBatchExecutionPlanV2:
     fixture = _contract_fixture()
     members = tuple(
         SnapshotBatchTask(
@@ -92,7 +92,7 @@ def _train_plan() -> DiscoveryBatchExecutionPlanV1:
         for index in range(50)
     )
     original = fixture.binding
-    binding = SnapshotBatchBindingV1(
+    binding = SnapshotBatchBindingV2(
         profile_id=original.profile_id,
         profile_schema_version=original.profile_schema_version,
         split="train",
@@ -135,7 +135,7 @@ def _train_plan() -> DiscoveryBatchExecutionPlanV1:
                 d3_replay_wire_sha256=_sha(28_000 + position),
             )
         )
-    return DiscoveryBatchExecutionPlanV1(
+    return DiscoveryBatchExecutionPlanV2(
         batch=binding,
         execution_policy=fixture.policy,
         tasks=tuple(task_plans),
@@ -143,7 +143,7 @@ def _train_plan() -> DiscoveryBatchExecutionPlanV1:
 
 
 def _plan_only_closures(
-    plan: DiscoveryBatchExecutionPlanV1,
+    plan: DiscoveryBatchExecutionPlanV2,
 ) -> tuple[E4TaskSuccessClosureV1, ...]:
     return tuple(
         E4TaskSuccessClosureV1(
@@ -165,23 +165,23 @@ class E4ReceiptTests(unittest.TestCase):
         self.execution_receipt = fixture.receipt
         self.closures = _success_closures(self.execution_receipt)
 
-    def _claim(self) -> E4BatchSuccessReceiptV1:
-        authority = e4_receipt_module._issue_e4_success_receipt_authority_v1(
+    def _claim(self) -> E4BatchSuccessReceiptV2:
+        authority = e4_receipt_module._issue_e4_success_receipt_authority_v2(
             self.plan,
             self.closures,
         )
-        return claim_e4_success_receipt_authority_v1(
+        return claim_e4_success_receipt_authority_v2(
             authority,
             self.execution_receipt,
         )
 
     def test_authority_claim_builds_fixed_receipt_and_roundtrips(self) -> None:
-        authority = e4_receipt_module._issue_e4_success_receipt_authority_v1(
+        authority = e4_receipt_module._issue_e4_success_receipt_authority_v2(
             self.plan,
             self.closures,
         )
-        self.assertIs(type(authority), E4SuccessReceiptAuthorityV1)
-        receipt = claim_e4_success_receipt_authority_v1(
+        self.assertIs(type(authority), E4SuccessReceiptAuthorityV2)
+        receipt = claim_e4_success_receipt_authority_v2(
             authority,
             self.execution_receipt,
         )
@@ -225,7 +225,7 @@ class E4ReceiptTests(unittest.TestCase):
             self.execution_receipt.wire_sha256,
         )
         self.assertEqual(receipt.wire_sha256, hashlib.sha256(payload).hexdigest())
-        parsed = E4BatchSuccessReceiptV1.from_bytes(
+        parsed = E4BatchSuccessReceiptV2.from_bytes(
             payload,
             expected_receipt_sha256=receipt.receipt_sha256,
             expected_wire_sha256=receipt.wire_sha256,
@@ -237,45 +237,45 @@ class E4ReceiptTests(unittest.TestCase):
         self,
     ) -> None:
         with self.assertRaises(TypeError):
-            E4SuccessReceiptAuthorityV1(
+            E4SuccessReceiptAuthorityV2(
                 object(),
                 plan=self.plan,
                 success_closures=self.closures,
             )
 
-        authority = e4_receipt_module._issue_e4_success_receipt_authority_v1(
+        authority = e4_receipt_module._issue_e4_success_receipt_authority_v2(
             self.plan,
             self.closures,
         )
         with self.assertRaises(TypeError):
             pickle.dumps(authority)
         with self.assertRaises(E4ReceiptError) as captured:
-            claim_e4_success_receipt_authority_v1(
+            claim_e4_success_receipt_authority_v2(
                 object(),
                 self.execution_receipt,
             )
         self.assertEqual(captured.exception.code, "invalid_argument")
 
-        claim_e4_success_receipt_authority_v1(
+        claim_e4_success_receipt_authority_v2(
             authority,
             self.execution_receipt,
         )
         with self.assertRaises(E4ReceiptError) as captured:
-            claim_e4_success_receipt_authority_v1(
+            claim_e4_success_receipt_authority_v2(
                 authority,
                 self.execution_receipt,
             )
         self.assertEqual(captured.exception.code, "authority_reused")
 
     def test_authority_allows_only_one_concurrent_claim(self) -> None:
-        authority = e4_receipt_module._issue_e4_success_receipt_authority_v1(
+        authority = e4_receipt_module._issue_e4_success_receipt_authority_v2(
             self.plan,
             self.closures,
         )
 
         def claim() -> object:
             try:
-                return claim_e4_success_receipt_authority_v1(
+                return claim_e4_success_receipt_authority_v2(
                     authority,
                     self.execution_receipt,
                 )
@@ -285,7 +285,7 @@ class E4ReceiptTests(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=2) as executor:
             results = tuple(executor.map(lambda _: claim(), range(2)))
         self.assertEqual(
-            sum(type(item) is E4BatchSuccessReceiptV1 for item in results),
+            sum(type(item) is E4BatchSuccessReceiptV2 for item in results),
             1,
         )
         self.assertEqual(results.count("authority_reused"), 1)
@@ -297,7 +297,7 @@ class E4ReceiptTests(unittest.TestCase):
         ):
             with self.subTest(count=len(closures)):
                 with self.assertRaises(E4ReceiptError) as captured:
-                    e4_receipt_module._issue_e4_success_receipt_authority_v1(
+                    e4_receipt_module._issue_e4_success_receipt_authority_v2(
                         self.plan,
                         closures,
                     )
@@ -315,24 +315,24 @@ class E4ReceiptTests(unittest.TestCase):
                 self.assertEqual(captured.exception.code, "invalid_contract")
 
     def test_exact_train_and_test_counts_are_required(self) -> None:
-        test_authority = e4_receipt_module._issue_e4_success_receipt_authority_v1(
+        test_authority = e4_receipt_module._issue_e4_success_receipt_authority_v2(
             self.plan,
             self.closures,
         )
-        self.assertIs(type(test_authority), E4SuccessReceiptAuthorityV1)
+        self.assertIs(type(test_authority), E4SuccessReceiptAuthorityV2)
 
         train_plan = _train_plan()
         train_closures = _plan_only_closures(train_plan)
-        train_authority = e4_receipt_module._issue_e4_success_receipt_authority_v1(
+        train_authority = e4_receipt_module._issue_e4_success_receipt_authority_v2(
             train_plan,
             train_closures,
         )
-        self.assertIs(type(train_authority), E4SuccessReceiptAuthorityV1)
+        self.assertIs(type(train_authority), E4SuccessReceiptAuthorityV2)
         for shortened in (self.closures[:-1], train_closures[:-1]):
             plan = self.plan if len(shortened) == 19 else train_plan
             with self.subTest(split=plan.batch.split):
                 with self.assertRaises(E4ReceiptError) as captured:
-                    e4_receipt_module._issue_e4_success_receipt_authority_v1(
+                    e4_receipt_module._issue_e4_success_receipt_authority_v2(
                         plan,
                         shortened,
                     )
@@ -345,18 +345,18 @@ class E4ReceiptTests(unittest.TestCase):
             replace(self.closures[0], run_sha256="f" * 64),
             *self.closures[1:],
         )
-        authority = e4_receipt_module._issue_e4_success_receipt_authority_v1(
+        authority = e4_receipt_module._issue_e4_success_receipt_authority_v2(
             self.plan,
             detached,
         )
         with self.assertRaises(E4ReceiptError) as captured:
-            claim_e4_success_receipt_authority_v1(
+            claim_e4_success_receipt_authority_v2(
                 authority,
                 self.execution_receipt,
             )
         self.assertEqual(captured.exception.code, "detached_receipt")
         with self.assertRaises(E4ReceiptError) as captured:
-            claim_e4_success_receipt_authority_v1(
+            claim_e4_success_receipt_authority_v2(
                 authority,
                 self.execution_receipt,
             )
@@ -390,7 +390,7 @@ class E4ReceiptTests(unittest.TestCase):
                     *self.closures[1:],
                 )
                 with self.assertRaises(E4ReceiptError) as captured:
-                    E4BatchSuccessReceiptV1(
+                    E4BatchSuccessReceiptV2(
                         execution_receipt=self.execution_receipt,
                         success_closures=detached,
                     )
@@ -402,11 +402,35 @@ class E4ReceiptTests(unittest.TestCase):
         receipt = self._claim()
         raw = receipt.to_dict()
 
+        legacy = dict(raw)
+        legacy["contract_version"] = 1
+        legacy["kind"] = "vulngym.discovery-e4-batch-success-receipt.v1"
+        legacy_core = dict(legacy)
+        legacy_core.pop("receipt_sha256")
+        legacy["receipt_sha256"] = hashlib.sha256(
+            b"VulnGym discovery E4 batch success receipt v1\0"
+            + json.dumps(
+                legacy_core,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        legacy_payload = _wire(legacy)
+        with self.assertRaises(E4ReceiptError) as captured:
+            E4BatchSuccessReceiptV2.from_bytes(
+                legacy_payload,
+                expected_receipt_sha256=legacy["receipt_sha256"],
+                expected_wire_sha256=hashlib.sha256(legacy_payload).hexdigest(),
+            )
+        self.assertEqual(captured.exception.code, "invalid_contract")
+
         with_extra = dict(raw)
         with_extra["extra"] = True
         extra_payload = _wire(with_extra)
         with self.assertRaises(E4ReceiptError) as captured:
-            E4BatchSuccessReceiptV1.from_bytes(
+            E4BatchSuccessReceiptV2.from_bytes(
                 extra_payload,
                 expected_receipt_sha256=receipt.receipt_sha256,
                 expected_wire_sha256=hashlib.sha256(extra_payload).hexdigest(),
@@ -421,7 +445,7 @@ class E4ReceiptTests(unittest.TestCase):
         ]
         reordered_payload = _wire(reordered)
         with self.assertRaises(E4ReceiptError) as captured:
-            E4BatchSuccessReceiptV1.from_bytes(
+            E4BatchSuccessReceiptV2.from_bytes(
                 reordered_payload,
                 expected_receipt_sha256=receipt.receipt_sha256,
                 expected_wire_sha256=hashlib.sha256(reordered_payload).hexdigest(),
@@ -432,7 +456,7 @@ class E4ReceiptTests(unittest.TestCase):
             json.dumps(raw, ensure_ascii=False, indent=1).encode("utf-8") + b"\n"
         )
         with self.assertRaises(E4ReceiptError) as captured:
-            E4BatchSuccessReceiptV1.from_bytes(
+            E4BatchSuccessReceiptV2.from_bytes(
                 noncanonical_payload,
                 expected_receipt_sha256=receipt.receipt_sha256,
                 expected_wire_sha256=hashlib.sha256(
@@ -462,7 +486,7 @@ class E4ReceiptTests(unittest.TestCase):
         ):
             with self.subTest(expected_code=expected_code, semantic=semantic):
                 with self.assertRaises(E4ReceiptError) as captured:
-                    E4BatchSuccessReceiptV1.from_bytes(
+                    E4BatchSuccessReceiptV2.from_bytes(
                         payload,
                         expected_receipt_sha256=semantic,
                         expected_wire_sha256=wire,
@@ -475,7 +499,7 @@ class E4ReceiptTests(unittest.TestCase):
         receipt = self._claim()
         payload = receipt.to_bytes()
         with self.assertRaises(E4ReceiptError) as captured:
-            E4BatchSuccessReceiptV1.from_bytes(
+            E4BatchSuccessReceiptV2.from_bytes(
                 "not-bytes",
                 expected_receipt_sha256=receipt.receipt_sha256,
                 expected_wire_sha256=receipt.wire_sha256,
@@ -484,7 +508,7 @@ class E4ReceiptTests(unittest.TestCase):
 
         oversized = b"x" * (e4_receipt_module.E4_SUCCESS_RECEIPT_MAX_BYTES + 1)
         with self.assertRaises(E4ReceiptError) as captured:
-            E4BatchSuccessReceiptV1.from_bytes(
+            E4BatchSuccessReceiptV2.from_bytes(
                 oversized,
                 expected_receipt_sha256=receipt.receipt_sha256,
                 expected_wire_sha256=hashlib.sha256(oversized).hexdigest(),
@@ -497,7 +521,7 @@ class E4ReceiptTests(unittest.TestCase):
             side_effect=AssertionError("wire pin must precede parsing"),
         ) as parser:
             with self.assertRaises(E4ReceiptError) as captured:
-                E4BatchSuccessReceiptV1.from_bytes(
+                E4BatchSuccessReceiptV2.from_bytes(
                     payload,
                     expected_receipt_sha256=receipt.receipt_sha256,
                     expected_wire_sha256="f" * 64,
@@ -507,7 +531,7 @@ class E4ReceiptTests(unittest.TestCase):
 
         duplicate = b'{"status":"succeeded",' + payload[1:]
         with self.assertRaises(E4ReceiptError) as captured:
-            E4BatchSuccessReceiptV1.from_bytes(
+            E4BatchSuccessReceiptV2.from_bytes(
                 duplicate,
                 expected_receipt_sha256=receipt.receipt_sha256,
                 expected_wire_sha256=hashlib.sha256(duplicate).hexdigest(),
@@ -517,20 +541,20 @@ class E4ReceiptTests(unittest.TestCase):
     def test_direct_e3_and_e4_receipts_are_unambiguously_distinct(self) -> None:
         e3 = self.execution_receipt
         e4 = self._claim()
-        self.assertIs(type(e3), DiscoveryBatchExecutionReceiptV1)
-        self.assertIs(type(e4), E4BatchSuccessReceiptV1)
+        self.assertIs(type(e3), DiscoveryBatchExecutionReceiptV2)
+        self.assertIs(type(e4), E4BatchSuccessReceiptV2)
         self.assertNotEqual(e3.kind, e4.kind)
         self.assertEqual(self.closures[0].kind, E4_TASK_SUCCESS_CLOSURE_KIND)
 
         with self.assertRaises(E4ReceiptError) as captured:
-            E4BatchSuccessReceiptV1.from_bytes(
+            E4BatchSuccessReceiptV2.from_bytes(
                 e3.to_bytes(),
                 expected_receipt_sha256=e3.receipt_sha256,
                 expected_wire_sha256=e3.wire_sha256,
             )
         self.assertEqual(captured.exception.code, "invalid_contract")
         with self.assertRaises(EvaluatorContractError) as captured:
-            DiscoveryBatchExecutionReceiptV1.from_bytes(
+            DiscoveryBatchExecutionReceiptV2.from_bytes(
                 e4.to_bytes(),
                 expected_receipt_sha256=e4.receipt_sha256,
                 expected_wire_sha256=e4.wire_sha256,

@@ -369,7 +369,7 @@ class FinalGateRunnerTests(unittest.TestCase):
 
         stack = ExitStack()
         stack.enter_context(
-            mock.patch.object(runner, "E4BatchSuccessReceiptV1", _FakeSuccess)
+            mock.patch.object(runner, "E4BatchSuccessReceiptV2", _FakeSuccess)
         )
         stack.enter_context(
             mock.patch.object(
@@ -465,7 +465,7 @@ class FinalGateRunnerTests(unittest.TestCase):
         output = self.base / "attempt"
         with (
             self._patch_success_pipeline(events, driver_override=attempt),
-            mock.patch.object(runner, "DiscoveryBatchAttemptReportV1", _FakeAttempt),
+            mock.patch.object(runner, "DiscoveryBatchAttemptReportV2", _FakeAttempt),
         ):
             result = run_e4_final_gate_v1(
                 **self._arguments(
@@ -571,7 +571,7 @@ class FinalGateRunnerTests(unittest.TestCase):
         output = self.base / "train-attempt"
         with (
             self._patch_success_pipeline(events, driver_override=attempt),
-            mock.patch.object(runner, "DiscoveryBatchAttemptReportV1", _FakeAttempt),
+            mock.patch.object(runner, "DiscoveryBatchAttemptReportV2", _FakeAttempt),
         ):
             result = run_e4_final_gate_v1(**self._arguments(output=output))
 

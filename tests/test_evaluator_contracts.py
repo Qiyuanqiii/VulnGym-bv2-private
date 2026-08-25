@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 import unittest
@@ -22,14 +23,14 @@ from vulngym_agent.benchmark.snapshot_batch import (
     SnapshotBatchTask,
 )
 from vulngym_agent.evaluator.contracts import (
-    DiscoveryBatchExecutionPlanV1,
-    DiscoveryBatchExecutionReceiptV1,
+    DiscoveryBatchExecutionPlanV2,
+    DiscoveryBatchExecutionReceiptV2,
     DiscoveryTaskExecutionPlanV1,
     DiscoveryTaskExecutionReceiptV1,
     EvaluatorContractError,
     ExecutionPolicyBindingV1,
-    SnapshotBatchBindingV1,
-    snapshot_policy_sha256_v1,
+    SnapshotBatchBindingV2,
+    snapshot_policy_sha256_v2,
 )
 from vulngym_agent.evaluator.runtime_evidence import (
     DockerServerIdentityV1,
@@ -60,7 +61,7 @@ class EvaluatorContractTests(unittest.TestCase):
             )
             for index in range(20)
         )
-        self.binding = SnapshotBatchBindingV1(
+        self.binding = SnapshotBatchBindingV2(
             profile_id=PROFILE_ID,
             profile_schema_version="1.0.0",
             split="test",
@@ -83,7 +84,7 @@ class EvaluatorContractTests(unittest.TestCase):
             d2_model_id="offline-d2",
             d3_backend_id="replay",
             d3_model_id="offline-d3",
-            snapshot_policy_sha256=snapshot_policy_sha256_v1(
+            snapshot_policy_sha256=snapshot_policy_sha256_v2(
                 DEFAULT_SNAPSHOT_POLICY
             ),
             d2_budget_sha256=_sha(13),
@@ -94,7 +95,7 @@ class EvaluatorContractTests(unittest.TestCase):
             self._task_plan(member, position)
             for position, member in enumerate(self.members, 1)
         )
-        self.plan = DiscoveryBatchExecutionPlanV1(
+        self.plan = DiscoveryBatchExecutionPlanV2(
             batch=self.binding,
             execution_policy=self.policy,
             tasks=self.task_plans,
@@ -138,7 +139,7 @@ class EvaluatorContractTests(unittest.TestCase):
             )
             for index, task in enumerate(self.task_plans)
         )
-        self.receipt = DiscoveryBatchExecutionReceiptV1(
+        self.receipt = DiscoveryBatchExecutionReceiptV2(
             plan=self.plan,
             pre_batch_binding_sha256=self.binding.binding_sha256,
             post_batch_binding_sha256=self.binding.binding_sha256,
@@ -253,7 +254,7 @@ class EvaluatorContractTests(unittest.TestCase):
         cases = (
             (
                 self.binding,
-                SnapshotBatchBindingV1.from_bytes,
+                SnapshotBatchBindingV2.from_bytes,
                 "expected_binding_sha256",
             ),
             (
@@ -268,7 +269,7 @@ class EvaluatorContractTests(unittest.TestCase):
             ),
             (
                 self.plan,
-                DiscoveryBatchExecutionPlanV1.from_bytes,
+                DiscoveryBatchExecutionPlanV2.from_bytes,
                 "expected_plan_sha256",
             ),
             (
@@ -278,7 +279,7 @@ class EvaluatorContractTests(unittest.TestCase):
             ),
             (
                 self.receipt,
-                DiscoveryBatchExecutionReceiptV1.from_bytes,
+                DiscoveryBatchExecutionReceiptV2.from_bytes,
                 "expected_receipt_sha256",
             ),
         )
@@ -287,6 +288,72 @@ class EvaluatorContractTests(unittest.TestCase):
                 payload, parsed = self._roundtrip(value, parser, digest_name)
                 self.assertEqual(parsed, value)
                 self.assertEqual(parsed.to_bytes(), payload)
+
+    def test_v2_batch_readers_reject_self_consistent_legacy_v1_envelopes(
+        self,
+    ) -> None:
+        cases = (
+            (
+                self.binding,
+                SnapshotBatchBindingV2.from_bytes,
+                "vulngym.snapshot-batch-binding.v1",
+                b"VulnGym evaluator snapshot batch binding v1\0",
+                "binding_sha256",
+                "expected_binding_sha256",
+            ),
+            (
+                self.plan,
+                DiscoveryBatchExecutionPlanV2.from_bytes,
+                "vulngym.discovery-batch-execution-plan.v1",
+                b"VulnGym evaluator discovery batch plan v1\0",
+                "plan_sha256",
+                "expected_plan_sha256",
+            ),
+            (
+                self.receipt,
+                DiscoveryBatchExecutionReceiptV2.from_bytes,
+                "vulngym.discovery-batch-execution-receipt.v1",
+                b"VulnGym evaluator discovery batch receipt v1\0",
+                "receipt_sha256",
+                "expected_receipt_sha256",
+            ),
+        )
+        for value, parser, legacy_kind, legacy_domain, digest_field, pin_name in cases:
+            with self.subTest(contract=type(value).__name__):
+                legacy = value.to_dict()
+                legacy["contract_version"] = 1
+                legacy["kind"] = legacy_kind
+                core = dict(legacy)
+                core.pop(digest_field)
+                legacy[digest_field] = hashlib.sha256(
+                    legacy_domain
+                    + json.dumps(
+                        core,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                payload = (
+                    json.dumps(
+                        legacy,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                    + b"\n"
+                )
+                with self.assertRaises(EvaluatorContractError) as captured:
+                    parser(
+                        payload,
+                        **{
+                            pin_name: legacy[digest_field],
+                            "expected_wire_sha256": hashlib.sha256(payload).hexdigest(),
+                        },
+                    )
+                self.assertEqual(captured.exception.code, "invalid_contract")
 
     def test_binding_detaches_summary_members_and_omits_local_state(self) -> None:
         summary = SnapshotBatchSummary(
@@ -305,7 +372,7 @@ class EvaluatorContractTests(unittest.TestCase):
             key_id="evaluator-contract-test",
             tasks=self.members,
         )
-        binding = SnapshotBatchBindingV1.from_verified_summary(
+        binding = SnapshotBatchBindingV2.from_verified_summary(
             summary, snapshot_policy=DEFAULT_SNAPSHOT_POLICY
         )
         original_repo = binding.tasks[0].repo_url
@@ -321,7 +388,7 @@ class EvaluatorContractTests(unittest.TestCase):
             side_effect=AssertionError("parser must remain unreachable"),
         ) as parser:
             with self.assertRaises(EvaluatorContractError) as captured:
-                DiscoveryBatchExecutionReceiptV1.from_bytes(
+                DiscoveryBatchExecutionReceiptV2.from_bytes(
                     payload,
                     expected_receipt_sha256=self.receipt.receipt_sha256,
                     expected_wire_sha256="f" * 64,
@@ -332,7 +399,7 @@ class EvaluatorContractTests(unittest.TestCase):
     def test_batch_plan_rejects_cross_task_order_and_policy_swap(self) -> None:
         swapped = (self.task_plans[1], self.task_plans[0], *self.task_plans[2:])
         with self.assertRaises(EvaluatorContractError) as captured:
-            DiscoveryBatchExecutionPlanV1(
+            DiscoveryBatchExecutionPlanV2(
                 batch=self.binding,
                 execution_policy=self.policy,
                 tasks=swapped,
@@ -351,7 +418,7 @@ class EvaluatorContractTests(unittest.TestCase):
             tree_limits_sha256=_sha(26),
         )
         with self.assertRaises(EvaluatorContractError) as captured:
-            DiscoveryBatchExecutionPlanV1(
+            DiscoveryBatchExecutionPlanV2(
                 batch=self.binding,
                 execution_policy=wrong_policy,
                 tasks=self.task_plans,
@@ -360,7 +427,7 @@ class EvaluatorContractTests(unittest.TestCase):
 
     def test_batch_receipt_rejects_postverify_swap(self) -> None:
         with self.assertRaises(EvaluatorContractError) as captured:
-            DiscoveryBatchExecutionReceiptV1(
+            DiscoveryBatchExecutionReceiptV2(
                 plan=self.plan,
                 pre_batch_binding_sha256=self.binding.binding_sha256,
                 post_batch_binding_sha256=_sha(9999),
@@ -399,7 +466,7 @@ class EvaluatorContractTests(unittest.TestCase):
             with self.subTest(evidence=evidence.evidence_sha256):
                 detached = replace(second, runtime_evidence=evidence)
                 with self.assertRaises(EvaluatorContractError) as captured:
-                    DiscoveryBatchExecutionReceiptV1(
+                    DiscoveryBatchExecutionReceiptV2(
                         plan=self.plan,
                         pre_batch_binding_sha256=self.binding.binding_sha256,
                         post_batch_binding_sha256=self.binding.binding_sha256,
@@ -458,7 +525,7 @@ class EvaluatorContractTests(unittest.TestCase):
                     runtime_evidence=evidence,
                 )
                 with self.assertRaises(EvaluatorContractError) as captured:
-                    DiscoveryBatchExecutionReceiptV1(
+                    DiscoveryBatchExecutionReceiptV2(
                         plan=self.plan,
                         pre_batch_binding_sha256=self.binding.binding_sha256,
                         post_batch_binding_sha256=self.binding.binding_sha256,
@@ -485,7 +552,7 @@ class EvaluatorContractTests(unittest.TestCase):
             ),
         )
         with self.assertRaises(EvaluatorContractError) as captured:
-            DiscoveryBatchExecutionReceiptV1(
+            DiscoveryBatchExecutionReceiptV2(
                 plan=self.plan,
                 pre_batch_binding_sha256=self.binding.binding_sha256,
                 post_batch_binding_sha256=self.binding.binding_sha256,
@@ -512,7 +579,7 @@ class EvaluatorContractTests(unittest.TestCase):
             ),
         )
         with self.assertRaises(EvaluatorContractError) as captured:
-            DiscoveryBatchExecutionReceiptV1(
+            DiscoveryBatchExecutionReceiptV2(
                 plan=self.plan,
                 pre_batch_binding_sha256=self.binding.binding_sha256,
                 post_batch_binding_sha256=self.binding.binding_sha256,
@@ -528,7 +595,7 @@ class EvaluatorContractTests(unittest.TestCase):
             "d2_model_id": "offline-d2",
             "d3_backend_id": "replay",
             "d3_model_id": "offline-d3",
-            "snapshot_policy_sha256": snapshot_policy_sha256_v1(
+            "snapshot_policy_sha256": snapshot_policy_sha256_v2(
                 DEFAULT_SNAPSHOT_POLICY
             ),
             "d2_budget_sha256": _sha(33),

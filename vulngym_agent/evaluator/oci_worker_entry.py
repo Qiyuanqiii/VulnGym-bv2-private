@@ -45,7 +45,7 @@ from vulngym_agent.benchmark.sealed_tree_access import (
 from vulngym_agent.benchmark.worker_handoff import (
     WORKER_HANDOFF_MAX_BYTES,
     WorkerHandoffError,
-    WorkerHandoffV1,
+    WorkerHandoffV2,
 )
 from vulngym_agent.evaluator.worker import (
     IsolatedWorkerError,
@@ -406,7 +406,8 @@ class OciReplayConfigV1:
                 )
                 for item in self.responses
             )
-            # Construction also rejects duplicate (stage, request digest) keys.
+            # Construction validates the ordered transcript. Repeated request
+            # identities are legal and remain distinct by sequence position.
             ReplayStructuredModelBackend(
                 detached,
                 backend_id=REPLAY_BACKEND_ID,
@@ -684,7 +685,7 @@ class GenerationReceiptV1:
 class _RuntimeBundle:
     request: OciWorkerRequestV1
     request_wire: bytes
-    handoff: WorkerHandoffV1
+    handoff: WorkerHandoffV2
     handoff_wire: bytes
     d2_config: OciReplayConfigV1
     d2_wire: bytes
@@ -825,7 +826,7 @@ def _load_runtime_bundle(root: Path) -> _RuntimeBundle:
         root, HANDOFF_FILENAME, maximum_bytes=WORKER_HANDOFF_MAX_BYTES
     )
     try:
-        handoff = WorkerHandoffV1.from_bytes(
+        handoff = WorkerHandoffV2.from_bytes(
             handoff_wire,
             expected_sha256=request.handoff_sha256,
             expected_wire_sha256=request.handoff_wire_sha256,
@@ -869,7 +870,7 @@ def _load_runtime_bundle(root: Path) -> _RuntimeBundle:
     )
 
 
-def _manifest_directories(handoff: WorkerHandoffV1) -> frozenset[str]:
+def _manifest_directories(handoff: WorkerHandoffV2) -> frozenset[str]:
     result: set[str] = set()
     for record in handoff.files:
         parts = record.path.split("/")
@@ -878,7 +879,7 @@ def _manifest_directories(handoff: WorkerHandoffV1) -> frozenset[str]:
     return frozenset(result)
 
 
-def _inventory_source(root: Path, handoff: WorkerHandoffV1) -> None:
+def _inventory_source(root: Path, handoff: WorkerHandoffV2) -> None:
     _require_directory(root)
     expected_files = frozenset(item.path for item in handoff.files)
     expected_directories = _manifest_directories(handoff)
@@ -1314,7 +1315,7 @@ def _assert_literal_network_blocked() -> None:
 def _runtime_self_check(
     source_root: Path,
     runtime_root: Path,
-    handoff: WorkerHandoffV1,
+    handoff: WorkerHandoffV2,
 ) -> None:
     if os.name != "posix":
         raise OciWorkerEntryError("runtime_platform_probe_failed")

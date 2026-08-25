@@ -43,7 +43,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
 from vulngym_agent.tools.git.repository import GitFactError, GitRepository
 
 
-BATCH_CONTRACT_VERSION: Final[str] = "vulngym.sealed-snapshot-batch.v1"
+BATCH_CONTRACT_VERSION: Final[str] = "vulngym.sealed-snapshot-batch.v2"
 SOURCE_MAP_KIND: Final[str] = "sealed_snapshot_source_map"
 SOURCE_MAP_SCHEMA_VERSION: Final[str] = "1.0.0"
 
@@ -57,13 +57,13 @@ PROFILE_MANIFEST_SHA256: Final[str] = (
 )
 
 _BATCH_CONTENT_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot batch content root v1\0"
+    b"VulnGym sealed snapshot batch content root v2\0"
 )
 _BATCH_ATTESTATION_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot batch attestation v1\0"
+    b"VulnGym sealed snapshot batch attestation v2\0"
 )
 _BATCH_MATERIALIZED_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot batch materialized state v1\0"
+    b"VulnGym sealed snapshot batch materialized state v2\0"
 )
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _KEY_ID_RE: Final[re.Pattern[str]] = re.compile(

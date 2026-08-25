@@ -35,10 +35,10 @@ from vulngym_agent.benchmark.sealed_snapshot import (
 )
 
 
-WORKER_HANDOFF_CONTRACT_VERSION: Final[int] = 1
-WORKER_HANDOFF_KIND: Final[str] = "vulngym.source-discovery-worker-handoff.v1"
+WORKER_HANDOFF_CONTRACT_VERSION: Final[int] = 2
+WORKER_HANDOFF_KIND: Final[str] = "vulngym.source-discovery-worker-handoff.v2"
 WORKER_HANDOFF_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym source discovery worker handoff v1\0"
+    b"VulnGym source discovery worker handoff v2\0"
 )
 WORKER_HANDOFF_MAX_BYTES: Final[int] = 72 * 1024 * 1024
 WORKER_HANDOFF_MAX_FILES: Final[int] = 100_000
@@ -55,6 +55,7 @@ _POLICY_KEYS: Final[frozenset[str]] = frozenset(
         "max_path_bytes",
         "max_total_bytes",
         "max_tree_object_bytes",
+        "git_symlink_representation",
         "policy_version",
     }
 )
@@ -153,6 +154,7 @@ def _policy_from_dict(value: object) -> SnapshotPolicy:
             max_depth=raw["max_depth"],
             max_tree_object_bytes=raw["max_tree_object_bytes"],
             max_manifest_bytes=raw["max_manifest_bytes"],
+            git_symlink_representation=raw["git_symlink_representation"],
         )
     except (TypeError, ValueError):
         raise WorkerHandoffError(
@@ -245,14 +247,18 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             value.max_depth,
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
+            value.git_symlink_representation,
         )
     except (AttributeError, TypeError):
         raise WorkerHandoffError(
             "invalid_contract", "worker handoff policy fields are incomplete"
         ) from None
-    if any(type(item) is not int for item in fields):
+    if (
+        any(type(item) is not int for item in fields[:-1])
+        or type(fields[-1]) is not str
+    ):
         raise WorkerHandoffError(
-            "invalid_argument", "worker handoff policy fields must be exact integers"
+            "invalid_argument", "worker handoff policy fields have invalid exact types"
         )
     try:
         policy = SnapshotPolicy(
@@ -264,6 +270,7 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             max_depth=fields[5],
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
+            git_symlink_representation=fields[8],
         )
     except (AttributeError, TypeError, ValueError):
         raise WorkerHandoffError(
@@ -273,7 +280,7 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
     if any(
         current > maximum
         for current, maximum in zip(
-            fields,
+            fields[:-1],
             (
                 ceiling.max_files,
                 ceiling.max_file_bytes,
@@ -341,7 +348,7 @@ def _file_dict(value: SealedSnapshotFile) -> dict[str, object]:
 
 
 @dataclass(frozen=True, slots=True)
-class WorkerHandoffV1:
+class WorkerHandoffV2:
     """Canonical, non-secret description of one preverified source mount."""
 
     task: DiscoveryTaskInputV1
@@ -528,7 +535,7 @@ class WorkerHandoffV1:
         *,
         expected_sha256: str,
         expected_wire_sha256: str,
-    ) -> "WorkerHandoffV1":
+    ) -> "WorkerHandoffV2":
         if type(payload) is not bytes:
             raise WorkerHandoffError(
                 "invalid_argument", "worker handoff payload must be exact bytes"
@@ -622,7 +629,7 @@ def build_worker_handoff(
     attestation_key: bytes | bytearray | memoryview,
     expected_key_id: str,
     policy: SnapshotPolicy = DEFAULT_SNAPSHOT_POLICY,
-) -> WorkerHandoffV1:
+) -> WorkerHandoffV2:
     """Authenticate one sealed snapshot and derive a non-secret worker record."""
 
     canonical_task = _canonical_task(task)
@@ -652,7 +659,7 @@ def build_worker_handoff(
         raise WorkerHandoffError(
             "invalid_binding", "sealed snapshot does not match the worker task"
         )
-    result = WorkerHandoffV1(
+    result = WorkerHandoffV2(
         task=canonical_task,
         policy=canonical_policy,
         root_tree=verified.root_tree,
@@ -668,6 +675,6 @@ __all__ = [
     "WORKER_HANDOFF_MAX_BYTES",
     "WORKER_HANDOFF_MAX_FILES",
     "WorkerHandoffError",
-    "WorkerHandoffV1",
+    "WorkerHandoffV2",
     "build_worker_handoff",
 ]

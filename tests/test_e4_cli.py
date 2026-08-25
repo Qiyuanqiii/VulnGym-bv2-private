@@ -105,7 +105,7 @@ class E4CliTests(unittest.TestCase):
         key = bytearray(b"K" * 40)
         success = _FakeSuccess("test")
         with (
-            mock.patch.object(cli, "E4BatchSuccessReceiptV1", _FakeSuccess),
+            mock.patch.object(cli, "E4BatchSuccessReceiptV2", _FakeSuccess),
             mock.patch.object(cli, "paths_overlap_v1", return_value=False) as overlap,
             mock.patch.object(
                 cli, "read_attestation_key_file_v1", return_value=key
@@ -303,7 +303,7 @@ class E4CliTests(unittest.TestCase):
         report = _FakeAttempt()
         with (
             mock.patch.object(
-                cli, "DiscoveryBatchAttemptReportV1", _FakeAttempt
+                cli, "DiscoveryBatchAttemptReportV2", _FakeAttempt
             ),
             mock.patch.object(cli, "paths_overlap_v1", return_value=False),
             mock.patch.object(
@@ -339,7 +339,7 @@ class E4CliTests(unittest.TestCase):
             wire,
         ]
         with (
-            mock.patch.object(cli, "E4BatchSuccessReceiptV1", _FakeSuccess),
+            mock.patch.object(cli, "E4BatchSuccessReceiptV2", _FakeSuccess),
             mock.patch.object(
                 cli,
                 "read_committed_e4_discovery_execution_v1",
@@ -377,7 +377,7 @@ class E4CliTests(unittest.TestCase):
             with self.subTest(returned=type(returned).__name__):
                 with (
                     mock.patch.object(
-                        cli, "E4BatchSuccessReceiptV1", _FakeSuccess
+                        cli, "E4BatchSuccessReceiptV2", _FakeSuccess
                     ),
                     mock.patch.object(
                         cli,

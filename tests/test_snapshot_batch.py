@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 from pathlib import Path
@@ -201,6 +202,104 @@ class SnapshotBatchTests(unittest.TestCase):
         self.assertEqual(prepared.to_dict(), verified.to_dict())
         self.assertEqual(prepared.tasks, verified.tasks)
         self.assertNotIn(str(self.repo), json.dumps(prepared.to_dict()))
+
+    def test_v2_verifier_rejects_a_self_consistent_legacy_v1_batch(self) -> None:
+        prepared = self._prepare("legacy-v1-batch")
+        legacy_snapshot_bindings: dict[str, tuple[str, str]] = {}
+
+        for task in prepared.tasks:
+            control = prepared.batch_root / task.bundle_path / "control"
+            manifest_path = control / "manifest.jsonl"
+            records = [json.loads(line) for line in manifest_path.read_bytes().splitlines()]
+            records[0]["contract_version"] = "vulngym.sealed-source-snapshot.v1"
+            records[0]["policy"].pop("git_symlink_representation")
+            records[0]["policy"]["policy_version"] = (
+                "vulngym.portable-source-tree.v1"
+            )
+            file_lines = tuple(_canonical(record) + b"\n" for record in records[1:-1])
+            content_root = hashlib.sha256(
+                b"VulnGym sealed source content root v1\0" + b"".join(file_lines)
+            ).hexdigest()
+            records[-1]["content_root"] = content_root
+            legacy_manifest = (
+                _canonical(records[0])
+                + b"\n"
+                + b"".join(file_lines)
+                + _canonical(records[-1])
+                + b"\n"
+            )
+            manifest_sha256 = hashlib.sha256(legacy_manifest).hexdigest()
+            mac = hmac.new(KEY, digestmod=hashlib.sha256)
+            mac.update(b"VulnGym sealed source attestation v1\0")
+            mac.update(KEY_ID.encode("ascii"))
+            mac.update(b"\0")
+            mac.update(legacy_manifest)
+            legacy_attestation = _canonical(
+                {
+                    "algorithm": "HMAC-SHA256",
+                    "contract_version": "vulngym.sealed-source-snapshot.v1",
+                    "key_id": KEY_ID,
+                    "mac": mac.hexdigest(),
+                    "manifest_sha256": manifest_sha256,
+                }
+            ) + b"\n"
+            manifest_path.write_bytes(legacy_manifest)
+            (control / "attestation.json").write_bytes(legacy_attestation)
+            legacy_snapshot_bindings[task.task_id] = (
+                manifest_sha256,
+                content_root,
+            )
+
+        batch_control = prepared.batch_root / "control"
+        batch_manifest_path = batch_control / "manifest.jsonl"
+        batch_records = [
+            json.loads(line) for line in batch_manifest_path.read_bytes().splitlines()
+        ]
+        batch_records[0]["contract_version"] = "vulngym.sealed-snapshot-batch.v1"
+        batch_records[0]["snapshot_policy"].pop("git_symlink_representation")
+        batch_records[0]["snapshot_policy"]["policy_version"] = (
+            "vulngym.portable-source-tree.v1"
+        )
+        for record in batch_records[1:-1]:
+            manifest_sha256, content_root = legacy_snapshot_bindings[
+                record["task_id"]
+            ]
+            record["snapshot_manifest_sha256"] = manifest_sha256
+            record["snapshot_content_root"] = content_root
+        task_lines = tuple(_canonical(record) + b"\n" for record in batch_records[1:-1])
+        batch_content_root = hashlib.sha256(
+            b"VulnGym sealed snapshot batch content root v1\0"
+            + b"".join(task_lines)
+        ).hexdigest()
+        batch_records[-1]["batch_content_root"] = batch_content_root
+        legacy_batch_manifest = (
+            _canonical(batch_records[0])
+            + b"\n"
+            + b"".join(task_lines)
+            + _canonical(batch_records[-1])
+            + b"\n"
+        )
+        batch_manifest_sha256 = hashlib.sha256(legacy_batch_manifest).hexdigest()
+        batch_mac = hmac.new(KEY, digestmod=hashlib.sha256)
+        batch_mac.update(b"VulnGym sealed snapshot batch attestation v1\0")
+        batch_mac.update(KEY_ID.encode("ascii"))
+        batch_mac.update(b"\0")
+        batch_mac.update(legacy_batch_manifest)
+        legacy_batch_attestation = _canonical(
+            {
+                "algorithm": "HMAC-SHA256",
+                "contract_version": "vulngym.sealed-snapshot-batch.v1",
+                "key_id": KEY_ID,
+                "mac": batch_mac.hexdigest(),
+                "manifest_sha256": batch_manifest_sha256,
+            }
+        ) + b"\n"
+        batch_manifest_path.write_bytes(legacy_batch_manifest)
+        (batch_control / "attestation.json").write_bytes(legacy_batch_attestation)
+
+        with self.assertRaises(SnapshotBatchError) as captured:
+            self._verify("legacy-v1-batch", batch_manifest_sha256)
+        self.assertEqual(captured.exception.code, "batch_attestation_invalid")
 
     def test_source_map_digest_coverage_duplicates_extras_and_schema(self) -> None:
         with self.assertRaisesRegex(SnapshotBatchError, "digest"):

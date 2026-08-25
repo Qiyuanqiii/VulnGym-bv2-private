@@ -215,10 +215,13 @@ native Linux 50/20 门禁——必须在逐题进程隔离、断网、严格只�
 
 阶段 C 把“受信 Git 对象库”与“Agent 可读源码”分成两个安全域。受信 preparer 可读取
 完整本地 source repo，但必须按无答案 task export 指定的精确 `repo_url + commit` 解析
-commit 及其 root tree；它只物化该 tree 中允许的普通文件到
+commit 及其 root tree；它只物化该 tree 中 policy 允许的 source blob 到
 `bundles/<task_id>/tree`。发布树没有 `.git`、父提交、future fix 或 object database。
-符号链接、junction/reparse point、Gitlink/submodule、LFS pointer、空目录、不安全路径、
-大小写/前缀碰撞，以及 shallow、alternate、graft 等不受支持的 Git 存储条件都会拒绝。
+Git mode `120000` 的 symlink blob 会按固定 policy 安全地物化成一个不可执行的普通文件，
+文件内容就是精确 link-target bytes；manifest 绑定原 Git mode 与这一表示，绝不在宿主机
+创建 symlink。宿主机 symlink、junction/reparse point、Gitlink/submodule、LFS pointer、
+空目录、不安全路径、大小写/前缀碰撞，以及 shallow、alternate、graft 等不受支持的 Git
+存储条件都会拒绝。
 
 每题 `control/manifest.jsonl` 是严格 canonical JSONL。header 绑定 task ID、精确 repo URL、
 commit、root tree OID 与固定 policy；file record 绑定相对路径、Git mode、blob OID、

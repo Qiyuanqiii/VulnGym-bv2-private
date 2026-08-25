@@ -53,18 +53,18 @@ from vulngym_agent.benchmark.snapshot_batch import (
 )
 from vulngym_agent.benchmark.worker_handoff import (
     WorkerHandoffError,
-    WorkerHandoffV1,
+    WorkerHandoffV2,
     build_worker_handoff,
 )
 from vulngym_agent.evaluator.contracts import (
     EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
-    DiscoveryBatchExecutionPlanV1,
-    DiscoveryBatchExecutionReceiptV1,
+    DiscoveryBatchExecutionPlanV2,
+    DiscoveryBatchExecutionReceiptV2,
     DiscoveryTaskExecutionPlanV1,
     DiscoveryTaskExecutionReceiptV1,
     EvaluatorContractError,
     ExecutionPolicyBindingV1,
-    SnapshotBatchBindingV1,
+    SnapshotBatchBindingV2,
     _embedded_sha256_from_canonical_wire,
 )
 from vulngym_agent.evaluator.worker import (
@@ -86,10 +86,10 @@ from vulngym_agent.evaluator.worker_completion import (
 from vulngym_agent.evaluator.e4_receipt import (
     E4_SUCCESS_RECEIPT_FILENAME,
     E4_SUCCESS_RECEIPT_MAX_BYTES,
-    E4BatchSuccessReceiptV1,
+    E4BatchSuccessReceiptV2,
     E4ReceiptError,
-    E4SuccessReceiptAuthorityV1,
-    claim_e4_success_receipt_authority_v1,
+    E4SuccessReceiptAuthorityV2,
+    claim_e4_success_receipt_authority_v2,
 )
 from vulngym_agent.orchestrator.budget import Limits
 from vulngym_agent.orchestrator.discovery_pipeline import (
@@ -171,14 +171,18 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             value.max_depth,
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
+            value.git_symlink_representation,
         )
     except (AttributeError, TypeError):
         raise EvaluatorSupervisorError(
             "invalid_argument", "snapshot policy fields are incomplete"
         ) from None
-    if any(type(item) is not int for item in fields):
+    if (
+        any(type(item) is not int for item in fields[:-1])
+        or type(fields[-1]) is not str
+    ):
         raise EvaluatorSupervisorError(
-            "invalid_argument", "snapshot policy fields must be exact integers"
+            "invalid_argument", "snapshot policy fields have invalid exact types"
         )
     try:
         return SnapshotPolicy(
@@ -190,6 +194,7 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             max_depth=fields[5],
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
+            git_symlink_representation=fields[8],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorSupervisorError(
@@ -415,14 +420,14 @@ class WorkerTaskLaunchV1:
         token: object,
         *,
         task_plan: DiscoveryTaskExecutionPlanV1,
-        handoff: WorkerHandoffV1,
+        handoff: WorkerHandoffV2,
         tree_root: Path,
     ) -> None:
         if token is not _SESSION_TOKEN:
             raise TypeError("worker launch values are supervisor-created")
         if (
             type(task_plan) is not DiscoveryTaskExecutionPlanV1
-            or type(handoff) is not WorkerHandoffV1
+            or type(handoff) is not WorkerHandoffV2
             or type(tree_root) is not type(Path())
         ):
             raise EvaluatorSupervisorError(
@@ -442,7 +447,7 @@ class WorkerTaskLaunchV1:
             handoff_payload, field="handoff_sha256"
         )
         handoff_wire_sha256 = hashlib.sha256(handoff_payload).hexdigest()
-        frozen_handoff = WorkerHandoffV1.from_bytes(
+        frozen_handoff = WorkerHandoffV2.from_bytes(
             handoff_payload,
             expected_sha256=handoff_sha256,
             expected_wire_sha256=handoff_wire_sha256,
@@ -482,7 +487,7 @@ class WorkerTaskLaunchV1:
 
     @property
     def task(self) -> DiscoveryTaskInputV1:
-        return WorkerHandoffV1.from_bytes(
+        return WorkerHandoffV2.from_bytes(
             self.__handoff_payload,
             expected_sha256=self.__handoff_sha256,
             expected_wire_sha256=self.__handoff_wire_sha256,
@@ -643,7 +648,7 @@ class PostVerifiedDiscoveryExecutionV1:
         token: object,
         *,
         batch_root: Path,
-        plan: DiscoveryBatchExecutionPlanV1,
+        plan: DiscoveryBatchExecutionPlanV2,
         pending: tuple[PendingTaskExecutionV1, ...],
     ) -> None:
         if token is not _POSTVERIFIED_TOKEN:
@@ -655,9 +660,9 @@ class PostVerifiedDiscoveryExecutionV1:
         self.__lock = threading.Lock()
 
     @property
-    def plan(self) -> DiscoveryBatchExecutionPlanV1:
+    def plan(self) -> DiscoveryBatchExecutionPlanV2:
         wire = self.__plan.to_bytes()
-        return DiscoveryBatchExecutionPlanV1.from_bytes(
+        return DiscoveryBatchExecutionPlanV2.from_bytes(
             wire,
             expected_plan_sha256=_embedded_sha256_from_canonical_wire(
                 wire, field="plan_sha256"
@@ -703,13 +708,13 @@ class FailedDiscoveryExecutionClosureV1:
         self,
         token: object,
         *,
-        plan: DiscoveryBatchExecutionPlanV1,
+        plan: DiscoveryBatchExecutionPlanV2,
         accepted_task_ids: tuple[str, ...],
     ) -> None:
         if token is not _FAILED_CLOSURE_TOKEN:
             raise TypeError("failed execution closures are supervisor-created")
         plan_wire = plan.to_bytes()
-        self.__plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+        self.__plan = DiscoveryBatchExecutionPlanV2.from_bytes(
             plan_wire,
             expected_plan_sha256=_embedded_sha256_from_canonical_wire(
                 plan_wire, field="plan_sha256"
@@ -730,9 +735,9 @@ class FailedDiscoveryExecutionClosureV1:
         self.__accepted_task_ids = accepted_task_ids
 
     @property
-    def plan(self) -> DiscoveryBatchExecutionPlanV1:
+    def plan(self) -> DiscoveryBatchExecutionPlanV2:
         wire = self.__plan.to_bytes()
-        return DiscoveryBatchExecutionPlanV1.from_bytes(
+        return DiscoveryBatchExecutionPlanV2.from_bytes(
             wire,
             expected_plan_sha256=self.__plan.plan_sha256,
             expected_wire_sha256=hashlib.sha256(wire).hexdigest(),
@@ -773,18 +778,18 @@ class DiscoveryExecutionSession:
         expected_key_id: str,
         key: bytearray,
         policy: SnapshotPolicy,
-        plan: DiscoveryBatchExecutionPlanV1,
-        handoffs: tuple[WorkerHandoffV1, ...],
+        plan: DiscoveryBatchExecutionPlanV2,
+        handoffs: tuple[WorkerHandoffV2, ...],
         replay_configs: tuple[tuple[OciReplayConfigV1, OciReplayConfigV1], ...],
     ) -> None:
         if token is not _SESSION_TOKEN:
             raise TypeError("execution sessions are supervisor-created")
-        if type(plan) is not DiscoveryBatchExecutionPlanV1:
+        if type(plan) is not DiscoveryBatchExecutionPlanV2:
             raise EvaluatorSupervisorError(
                 "invalid_plan", "execution session plan has an invalid exact type"
             )
         plan_payload = plan.to_bytes()
-        frozen_plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+        frozen_plan = DiscoveryBatchExecutionPlanV2.from_bytes(
             plan_payload,
             expected_plan_sha256=_embedded_sha256_from_canonical_wire(
                 plan_payload, field="plan_sha256"
@@ -866,9 +871,9 @@ class DiscoveryExecutionSession:
         }
 
     @property
-    def plan(self) -> DiscoveryBatchExecutionPlanV1:
+    def plan(self) -> DiscoveryBatchExecutionPlanV2:
         wire = self.__plan.to_bytes()
-        return DiscoveryBatchExecutionPlanV1.from_bytes(
+        return DiscoveryBatchExecutionPlanV2.from_bytes(
             wire,
             expected_plan_sha256=_embedded_sha256_from_canonical_wire(
                 wire, field="plan_sha256"
@@ -910,7 +915,7 @@ class DiscoveryExecutionSession:
                 )
             self.__claimed_launches.add(task_id)
             payload = launch.handoff_payload
-            handoff = WorkerHandoffV1.from_bytes(
+            handoff = WorkerHandoffV2.from_bytes(
                 payload,
                 expected_sha256=launch.handoff_sha256,
                 expected_wire_sha256=launch.handoff_wire_sha256,
@@ -1049,7 +1054,7 @@ class DiscoveryExecutionSession:
                     expected_key_id=self.__expected_key_id,
                     policy=self.__policy,
                 )
-                post_binding = SnapshotBatchBindingV1.from_verified_summary(
+                post_binding = SnapshotBatchBindingV2.from_verified_summary(
                     summary, snapshot_policy=self.__policy
                 )
                 if post_binding != self.__plan.batch:
@@ -1105,7 +1110,7 @@ class DiscoveryExecutionSession:
                     expected_key_id=self.__expected_key_id,
                     policy=self.__policy,
                 )
-                post_binding = SnapshotBatchBindingV1.from_verified_summary(
+                post_binding = SnapshotBatchBindingV2.from_verified_summary(
                     summary, snapshot_policy=self.__policy
                 )
                 if post_binding != self.__plan.batch:
@@ -1265,7 +1270,7 @@ def prepare_discovery_execution_plan_v1(
             raise EvaluatorSupervisorError(
                 "batch_binding_mismatch", "batch verifier returned a different root"
             )
-        binding = SnapshotBatchBindingV1.from_verified_summary(
+        binding = SnapshotBatchBindingV2.from_verified_summary(
             summary, snapshot_policy=policy
         )
         if (
@@ -1275,7 +1280,7 @@ def prepare_discovery_execution_plan_v1(
             raise EvaluatorSupervisorError(
                 "batch_binding_mismatch", "verified batch does not match its pins"
             )
-        handoffs: list[WorkerHandoffV1] = []
+        handoffs: list[WorkerHandoffV2] = []
         task_plans: list[DiscoveryTaskExecutionPlanV1] = []
         if len(replay_configs) != len(binding.tasks):
             raise EvaluatorSupervisorError(
@@ -1307,7 +1312,7 @@ def prepare_discovery_execution_plan_v1(
             )
             handoffs.append(handoff)
             task_plans.append(task_plan)
-        plan = DiscoveryBatchExecutionPlanV1(
+        plan = DiscoveryBatchExecutionPlanV2(
             batch=binding,
             execution_policy=runtime_policy,
             tasks=tuple(task_plans),
@@ -1748,8 +1753,8 @@ def _publish_postverified_discovery_execution_v1_impl(
     token: PostVerifiedDiscoveryExecutionV1,
     output_root: str | os.PathLike[str],
     *,
-    success_authority: E4SuccessReceiptAuthorityV1 | None,
-) -> DiscoveryBatchExecutionReceiptV1 | E4BatchSuccessReceiptV1:
+    success_authority: E4SuccessReceiptAuthorityV2 | None,
+) -> DiscoveryBatchExecutionReceiptV2 | E4BatchSuccessReceiptV2:
     """Publish every result, index, plan, and receipt in one outer transaction."""
 
     if type(token) is not PostVerifiedDiscoveryExecutionV1:
@@ -1758,7 +1763,7 @@ def _publish_postverified_discovery_execution_v1_impl(
         )
     if success_authority is not None and type(
         success_authority
-    ) is not E4SuccessReceiptAuthorityV1:
+    ) is not E4SuccessReceiptAuthorityV2:
         raise EvaluatorSupervisorError(
             "invalid_argument", "scheduled publication authority has an invalid type"
         )
@@ -1857,7 +1862,7 @@ def _publish_postverified_discovery_execution_v1_impl(
                 pending, verified_results, strict=True
             )
         )
-        receipt = DiscoveryBatchExecutionReceiptV1(
+        receipt = DiscoveryBatchExecutionReceiptV2(
             plan=plan,
             pre_batch_binding_sha256=plan.batch.binding_sha256,
             post_batch_binding_sha256=plan.batch.binding_sha256,
@@ -1867,7 +1872,7 @@ def _publish_postverified_discovery_execution_v1_impl(
         success_receipt = (
             None
             if success_authority is None
-            else claim_e4_success_receipt_authority_v1(
+            else claim_e4_success_receipt_authority_v2(
                 success_authority, receipt
             )
         )
@@ -1905,7 +1910,7 @@ def _publish_postverified_discovery_execution_v1_impl(
                 raise EvaluatorSupervisorError(
                     "result_binding_mismatch", "result bundle readback changed"
                 )
-        parsed_plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+        parsed_plan = DiscoveryBatchExecutionPlanV2.from_bytes(
             _read_bounded_regular_file(
                 staging / "execution-plan.json",
                 maximum_bytes=EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
@@ -1913,7 +1918,7 @@ def _publish_postverified_discovery_execution_v1_impl(
             expected_plan_sha256=plan.plan_sha256,
             expected_wire_sha256=plan.wire_sha256,
         )
-        parsed_receipt = DiscoveryBatchExecutionReceiptV1.from_bytes(
+        parsed_receipt = DiscoveryBatchExecutionReceiptV2.from_bytes(
             _read_bounded_regular_file(
                 staging / "execution-receipt.json",
                 maximum_bytes=EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
@@ -1926,7 +1931,7 @@ def _publish_postverified_discovery_execution_v1_impl(
                 "receipt_binding_mismatch", "execution contracts failed readback"
             )
         if success_receipt is not None:
-            parsed_success_receipt = E4BatchSuccessReceiptV1.from_bytes(
+            parsed_success_receipt = E4BatchSuccessReceiptV2.from_bytes(
                 _read_bounded_regular_file(
                     staging / E4_SUCCESS_RECEIPT_FILENAME,
                     maximum_bytes=E4_SUCCESS_RECEIPT_MAX_BYTES,
@@ -2017,7 +2022,7 @@ def _publish_postverified_discovery_execution_v1_impl(
             output / "execution-plan.json",
             maximum_bytes=EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
         )
-        final_plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+        final_plan = DiscoveryBatchExecutionPlanV2.from_bytes(
             final_plan_payload,
             expected_plan_sha256=plan.plan_sha256,
             expected_wire_sha256=plan.wire_sha256,
@@ -2026,14 +2031,14 @@ def _publish_postverified_discovery_execution_v1_impl(
             output / "execution-receipt.json",
             maximum_bytes=EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
         )
-        final_receipt = DiscoveryBatchExecutionReceiptV1.from_bytes(
+        final_receipt = DiscoveryBatchExecutionReceiptV2.from_bytes(
             final_receipt_payload,
             expected_receipt_sha256=receipt.receipt_sha256,
             expected_wire_sha256=receipt.wire_sha256,
         )
         final_success_receipt = None
         if success_receipt is not None:
-            final_success_receipt = E4BatchSuccessReceiptV1.from_bytes(
+            final_success_receipt = E4BatchSuccessReceiptV2.from_bytes(
                 _read_bounded_regular_file(
                     output / E4_SUCCESS_RECEIPT_FILENAME,
                     maximum_bytes=E4_SUCCESS_RECEIPT_MAX_BYTES,
@@ -2138,7 +2143,7 @@ def _publish_postverified_discovery_execution_v1_impl(
 def publish_postverified_discovery_execution_v1(
     token: PostVerifiedDiscoveryExecutionV1,
     output_root: str | os.PathLike[str],
-) -> DiscoveryBatchExecutionReceiptV1:
+) -> DiscoveryBatchExecutionReceiptV2:
     """Publish an E3 execution receipt without claiming E4 scheduler closure."""
 
     result = _publish_postverified_discovery_execution_v1_impl(
@@ -2146,7 +2151,7 @@ def publish_postverified_discovery_execution_v1(
         output_root,
         success_authority=None,
     )
-    if type(result) is not DiscoveryBatchExecutionReceiptV1:
+    if type(result) is not DiscoveryBatchExecutionReceiptV2:
         raise EvaluatorSupervisorError(
             "invalid_state", "unscheduled publication returned an invalid receipt"
         )
@@ -2155,12 +2160,12 @@ def publish_postverified_discovery_execution_v1(
 
 def _publish_scheduled_postverified_discovery_execution_v1(
     token: PostVerifiedDiscoveryExecutionV1,
-    authority: E4SuccessReceiptAuthorityV1,
+    authority: E4SuccessReceiptAuthorityV2,
     output_root: str | os.PathLike[str],
-) -> E4BatchSuccessReceiptV1:
+) -> E4BatchSuccessReceiptV2:
     """Internal E4 path that atomically adds the scheduler success receipt."""
 
-    if type(authority) is not E4SuccessReceiptAuthorityV1:
+    if type(authority) is not E4SuccessReceiptAuthorityV2:
         raise EvaluatorSupervisorError(
             "invalid_argument", "scheduled publication requires an exact authority"
         )
@@ -2169,7 +2174,7 @@ def _publish_scheduled_postverified_discovery_execution_v1(
         output_root,
         success_authority=authority,
     )
-    if type(result) is not E4BatchSuccessReceiptV1:
+    if type(result) is not E4BatchSuccessReceiptV2:
         raise EvaluatorSupervisorError(
             "invalid_state", "scheduled publication returned an invalid receipt"
         )

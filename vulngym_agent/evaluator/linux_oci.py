@@ -48,7 +48,7 @@ from vulngym_agent.evaluator.oci_worker_entry import (
     _read_source_record,
     _runtime_set_sha256,
 )
-from vulngym_agent.benchmark.worker_handoff import WorkerHandoffV1
+from vulngym_agent.benchmark.worker_handoff import WorkerHandoffV2
 from vulngym_agent.evaluator.runtime_evidence import (
     DockerServerIdentityV1,
     RuntimeEvidenceError,
@@ -3285,11 +3285,11 @@ def _sync_input_directory_v1(path: Path) -> None:
 
 def _source_tree_identity_v1(
     root: Path,
-    handoff: WorkerHandoffV1,
+    handoff: WorkerHandoffV2,
     *,
     require_container_readable: bool,
 ) -> tuple[tuple[object, ...], ...]:
-    if type(root) is not type(Path()) or type(handoff) is not WorkerHandoffV1:
+    if type(root) is not type(Path()) or type(handoff) is not WorkerHandoffV2:
         raise LinuxOciProviderError(
             "runtime_input_failed", "materializer source binding is invalid"
         )
@@ -3541,7 +3541,7 @@ def _runtime_wires_from_bundle_v1(bundle) -> dict[str, bytes]:
 def _materializer_input_identity_v1(
     source_root: Path,
     runtime_root: Path,
-    handoff: WorkerHandoffV1,
+    handoff: WorkerHandoffV2,
 ) -> tuple[tuple[object, ...], ...]:
     records = list(
         _source_tree_identity_v1(
@@ -3569,7 +3569,7 @@ def _materializer_input_identity_v1(
 def _materializer_input_inodes_v1(
     source_root: Path,
     runtime_root: Path,
-    handoff: WorkerHandoffV1,
+    handoff: WorkerHandoffV2,
 ) -> tuple[tuple[str, str, int, int], ...]:
     source_identity = _source_tree_identity_v1(
         source_root, handoff, require_container_readable=False
@@ -3593,7 +3593,7 @@ def _materializer_input_inodes_v1(
 class _MaterializerInputsV1:
     source_root: Path
     runtime_root: Path
-    handoff: WorkerHandoffV1
+    handoff: WorkerHandoffV2
     inodes: tuple[tuple[str, str, int, int], ...]
     identity: tuple[tuple[object, ...], ...]
 
@@ -3755,7 +3755,7 @@ def _stage_materializer_inputs_v1(
         )
     staged_source = private_root / "source"
     staged_runtime = private_root / "runtime"
-    handoff: WorkerHandoffV1 | None = None
+    handoff: WorkerHandoffV2 | None = None
     input_inodes: tuple[tuple[str, str, int, int], ...] = ()
     sealing_started = False
     try:
@@ -3893,12 +3893,12 @@ def _validate_generation_receipt_v1(
     *,
     request: OciWorkerRequestV1,
     launch: object,
-    handoff: WorkerHandoffV1,
+    handoff: WorkerHandoffV2,
     wires: dict[str, bytes],
     d2_replay: OciReplayConfigV1,
     d3_replay: OciReplayConfigV1,
 ) -> GenerationReceiptV1:
-    if type(handoff) is not WorkerHandoffV1 or type(wires) is not dict:
+    if type(handoff) is not WorkerHandoffV2 or type(wires) is not dict:
         raise LinuxOciProviderError(
             "invalid_argument", "source generation receipt binding is invalid"
         )

@@ -11,9 +11,9 @@ import tests.test_evaluator_supervisor as supervisor_tests
 import vulngym_agent.evaluator.publication_reader as reader_module
 from vulngym_agent.evaluator.e4_receipt import (
     E4_SUCCESS_RECEIPT_FILENAME,
-    E4BatchSuccessReceiptV1,
+    E4BatchSuccessReceiptV2,
     E4TaskSuccessClosureV1,
-    _issue_e4_success_receipt_authority_v1,
+    _issue_e4_success_receipt_authority_v2,
 )
 from vulngym_agent.evaluator.publication_reader import (
     E4PublicationReaderError,
@@ -40,7 +40,7 @@ class E4PublicationReaderTests(unittest.TestCase):
 
     def _scheduled_publication(
         self, name: str
-    ) -> tuple[Path, E4BatchSuccessReceiptV1]:
+    ) -> tuple[Path, E4BatchSuccessReceiptV2]:
         token = self.fixture._postverified_token()
         closures = tuple(
             E4TaskSuccessClosureV1(
@@ -53,7 +53,7 @@ class E4PublicationReaderTests(unittest.TestCase):
             )
             for item in token.pending
         )
-        authority = _issue_e4_success_receipt_authority_v1(
+        authority = _issue_e4_success_receipt_authority_v2(
             token.plan, closures
         )
         output = self.fixture.root / name
@@ -75,7 +75,7 @@ class E4PublicationReaderTests(unittest.TestCase):
             )
             for item in token.pending
         )
-        authority = _issue_e4_success_receipt_authority_v1(
+        authority = _issue_e4_success_receipt_authority_v2(
             token.plan, closures
         )
         output = self.fixture.root / "published-e4-reader-valid"

@@ -18,16 +18,16 @@ import re
 from typing import Callable, Final
 
 from vulngym_agent.evaluator.contracts import (
-    DiscoveryBatchExecutionPlanV1,
+    DiscoveryBatchExecutionPlanV2,
     EvaluatorContractError,
     _embedded_sha256_from_canonical_wire,
 )
 from vulngym_agent.evaluator.e4_receipt import (
     E4_SCHEDULER_VERSION,
-    E4BatchSuccessReceiptV1,
+    E4BatchSuccessReceiptV2,
     E4ReceiptError,
     E4TaskSuccessClosureV1,
-    _issue_e4_success_receipt_authority_v1,
+    _issue_e4_success_receipt_authority_v2,
 )
 from vulngym_agent.evaluator.linux_oci import (
     LinuxOciProviderError,
@@ -48,12 +48,12 @@ from vulngym_agent.evaluator.worker_completion import CompletedWorkerExecutionV1
 
 E4_BATCH_RUNNER_VERSION: Final[str] = E4_SCHEDULER_VERSION
 TASK_ATTEMPT_OUTCOME_KIND: Final[str] = "vulngym.discovery-task-attempt-outcome.v1"
-BATCH_ATTEMPT_REPORT_KIND: Final[str] = "vulngym.discovery-batch-attempt-report.v1"
+BATCH_ATTEMPT_REPORT_KIND: Final[str] = "vulngym.discovery-batch-attempt-report.v2"
 TASK_ATTEMPT_OUTCOME_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym discovery task attempt outcome v1\0"
 )
 BATCH_ATTEMPT_REPORT_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym discovery batch attempt report v1\0"
+    b"VulnGym discovery batch attempt report v2\0"
 )
 BATCH_ATTEMPT_REPORT_MAX_BYTES: Final[int] = 8 * 1024 * 1024
 BATCH_ATTEMPT_REPORT_MAX_JSON_NODES: Final[int] = 250_000
@@ -320,14 +320,14 @@ class TaskAttemptOutcomeV1:
 
 
 @dataclass(frozen=True, slots=True)
-class DiscoveryBatchAttemptReportV1:
+class DiscoveryBatchAttemptReportV2:
     """Canonical non-publishable closure for a failed E4 batch attempt."""
 
-    plan: DiscoveryBatchExecutionPlanV1
+    plan: DiscoveryBatchExecutionPlanV2
     status: str
     snapshot_reverified: bool
     outcomes: tuple[TaskAttemptOutcomeV1, ...]
-    contract_version: int = 1
+    contract_version: int = 2
     kind: str = BATCH_ATTEMPT_REPORT_KIND
     scheduler_version: str = E4_BATCH_RUNNER_VERSION
     max_parallelism: int = 1
@@ -336,13 +336,13 @@ class DiscoveryBatchAttemptReportV1:
 
     def __post_init__(self) -> None:
         if (
-            type(self.plan) is not DiscoveryBatchExecutionPlanV1
+            type(self.plan) is not DiscoveryBatchExecutionPlanV2
             or type(self.status) is not str
             or self.status not in {"failed_clean", "runtime_poisoned", "closure_failed"}
             or type(self.snapshot_reverified) is not bool
             or type(self.outcomes) is not tuple
             or type(self.contract_version) is not int
-            or self.contract_version != 1
+            or self.contract_version != 2
             or type(self.kind) is not str
             or self.kind != BATCH_ATTEMPT_REPORT_KIND
             or type(self.scheduler_version) is not str
@@ -355,7 +355,7 @@ class DiscoveryBatchAttemptReportV1:
             raise BatchRunnerError("invalid_contract", "batch attempt root is invalid")
         plan_wire = self.plan.to_bytes()
         try:
-            plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+            plan = DiscoveryBatchExecutionPlanV2.from_bytes(
                 plan_wire,
                 expected_plan_sha256=_embedded_sha256_from_canonical_wire(
                     plan_wire, field="plan_sha256"
@@ -488,7 +488,7 @@ class DiscoveryBatchAttemptReportV1:
         *,
         expected_report_sha256: str,
         expected_wire_sha256: str,
-    ) -> "DiscoveryBatchAttemptReportV1":
+    ) -> "DiscoveryBatchAttemptReportV2":
         _require_sha256(expected_report_sha256, name="expected_report_sha256")
         _require_sha256(expected_wire_sha256, name="expected_wire_sha256")
         if hashlib.sha256(payload).hexdigest() != expected_wire_sha256:
@@ -520,7 +520,7 @@ class DiscoveryBatchAttemptReportV1:
             )
         plan_payload = _canonical_json(raw_plan) + b"\n"
         try:
-            plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+            plan = DiscoveryBatchExecutionPlanV2.from_bytes(
                 plan_payload,
                 expected_plan_sha256=_require_sha256(
                     raw_plan.get("plan_sha256"), name="plan_sha256"
@@ -636,7 +636,7 @@ def run_prepared_discovery_batch_v1(
     *,
     provider: _Provider = run_discovery_worker_linux_oci_v1,
     runtime_reverifier: _RuntimeReverifier = reverify_linux_oci_runtime_v1,
-) -> E4BatchSuccessReceiptV1 | DiscoveryBatchAttemptReportV1:
+) -> E4BatchSuccessReceiptV2 | DiscoveryBatchAttemptReportV2:
     """Run one exact 50/20 plan in order and publish only an all-success batch."""
 
     if type(session) is not DiscoveryExecutionSession:
@@ -741,7 +741,7 @@ def run_prepared_discovery_batch_v1(
         if runtime_poisoned:
             outcomes.extend(_not_run_outcome(item) for item in plan.tasks[position + 1 :])
             session.abort()
-            return DiscoveryBatchAttemptReportV1(
+            return DiscoveryBatchAttemptReportV2(
                 plan=plan,
                 status="runtime_poisoned",
                 snapshot_reverified=False,
@@ -764,13 +764,13 @@ def run_prepared_discovery_batch_v1(
                 )
         except (BatchRunnerError, EvaluatorSupervisorError):
             session.abort()
-            return DiscoveryBatchAttemptReportV1(
+            return DiscoveryBatchAttemptReportV2(
                 plan=plan,
                 status="closure_failed",
                 snapshot_reverified=False,
                 outcomes=tuple(outcomes),
             )
-        return DiscoveryBatchAttemptReportV1(
+        return DiscoveryBatchAttemptReportV2(
             plan=plan,
             status="failed_clean",
             snapshot_reverified=True,
@@ -779,7 +779,7 @@ def run_prepared_discovery_batch_v1(
 
     token = postverify_discovery_execution_v1(session)
     try:
-        authority = _issue_e4_success_receipt_authority_v1(
+        authority = _issue_e4_success_receipt_authority_v2(
             plan,
             tuple(_success_closure(item) for item in outcomes),
         )
@@ -797,7 +797,7 @@ def run_prepared_discovery_batch_v1(
 __all__ = [
     "BATCH_ATTEMPT_REPORT_KIND",
     "BatchRunnerError",
-    "DiscoveryBatchAttemptReportV1",
+    "DiscoveryBatchAttemptReportV2",
     "E4_BATCH_RUNNER_VERSION",
     "TASK_ATTEMPT_OUTCOME_KIND",
     "TaskAttemptOutcomeV1",

@@ -38,7 +38,7 @@ from vulngym_agent.evaluator.batch_configs import (
     BatchReplayConfigManifestV1,
     TaskReplayConfigBindingV1,
 )
-from vulngym_agent.evaluator.e4_receipt import E4BatchSuccessReceiptV1
+from vulngym_agent.evaluator.e4_receipt import E4BatchSuccessReceiptV2
 from vulngym_agent.evaluator.contracts import DiscoveryTaskExecutionPlanV1
 import vulngym_agent.evaluator.final_gate_reader as reader_module
 from vulngym_agent.evaluator.final_gate_reader import (
@@ -106,7 +106,7 @@ class FinalGateReaderTests(unittest.TestCase):
             test=self.split_plans["test"],
             train=self.split_plans["train"],
         )
-        self.e4: dict[str, E4BatchSuccessReceiptV1] = {}
+        self.e4: dict[str, E4BatchSuccessReceiptV2] = {}
         self.e4_wire_payloads: dict[str, bytes] = {}
         self.projections: dict[str, VerifiedDiscoveryProjectionV1] = {}
         closures: dict[str, FinalGateSplitReceiptClosureV1] = {}
@@ -122,7 +122,7 @@ class FinalGateReaderTests(unittest.TestCase):
         )
         self.root = self._write_layout("committed-final-gate")
         self.e4_wire_patcher = mock.patch.object(
-            E4BatchSuccessReceiptV1,
+            E4BatchSuccessReceiptV2,
             "to_bytes",
             autospec=True,
             side_effect=lambda value: self.e4_wire_payloads[
@@ -138,7 +138,7 @@ class FinalGateReaderTests(unittest.TestCase):
     def _split_fixture(
         self, split: str
     ) -> tuple[
-        E4BatchSuccessReceiptV1,
+        E4BatchSuccessReceiptV2,
         FinalGateSplitReceiptClosureV1,
         VerifiedDiscoveryProjectionV1,
     ]:
@@ -284,10 +284,10 @@ class FinalGateReaderTests(unittest.TestCase):
         execution_receipt: object,
         success_closures: tuple[object, ...],
         receipt_sha256: str,
-    ) -> E4BatchSuccessReceiptV1:
+    ) -> E4BatchSuccessReceiptV2:
         """Make an exact-type inner-reader stand-in without faking its class."""
 
-        value = object.__new__(E4BatchSuccessReceiptV1)
+        value = object.__new__(E4BatchSuccessReceiptV2)
         object.__setattr__(value, "execution_receipt", execution_receipt)
         object.__setattr__(value, "success_closures", success_closures)
         object.__setattr__(value, "receipt_sha256", receipt_sha256)
@@ -637,7 +637,7 @@ class FinalGateReaderTests(unittest.TestCase):
             self._read_with_mocks(e4_override={"test": non_exact_e4})
         self.assertEqual(captured.exception.code, "binding_mismatch")
 
-        def read_e4(path: Path, **_kwargs: object) -> E4BatchSuccessReceiptV1:
+        def read_e4(path: Path, **_kwargs: object) -> E4BatchSuccessReceiptV2:
             return self.e4[Path(path).parent.name]
 
         projection_reader = mock.Mock(return_value=SimpleNamespace())
@@ -667,7 +667,7 @@ class FinalGateReaderTests(unittest.TestCase):
         e4_calls: list[str] = []
         projection_calls: list[str] = []
 
-        def read_e4(path: Path, **_kwargs: object) -> E4BatchSuccessReceiptV1:
+        def read_e4(path: Path, **_kwargs: object) -> E4BatchSuccessReceiptV2:
             split = Path(path).parent.name
             e4_calls.append(split)
             return self.e4[split]

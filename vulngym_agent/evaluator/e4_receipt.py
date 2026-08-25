@@ -17,8 +17,8 @@ import threading
 from typing import Final
 
 from vulngym_agent.evaluator.contracts import (
-    DiscoveryBatchExecutionPlanV1,
-    DiscoveryBatchExecutionReceiptV1,
+    DiscoveryBatchExecutionPlanV2,
+    DiscoveryBatchExecutionReceiptV2,
     EvaluatorContractError,
 )
 
@@ -30,13 +30,13 @@ E4_TASK_SUCCESS_CLOSURE_KIND: Final[str] = (
     "vulngym.discovery-e4-task-success-closure.v1"
 )
 E4_BATCH_SUCCESS_RECEIPT_KIND: Final[str] = (
-    "vulngym.discovery-e4-batch-success-receipt.v1"
+    "vulngym.discovery-e4-batch-success-receipt.v2"
 )
 E4_TASK_SUCCESS_CLOSURE_DIGEST_DOMAIN: Final[bytes] = (
     b"VulnGym discovery E4 task success closure v1\0"
 )
 E4_BATCH_SUCCESS_RECEIPT_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym discovery E4 batch success receipt v1\0"
+    b"VulnGym discovery E4 batch success receipt v2\0"
 )
 E4_SUCCESS_RECEIPT_MAX_BYTES: Final[int] = 8 * 1024 * 1024
 E4_SUCCESS_RECEIPT_MAX_JSON_NODES: Final[int] = 250_000
@@ -177,14 +177,14 @@ def _parse_pinned_canonical_line(
 
 def _freeze_plan(
     value: object,
-) -> DiscoveryBatchExecutionPlanV1:
-    if type(value) is not DiscoveryBatchExecutionPlanV1:
+) -> DiscoveryBatchExecutionPlanV2:
+    if type(value) is not DiscoveryBatchExecutionPlanV2:
         raise E4ReceiptError(
             "invalid_argument", "E4 success plan has an invalid exact type"
         )
     try:
         payload = value.to_bytes()
-        return DiscoveryBatchExecutionPlanV1.from_bytes(
+        return DiscoveryBatchExecutionPlanV2.from_bytes(
             payload,
             expected_plan_sha256=value.plan_sha256,
             expected_wire_sha256=hashlib.sha256(payload).hexdigest(),
@@ -197,15 +197,15 @@ def _freeze_plan(
 
 def _freeze_execution_receipt(
     value: object,
-) -> DiscoveryBatchExecutionReceiptV1:
-    if type(value) is not DiscoveryBatchExecutionReceiptV1:
+) -> DiscoveryBatchExecutionReceiptV2:
+    if type(value) is not DiscoveryBatchExecutionReceiptV2:
         raise E4ReceiptError(
             "invalid_argument",
             "E4 success execution receipt has an invalid exact type",
         )
     try:
         payload = value.to_bytes()
-        return DiscoveryBatchExecutionReceiptV1.from_bytes(
+        return DiscoveryBatchExecutionReceiptV2.from_bytes(
             payload,
             expected_receipt_sha256=value.receipt_sha256,
             expected_wire_sha256=hashlib.sha256(payload).hexdigest(),
@@ -374,7 +374,7 @@ class E4TaskSuccessClosureV1:
 
 
 def _freeze_success_closures(
-    plan: DiscoveryBatchExecutionPlanV1,
+    plan: DiscoveryBatchExecutionPlanV2,
     value: object,
 ) -> tuple[E4TaskSuccessClosureV1, ...]:
     if type(value) is not tuple:
@@ -422,10 +422,10 @@ def _freeze_success_closures(
 
 
 @dataclass(frozen=True, slots=True)
-class E4BatchSuccessReceiptV1:
+class E4BatchSuccessReceiptV2:
     """Success-only E4 closure wrapping one exact published E3 receipt."""
 
-    execution_receipt: DiscoveryBatchExecutionReceiptV1
+    execution_receipt: DiscoveryBatchExecutionReceiptV2
     success_closures: tuple[E4TaskSuccessClosureV1, ...]
     scheduler_version: str = E4_SCHEDULER_VERSION
     max_parallelism: int = 1
@@ -433,7 +433,7 @@ class E4BatchSuccessReceiptV1:
     runtime_reverify_policy: str = E4_RUNTIME_REVERIFY_POLICY
     snapshot_reverified: bool = True
     status: str = "succeeded"
-    contract_version: int = 1
+    contract_version: int = 2
     kind: str = E4_BATCH_SUCCESS_RECEIPT_KIND
     execution_receipt_sha256: str = field(init=False)
     execution_receipt_wire_sha256: str = field(init=False)
@@ -454,7 +454,7 @@ class E4BatchSuccessReceiptV1:
             or type(self.status) is not str
             or self.status != "succeeded"
             or type(self.contract_version) is not int
-            or self.contract_version != 1
+            or self.contract_version != 2
             or type(self.kind) is not str
             or self.kind != E4_BATCH_SUCCESS_RECEIPT_KIND
         ):
@@ -553,7 +553,7 @@ class E4BatchSuccessReceiptV1:
         *,
         expected_receipt_sha256: str,
         expected_wire_sha256: str,
-    ) -> "E4BatchSuccessReceiptV1":
+    ) -> "E4BatchSuccessReceiptV2":
         _require_expected_sha256(
             expected_receipt_sha256, name="expected_receipt_sha256"
         )
@@ -605,7 +605,7 @@ class E4BatchSuccessReceiptV1:
                 "invalid_binding", "nested E3 receipt semantic pin is detached"
             )
         try:
-            execution_receipt = DiscoveryBatchExecutionReceiptV1.from_bytes(
+            execution_receipt = DiscoveryBatchExecutionReceiptV2.from_bytes(
                 execution_payload,
                 expected_receipt_sha256=execution_sha256,
                 expected_wire_sha256=execution_wire_sha256,
@@ -642,7 +642,7 @@ class E4BatchSuccessReceiptV1:
         return result
 
 
-class E4SuccessReceiptAuthorityV1:
+class E4SuccessReceiptAuthorityV2:
     """Opaque one-use authority to wrap one exact E3 publication receipt."""
 
     __slots__ = (
@@ -657,7 +657,7 @@ class E4SuccessReceiptAuthorityV1:
         self,
         token: object,
         *,
-        plan: DiscoveryBatchExecutionPlanV1,
+        plan: DiscoveryBatchExecutionPlanV2,
         success_closures: tuple[E4TaskSuccessClosureV1, ...],
     ) -> None:
         if token is not _AUTHORITY_ISSUER_TOKEN:
@@ -674,9 +674,9 @@ class E4SuccessReceiptAuthorityV1:
 
     def _claim_for_execution_receipt(
         self,
-        execution_receipt: DiscoveryBatchExecutionReceiptV1,
-    ) -> E4BatchSuccessReceiptV1:
-        if type(execution_receipt) is not DiscoveryBatchExecutionReceiptV1:
+        execution_receipt: DiscoveryBatchExecutionReceiptV2,
+    ) -> E4BatchSuccessReceiptV2:
+        if type(execution_receipt) is not DiscoveryBatchExecutionReceiptV2:
             raise E4ReceiptError(
                 "invalid_argument",
                 "authority claim requires an exact E3 execution receipt",
@@ -690,7 +690,7 @@ class E4SuccessReceiptAuthorityV1:
             self.__claimed = True
             receipt = _freeze_execution_receipt(execution_receipt)
             try:
-                plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+                plan = DiscoveryBatchExecutionPlanV2.from_bytes(
                     self.__plan_wire,
                     expected_plan_sha256=self.__plan_sha256,
                     expected_wire_sha256=hashlib.sha256(
@@ -720,7 +720,7 @@ class E4SuccessReceiptAuthorityV1:
                     "detached_receipt", "E3 receipt is detached from E4 authority"
                 )
             try:
-                return E4BatchSuccessReceiptV1(
+                return E4BatchSuccessReceiptV2(
                     execution_receipt=receipt,
                     success_closures=closures,
                 )
@@ -734,26 +734,26 @@ class E4SuccessReceiptAuthorityV1:
         raise TypeError("E4 success receipt authorities are not serializable")
 
 
-def _issue_e4_success_receipt_authority_v1(
-    plan: DiscoveryBatchExecutionPlanV1,
+def _issue_e4_success_receipt_authority_v2(
+    plan: DiscoveryBatchExecutionPlanV2,
     success_closures: tuple[E4TaskSuccessClosureV1, ...],
-) -> E4SuccessReceiptAuthorityV1:
+) -> E4SuccessReceiptAuthorityV2:
     """Issue the trusted one-use E4 authority for one exact successful plan."""
 
-    return E4SuccessReceiptAuthorityV1(
+    return E4SuccessReceiptAuthorityV2(
         _AUTHORITY_ISSUER_TOKEN,
         plan=plan,
         success_closures=success_closures,
     )
 
 
-def claim_e4_success_receipt_authority_v1(
-    authority: E4SuccessReceiptAuthorityV1,
-    execution_receipt: DiscoveryBatchExecutionReceiptV1,
-) -> E4BatchSuccessReceiptV1:
+def claim_e4_success_receipt_authority_v2(
+    authority: E4SuccessReceiptAuthorityV2,
+    execution_receipt: DiscoveryBatchExecutionReceiptV2,
+) -> E4BatchSuccessReceiptV2:
     """Exact-type supervisor integration point for one E4 authority claim."""
 
-    if type(authority) is not E4SuccessReceiptAuthorityV1:
+    if type(authority) is not E4SuccessReceiptAuthorityV2:
         raise E4ReceiptError(
             "invalid_argument", "E4 success authority has an invalid exact type"
         )
@@ -767,9 +767,9 @@ __all__ = [
     "E4_SUCCESS_RECEIPT_FILENAME",
     "E4_SUCCESS_RECEIPT_MAX_BYTES",
     "E4_TASK_SUCCESS_CLOSURE_KIND",
-    "E4BatchSuccessReceiptV1",
+    "E4BatchSuccessReceiptV2",
     "E4ReceiptError",
-    "E4SuccessReceiptAuthorityV1",
+    "E4SuccessReceiptAuthorityV2",
     "E4TaskSuccessClosureV1",
-    "claim_e4_success_receipt_authority_v1",
+    "claim_e4_success_receipt_authority_v2",
 ]

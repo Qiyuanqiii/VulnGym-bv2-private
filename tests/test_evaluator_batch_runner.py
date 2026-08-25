@@ -11,11 +11,11 @@ import vulngym_agent.evaluator.batch_runner as runner_module
 import vulngym_agent.evaluator.linux_oci as linux_oci
 from vulngym_agent.evaluator.batch_runner import (
     BatchRunnerError,
-    DiscoveryBatchAttemptReportV1,
+    DiscoveryBatchAttemptReportV2,
     TaskAttemptOutcomeV1,
     run_prepared_discovery_batch_v1,
 )
-from vulngym_agent.evaluator.e4_receipt import E4SuccessReceiptAuthorityV1
+from vulngym_agent.evaluator.e4_receipt import E4SuccessReceiptAuthorityV2
 from vulngym_agent.evaluator.supervisor import (
     EvaluatorSupervisorError,
     prepare_discovery_execution_plan_v1,
@@ -156,7 +156,7 @@ class EvaluatorBatchRunnerTests(unittest.TestCase):
         publish.assert_called_once()
         published_token, authority, published_output = publish.call_args.args
         self.assertIs(published_token, token)
-        self.assertIs(type(authority), E4SuccessReceiptAuthorityV1)
+        self.assertIs(type(authority), E4SuccessReceiptAuthorityV2)
         self.assertEqual(published_output, "unused-output")
         session.abort()
 
@@ -243,7 +243,7 @@ class EvaluatorBatchRunnerTests(unittest.TestCase):
                     )
 
                 expected_order = [task.task_id for task in plan.tasks]
-                self.assertIsInstance(report, DiscoveryBatchAttemptReportV1)
+                self.assertIsInstance(report, DiscoveryBatchAttemptReportV2)
                 self.assertEqual(report.status, "failed_clean")
                 self.assertTrue(report.snapshot_reverified)
                 self.assertEqual(provider_order, expected_order)
@@ -442,7 +442,7 @@ class EvaluatorBatchRunnerTests(unittest.TestCase):
             )
             for task in plan.tasks
         )
-        report = DiscoveryBatchAttemptReportV1(
+        report = DiscoveryBatchAttemptReportV2(
             plan=plan,
             status="failed_clean",
             snapshot_reverified=True,
@@ -450,7 +450,7 @@ class EvaluatorBatchRunnerTests(unittest.TestCase):
         )
         payload = report.to_bytes()
         self.assertEqual(
-            DiscoveryBatchAttemptReportV1.from_bytes(
+            DiscoveryBatchAttemptReportV2.from_bytes(
                 payload,
                 expected_report_sha256=report.report_sha256,
                 expected_wire_sha256=report.wire_sha256,
@@ -458,11 +458,35 @@ class EvaluatorBatchRunnerTests(unittest.TestCase):
             report,
         )
 
+        legacy = json.loads(payload)
+        legacy["contract_version"] = 1
+        legacy["kind"] = "vulngym.discovery-batch-attempt-report.v1"
+        legacy_core = dict(legacy)
+        legacy_core.pop("report_sha256")
+        legacy["report_sha256"] = hashlib.sha256(
+            b"VulnGym discovery batch attempt report v1\0"
+            + json.dumps(
+                legacy_core,
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        legacy_payload = _canonical_wire(legacy)
+        with self.assertRaises(BatchRunnerError) as captured:
+            DiscoveryBatchAttemptReportV2.from_bytes(
+                legacy_payload,
+                expected_report_sha256=legacy["report_sha256"],
+                expected_wire_sha256=hashlib.sha256(legacy_payload).hexdigest(),
+            )
+        self.assertEqual(captured.exception.code, "invalid_contract")
+
         extra = json.loads(payload)
         extra["unexpected"] = False
         extra_payload = _canonical_wire(extra)
         with self.assertRaises(BatchRunnerError) as captured:
-            DiscoveryBatchAttemptReportV1.from_bytes(
+            DiscoveryBatchAttemptReportV2.from_bytes(
                 extra_payload,
                 expected_report_sha256=report.report_sha256,
                 expected_wire_sha256=hashlib.sha256(extra_payload).hexdigest(),
@@ -476,7 +500,7 @@ class EvaluatorBatchRunnerTests(unittest.TestCase):
         )
         reordered_payload = _canonical_wire(reordered)
         with self.assertRaises(BatchRunnerError) as captured:
-            DiscoveryBatchAttemptReportV1.from_bytes(
+            DiscoveryBatchAttemptReportV2.from_bytes(
                 reordered_payload,
                 expected_report_sha256=report.report_sha256,
                 expected_wire_sha256=hashlib.sha256(reordered_payload).hexdigest(),
@@ -495,7 +519,7 @@ class EvaluatorBatchRunnerTests(unittest.TestCase):
             for task in plan.tasks
         )
         with self.assertRaises(BatchRunnerError) as captured:
-            DiscoveryBatchAttemptReportV1(
+            DiscoveryBatchAttemptReportV2(
                 plan=plan,
                 status="failed_clean",
                 snapshot_reverified=True,

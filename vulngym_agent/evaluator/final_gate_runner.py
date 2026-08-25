@@ -45,14 +45,14 @@ from vulngym_agent.evaluator.batch_configs import (
     BatchReplayConfigManifestV1,
     TaskReplayConfigBindingV1,
 )
-from vulngym_agent.evaluator.batch_runner import DiscoveryBatchAttemptReportV1
+from vulngym_agent.evaluator.batch_runner import DiscoveryBatchAttemptReportV2
 from vulngym_agent.evaluator.e4_driver import (
     E4DriverError,
     fixed_e4_execution_policy_v1,
     run_e4_discovery_split_v1,
 )
 from vulngym_agent.evaluator.e4_receipt import (
-    E4BatchSuccessReceiptV1,
+    E4BatchSuccessReceiptV2,
     E4ReceiptError,
 )
 from vulngym_agent.evaluator.final_gate import (
@@ -726,14 +726,14 @@ def _freeze_e4_success(
     *,
     plan: FinalGatePlanV1,
     split_plan: FinalGateSplitPlanV1,
-) -> E4BatchSuccessReceiptV1:
-    if type(value) is not E4BatchSuccessReceiptV1:
+) -> E4BatchSuccessReceiptV2:
+    if type(value) is not E4BatchSuccessReceiptV2:
         raise FinalGateRunnerError(
             "execution_mismatch", "E4 split result has an invalid exact type"
         )
     try:
         wire = value.to_bytes()
-        result = E4BatchSuccessReceiptV1.from_bytes(
+        result = E4BatchSuccessReceiptV2.from_bytes(
             wire,
             expected_receipt_sha256=value.receipt_sha256,
             expected_wire_sha256=hashlib.sha256(wire).hexdigest(),
@@ -774,7 +774,7 @@ def _freeze_e4_success(
 
 
 def _projection_bindings(
-    success: E4BatchSuccessReceiptV1,
+    success: E4BatchSuccessReceiptV2,
 ) -> tuple[DiscoveryProjectionTaskBindingV1, ...]:
     try:
         execution = success.execution_receipt
@@ -817,7 +817,7 @@ def _project_and_read_split(
     split_root: Path,
     *,
     split_plan: FinalGateSplitPlanV1,
-    success: E4BatchSuccessReceiptV1,
+    success: E4BatchSuccessReceiptV2,
 ) -> VerifiedDiscoveryProjectionV1:
     execution_root = split_root / FINAL_GATE_EXECUTION_DIRECTORY
     projection_root = split_root / FINAL_GATE_PROJECTION_DIRECTORY
@@ -886,7 +886,7 @@ def _project_and_read_split(
 def _split_closure(
     plan: FinalGatePlanV1,
     split_plan: FinalGateSplitPlanV1,
-    success: E4BatchSuccessReceiptV1,
+    success: E4BatchSuccessReceiptV2,
     projection: VerifiedDiscoveryProjectionV1,
 ) -> FinalGateSplitReceiptClosureV1:
     try:
@@ -1192,7 +1192,7 @@ def _run_e4_final_gate(
     train_replay_config_root: object,
     test_snapshot_attestation_key: object,
     train_snapshot_attestation_key: object,
-) -> FinalGateReceiptV1 | DiscoveryBatchAttemptReportV1:
+) -> FinalGateReceiptV1 | DiscoveryBatchAttemptReportV2:
     frozen_plan = _freeze_plan(plan)
     _assert_policy_matches_plan(frozen_plan, runtime_image_id)
     docker = _validate_command(docker_executable)
@@ -1255,7 +1255,7 @@ def _run_e4_final_gate(
         runtime_image_id=runtime_image_id,
         docker_executable=docker,
     )
-    if type(test_result) is DiscoveryBatchAttemptReportV1:
+    if type(test_result) is DiscoveryBatchAttemptReportV2:
         return test_result
     test_success = _freeze_e4_success(
         test_result, plan=frozen_plan, split_plan=frozen_plan.test
@@ -1298,7 +1298,7 @@ def _run_e4_final_gate(
         runtime_image_id=runtime_image_id,
         docker_executable=docker,
     )
-    if type(train_result) is DiscoveryBatchAttemptReportV1:
+    if type(train_result) is DiscoveryBatchAttemptReportV2:
         return train_result
     train_success = _freeze_e4_success(
         train_result, plan=frozen_plan, split_plan=frozen_plan.train
@@ -1348,7 +1348,7 @@ def run_e4_final_gate_v1(
     train_replay_config_root: str | Path,
     test_snapshot_attestation_key: bytearray,
     train_snapshot_attestation_key: bytearray,
-) -> FinalGateReceiptV1 | DiscoveryBatchAttemptReportV1:
+) -> FinalGateReceiptV1 | DiscoveryBatchAttemptReportV2:
     """Run the fixed blind-test-first 20+50 E4 final-gate transaction."""
 
     try:

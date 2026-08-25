@@ -139,6 +139,7 @@ from .reviewer_projection import (
 from .sealed_snapshot import (
     ATTESTATION_ALGORITHM,
     DEFAULT_SNAPSHOT_POLICY,
+    GIT_SYMLINK_REPRESENTATION,
     SNAPSHOT_CONTRACT_VERSION,
     SNAPSHOT_POLICY_VERSION,
     SealedSnapshotError,
@@ -178,7 +179,7 @@ from .worker_handoff import (
     WORKER_HANDOFF_MAX_BYTES,
     WORKER_HANDOFF_MAX_FILES,
     WorkerHandoffError,
-    WorkerHandoffV1,
+    WorkerHandoffV2,
     build_worker_handoff,
 )
 
@@ -225,7 +226,7 @@ __all__ = [
     "WORKER_HANDOFF_MAX_BYTES",
     "WORKER_HANDOFF_MAX_FILES",
     "WorkerHandoffError",
-    "WorkerHandoffV1",
+    "WorkerHandoffV2",
     "ATTESTATION_ALGORITHM",
     "ARTIFACT_INDEX_CONTRACT_VERSION",
     "ArtifactBundleDigest",
@@ -269,6 +270,7 @@ __all__ = [
     "REVIEWER_VERDICT_DIGEST_DOMAIN",
     "REVIEWER_VALIDATION_ARTIFACT_KIND",
     "REVIEWER_VALIDATION_CONTRACT_ID",
+    "GIT_SYMLINK_REPRESENTATION",
     "SNAPSHOT_CONTRACT_VERSION",
     "SNAPSHOT_POLICY_VERSION",
     "SEALED_TREE_ACCESS_VERSION",

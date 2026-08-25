@@ -569,7 +569,7 @@ class FinalGateCliTests(unittest.TestCase):
     def test_attempt_report_is_written_as_raw_canonical_bytes_with_exit_10(self) -> None:
         report = _FakeAttempt()
         with (
-            mock.patch.object(cli, "DiscoveryBatchAttemptReportV1", _FakeAttempt),
+            mock.patch.object(cli, "DiscoveryBatchAttemptReportV2", _FakeAttempt),
             mock.patch.object(cli, "_run", return_value=report),
         ):
             status, payload = self._capture_main(self._run_argv())

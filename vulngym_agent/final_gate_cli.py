@@ -25,7 +25,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     _windows_assert_no_named_streams,
 )
 from vulngym_agent.evaluator.batch_runner import (
-    DiscoveryBatchAttemptReportV1,
+    DiscoveryBatchAttemptReportV2,
 )
 from vulngym_agent.evaluator.final_gate import (
     FINAL_GATE_MAX_WIRE_BYTES,
@@ -338,7 +338,7 @@ def _success_summary_v1(value: object) -> dict[str, object]:
 
 
 def _attempt_report_bytes(value: object) -> bytes:
-    if type(value) is not DiscoveryBatchAttemptReportV1:
+    if type(value) is not DiscoveryBatchAttemptReportV2:
         raise FinalGateCliError(
             "runner_contract_mismatch",
             "final-gate runner returned an invalid result union",

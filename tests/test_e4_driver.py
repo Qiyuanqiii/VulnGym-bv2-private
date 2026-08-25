@@ -20,10 +20,10 @@ from vulngym_agent.benchmark.sealed_tree_access import (
 )
 from vulngym_agent.benchmark.snapshot_batch import SnapshotBatchTask
 from vulngym_agent.evaluator.contracts import (
-    DiscoveryBatchExecutionPlanV1,
+    DiscoveryBatchExecutionPlanV2,
     DiscoveryTaskExecutionPlanV1,
-    SnapshotBatchBindingV1,
-    snapshot_policy_sha256_v1,
+    SnapshotBatchBindingV2,
+    snapshot_policy_sha256_v2,
 )
 import vulngym_agent.evaluator.e4_driver as driver
 from vulngym_agent.evaluator.e4_driver import (
@@ -53,7 +53,7 @@ def _sha(label: str) -> str:
 class _FakeSession:
     def __init__(
         self,
-        plan: DiscoveryBatchExecutionPlanV1,
+        plan: DiscoveryBatchExecutionPlanV2,
         events: list[str],
         *,
         abort_error: BaseException | None = None,
@@ -63,7 +63,7 @@ class _FakeSession:
         self._abort_error = abort_error
 
     @property
-    def plan(self) -> DiscoveryBatchExecutionPlanV1:
+    def plan(self) -> DiscoveryBatchExecutionPlanV2:
         return self._plan
 
     def abort(self) -> None:
@@ -73,12 +73,12 @@ class _FakeSession:
 
 
 class _FakeExecutionReceipt:
-    def __init__(self, plan: DiscoveryBatchExecutionPlanV1) -> None:
+    def __init__(self, plan: DiscoveryBatchExecutionPlanV2) -> None:
         self.plan = plan
 
 
 class _FakeSuccess:
-    def __init__(self, label: str, plan: DiscoveryBatchExecutionPlanV1) -> None:
+    def __init__(self, label: str, plan: DiscoveryBatchExecutionPlanV2) -> None:
         self._payload = f'{{"receipt":"{label}"}}\n'.encode("utf-8")
         self.receipt_sha256 = _sha(f"{label}:semantic")
         self.execution_receipt = _FakeExecutionReceipt(plan)
@@ -100,9 +100,9 @@ class _FakeSuccess:
 
 
 class _FakeFailure:
-    _plans: dict[bytes, DiscoveryBatchExecutionPlanV1] = {}
+    _plans: dict[bytes, DiscoveryBatchExecutionPlanV2] = {}
 
-    def __init__(self, label: str, plan: DiscoveryBatchExecutionPlanV1) -> None:
+    def __init__(self, label: str, plan: DiscoveryBatchExecutionPlanV2) -> None:
         self._payload = f'{{"report":"{label}"}}\n'.encode("utf-8")
         self.report_sha256 = _sha(f"{label}:semantic")
         self.plan = plan
@@ -157,7 +157,7 @@ class E4DriverTests(unittest.TestCase):
     ) -> tuple[
         tuple[SnapshotTaskSpec, ...],
         tuple[tuple[OciReplayConfigV1, OciReplayConfigV1], ...],
-        DiscoveryBatchExecutionPlanV1,
+        DiscoveryBatchExecutionPlanV2,
     ]:
         count = PROFILE_TEST_TASKS if split == "test" else PROFILE_TRAIN_TASKS
         prefix = "TEST" if split == "test" else "TRAIN"
@@ -202,7 +202,7 @@ class E4DriverTests(unittest.TestCase):
             )
 
         sealed_digest = sealed_manifest_sha256 or _sha(f"{split}:sealed")
-        binding = SnapshotBatchBindingV1(
+        binding = SnapshotBatchBindingV2(
             profile_id=PROFILE_ID,
             profile_schema_version=PROFILE_SCHEMA_VERSION,
             split=split,
@@ -247,7 +247,7 @@ class E4DriverTests(unittest.TestCase):
                     d3_replay_wire_sha256=d3.wire_sha256,
                 )
             )
-        plan = DiscoveryBatchExecutionPlanV1(
+        plan = DiscoveryBatchExecutionPlanV2(
             batch=binding,
             execution_policy=policy,
             tasks=tuple(task_plans),
@@ -321,7 +321,7 @@ class E4DriverTests(unittest.TestCase):
         replay_wire = _sha(f"{split}:replay-manifest:wire")
         with (
             mock.patch.object(driver, "DiscoveryExecutionSession", _FakeSession),
-            mock.patch.object(driver, "E4BatchSuccessReceiptV1", _FakeSuccess),
+            mock.patch.object(driver, "E4BatchSuccessReceiptV2", _FakeSuccess),
             mock.patch.object(driver, "load_answer_free_tasks", side_effect=load_tasks),
             mock.patch.object(
                 driver, "load_batch_replay_configs_v1", side_effect=load_replay
@@ -366,7 +366,7 @@ class E4DriverTests(unittest.TestCase):
         self.assertEqual(policy.d3_model_id, REPLAY_MODEL_ID)
         self.assertEqual(
             policy.snapshot_policy_sha256,
-            snapshot_policy_sha256_v1(DEFAULT_SNAPSHOT_POLICY),
+            snapshot_policy_sha256_v2(DEFAULT_SNAPSHOT_POLICY),
         )
         self.assertEqual(
             policy.d2_budget_sha256,
@@ -509,7 +509,7 @@ class E4DriverTests(unittest.TestCase):
         with (
             mock.patch.object(driver, "DiscoveryExecutionSession", _FakeSession),
             mock.patch.object(
-                driver, "DiscoveryBatchAttemptReportV1", _FakeFailure
+                driver, "DiscoveryBatchAttemptReportV2", _FakeFailure
             ),
             mock.patch.object(driver, "load_answer_free_tasks", return_value=public),
             mock.patch.object(
@@ -574,7 +574,7 @@ class E4DriverTests(unittest.TestCase):
         with (
             mock.patch.object(driver, "DiscoveryExecutionSession", _FakeSession),
             mock.patch.object(
-                driver, "DiscoveryBatchAttemptReportV1", _FakeFailure
+                driver, "DiscoveryBatchAttemptReportV2", _FakeFailure
             ),
             mock.patch.object(driver, "load_answer_free_tasks", return_value=public),
             mock.patch.object(

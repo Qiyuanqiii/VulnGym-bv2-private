@@ -35,10 +35,10 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     _windows_assert_no_named_streams,
     verify_sealed_snapshot,
 )
-from vulngym_agent.benchmark.worker_handoff import WorkerHandoffError, WorkerHandoffV1
+from vulngym_agent.benchmark.worker_handoff import WorkerHandoffError, WorkerHandoffV2
 
 
-SEALED_TREE_ACCESS_VERSION: Final[str] = "source-discovery-sealed-tree-v1"
+SEALED_TREE_ACCESS_VERSION: Final[str] = "source-discovery-sealed-tree-v2"
 
 _HARD_MAX_INVENTORY_CALLS: Final[int] = 64
 _HARD_MAX_READ_CALLS: Final[int] = 8_192
@@ -165,14 +165,18 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             value.max_depth,
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
+            value.git_symlink_representation,
         )
     except (AttributeError, TypeError):
         raise SealedTreeAccessError(
             "invalid_argument", "snapshot policy is incomplete"
         ) from None
-    if any(type(item) is not int for item in fields):
+    if (
+        any(type(item) is not int for item in fields[:-1])
+        or type(fields[-1]) is not str
+    ):
         raise SealedTreeAccessError(
-            "invalid_argument", "snapshot policy fields must be exact integers"
+            "invalid_argument", "snapshot policy fields have invalid exact types"
         )
     try:
         return SnapshotPolicy(
@@ -184,6 +188,7 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             max_depth=fields[5],
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
+            git_symlink_representation=fields[8],
         )
     except (AttributeError, TypeError, ValueError):
         raise SealedTreeAccessError(
@@ -1060,7 +1065,7 @@ class _MountedTreeAuthority(_TrustedTreeAuthority):
         self,
         *,
         tree_root: Path,
-        handoff: WorkerHandoffV1,
+        handoff: WorkerHandoffV2,
         files: tuple[SealedTreeFile, ...],
     ) -> None:
         self._snapshot_root = Path()
@@ -1544,7 +1549,7 @@ def bind_worker_tree(
             "invalid_argument", "worker tree inputs have invalid types"
         )
     try:
-        canonical_handoff = WorkerHandoffV1.from_bytes(
+        canonical_handoff = WorkerHandoffV2.from_bytes(
             handoff_payload,
             expected_sha256=expected_handoff_sha256,
             expected_wire_sha256=expected_handoff_wire_sha256,

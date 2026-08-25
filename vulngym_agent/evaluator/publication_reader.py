@@ -19,14 +19,14 @@ from vulngym_agent.benchmark.harness import (
 )
 from vulngym_agent.evaluator.contracts import (
     EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
-    DiscoveryBatchExecutionPlanV1,
-    DiscoveryBatchExecutionReceiptV1,
+    DiscoveryBatchExecutionPlanV2,
+    DiscoveryBatchExecutionReceiptV2,
     EvaluatorContractError,
 )
 from vulngym_agent.evaluator.e4_receipt import (
     E4_SUCCESS_RECEIPT_FILENAME,
     E4_SUCCESS_RECEIPT_MAX_BYTES,
-    E4BatchSuccessReceiptV1,
+    E4BatchSuccessReceiptV2,
     E4ReceiptError,
 )
 from vulngym_agent.evaluator.supervisor import (
@@ -203,11 +203,11 @@ def _read_contracts(
     expected_receipt_sha256: str,
     expected_wire_sha256: str,
 ) -> tuple[
-    E4BatchSuccessReceiptV1,
-    DiscoveryBatchExecutionReceiptV1,
-    DiscoveryBatchExecutionPlanV1,
+    E4BatchSuccessReceiptV2,
+    DiscoveryBatchExecutionReceiptV2,
+    DiscoveryBatchExecutionPlanV2,
 ]:
-    success_receipt = E4BatchSuccessReceiptV1.from_bytes(
+    success_receipt = E4BatchSuccessReceiptV2.from_bytes(
         _read_bounded_regular_file(
             root / E4_SUCCESS_RECEIPT_FILENAME,
             maximum_bytes=E4_SUCCESS_RECEIPT_MAX_BYTES,
@@ -216,7 +216,7 @@ def _read_contracts(
         expected_wire_sha256=expected_wire_sha256,
     )
     embedded_execution = success_receipt.execution_receipt
-    execution_receipt = DiscoveryBatchExecutionReceiptV1.from_bytes(
+    execution_receipt = DiscoveryBatchExecutionReceiptV2.from_bytes(
         _read_bounded_regular_file(
             root / "execution-receipt.json",
             maximum_bytes=EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
@@ -229,7 +229,7 @@ def _read_contracts(
         ),
     )
     plan = execution_receipt.plan
-    parsed_plan = DiscoveryBatchExecutionPlanV1.from_bytes(
+    parsed_plan = DiscoveryBatchExecutionPlanV2.from_bytes(
         _read_bounded_regular_file(
             root / "execution-plan.json",
             maximum_bytes=EVALUATOR_CONTRACT_MAX_WIRE_BYTES,
@@ -253,7 +253,7 @@ def read_committed_e4_discovery_execution_v1(
     *,
     expected_receipt_sha256: str,
     expected_wire_sha256: str,
-) -> E4BatchSuccessReceiptV1:
+) -> E4BatchSuccessReceiptV2:
     """Re-establish an E4 success receipt from one stable committed tree."""
 
     receipt_sha256 = _require_sha256(

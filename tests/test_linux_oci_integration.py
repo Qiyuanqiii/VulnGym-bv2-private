@@ -26,7 +26,7 @@ from vulngym_agent.benchmark.worker_handoff import build_worker_handoff
 from vulngym_agent.evaluator.contracts import (
     DiscoveryTaskExecutionPlanV1,
     ExecutionPolicyBindingV1,
-    snapshot_policy_sha256_v1,
+    snapshot_policy_sha256_v2,
 )
 from vulngym_agent.evaluator.linux_oci import (
     run_discovery_worker_linux_oci_v1,
@@ -138,7 +138,7 @@ class LinuxOciIntegrationTests(unittest.TestCase):
                 d2_model_id=d2_replay.model_id,
                 d3_backend_id=d3_replay.backend_id,
                 d3_model_id=d3_replay.model_id,
-                snapshot_policy_sha256=snapshot_policy_sha256_v1(
+                snapshot_policy_sha256=snapshot_policy_sha256_v2(
                     DEFAULT_SNAPSHOT_POLICY
                 ),
                 d2_budget_sha256=budget_limits_sha256_v1(

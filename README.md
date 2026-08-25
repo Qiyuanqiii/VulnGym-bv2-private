@@ -497,9 +497,12 @@ deterministic `required_check` verifiers for every formal Entry field.
 `python -m vulngym_agent.snapshot_cli` now prepares and independently verifies
 authenticated, source-only snapshot batches. A trusted preparer opens the full
 local Git repository, resolves each task's exact commit and root tree, and
-materializes only that commit's regular source files under
+materializes that commit's allowed source blobs under
 `bundles/<task_id>/tree`. The published tree has no `.git` directory or other
-history surface. Symlinks, Gitlinks/submodules, LFS pointers, unsafe or
+history surface. A Git mode-`120000` symlink blob is represented safely as an
+ordinary non-executable file containing its exact link-target bytes; the
+policy and manifest bind that representation, and no host symlink is created.
+Host symlinks/reparse points, Gitlinks/submodules, LFS pointers, unsafe or
 colliding paths, empty directories, and unsupported Git storage arrangements
 fail closed.
 

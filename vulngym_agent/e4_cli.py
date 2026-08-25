@@ -11,13 +11,13 @@ import sys
 from typing import Final, Sequence
 
 from vulngym_agent.evaluator.batch_runner import (
-    DiscoveryBatchAttemptReportV1,
+    DiscoveryBatchAttemptReportV2,
 )
 from vulngym_agent.evaluator.e4_driver import (
     E4DriverError,
     run_e4_discovery_split_v1,
 )
-from vulngym_agent.evaluator.e4_receipt import E4BatchSuccessReceiptV1
+from vulngym_agent.evaluator.e4_receipt import E4BatchSuccessReceiptV2
 from vulngym_agent.evaluator.publication_reader import (
     E4PublicationReaderError,
     read_committed_e4_discovery_execution_v1,
@@ -162,7 +162,7 @@ def _summary_sha256(value: object, *, name: str) -> str:
 
 
 def _success_summary_v1(value: object) -> dict[str, object]:
-    if type(value) is not E4BatchSuccessReceiptV1:
+    if type(value) is not E4BatchSuccessReceiptV2:
         raise E4CliError(
             "success_contract_mismatch",
             "verified E4 success has an invalid exact type",
@@ -226,7 +226,7 @@ def _success_summary_v1(value: object) -> dict[str, object]:
 
 
 def _attempt_report_bytes(value: object) -> bytes:
-    if type(value) is not DiscoveryBatchAttemptReportV1:
+    if type(value) is not DiscoveryBatchAttemptReportV2:
         raise E4CliError(
             "driver_contract_mismatch",
             "E4 driver returned an invalid result union",
@@ -328,7 +328,7 @@ def _run_split(args: argparse.Namespace) -> object:
             zero_secret_buffer_v1(key)
 
 
-def _verify_output(args: argparse.Namespace) -> E4BatchSuccessReceiptV1:
+def _verify_output(args: argparse.Namespace) -> E4BatchSuccessReceiptV2:
     result = read_committed_e4_discovery_execution_v1(
         args.output_root,
         expected_receipt_sha256=args.expected_receipt_sha256,
@@ -336,7 +336,7 @@ def _verify_output(args: argparse.Namespace) -> E4BatchSuccessReceiptV1:
     )
     try:
         if (
-            type(result) is not E4BatchSuccessReceiptV1
+            type(result) is not E4BatchSuccessReceiptV2
             or result.receipt_sha256 != args.expected_receipt_sha256
             or result.wire_sha256 != args.expected_wire_sha256
         ):
@@ -385,7 +385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "run-split":
             result = _run_split(args)
-            if type(result) is E4BatchSuccessReceiptV1:
+            if type(result) is E4BatchSuccessReceiptV2:
                 return _emit_success(result)
             payload = _attempt_report_bytes(result)
             _write_stdout_bytes(payload)

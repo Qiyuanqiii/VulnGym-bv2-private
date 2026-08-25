@@ -32,6 +32,8 @@ REPO_URL = "https://github.com/example/discovery-source"
 KEY = b"trusted discovery evaluator key!!"
 OTHER_KEY = b"different discovery evaluator key!"
 KEY_ID = "discovery-evaluator-2026-01"
+GIT_SYMLINK_PATH = "parent-link"
+GIT_SYMLINK_TARGET = b"../../outside/source.py"
 
 
 class SealedTreeAccessTests(unittest.TestCase):
@@ -56,6 +58,21 @@ class SealedTreeAccessTests(unittest.TestCase):
         (self.repo_path / "payload.bin").write_bytes(b"\x00\xff\x10\n")
         self._git("add", "-A")
         self._git("commit", "-q", "-m", "source")
+        link_blob = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"],
+            cwd=self.repo_path,
+            input=GIT_SYMLINK_TARGET,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout.decode("ascii").strip()
+        self._git(
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"120000,{link_blob},{GIT_SYMLINK_PATH}",
+        )
+        self._git("commit", "-q", "-m", "Git symlink bytes")
         self.commit = self._git("rev-parse", "HEAD").stdout.strip()
         self.snapshot_root = self.root / "sealed"
         prepared = prepare_sealed_snapshot(
@@ -247,6 +264,29 @@ class SealedTreeAccessTests(unittest.TestCase):
         with self.assertRaises(SealedTreeAccessError) as captured:
             bound.read_bytes("src/app.py", maximum_bytes=1024)
         self.assertEqual("access_finalized", captured.exception.code)
+
+    def test_git_symlink_record_is_read_as_regular_raw_data(self) -> None:
+        materialized = self.prepared.agent_tree / GIT_SYMLINK_PATH
+        value = os.lstat(materialized)
+        self.assertTrue(stat.S_ISREG(value.st_mode))
+        self.assertFalse(stat.S_ISLNK(value.st_mode))
+        record = next(
+            item for item in self.prepared.files if item.path == GIT_SYMLINK_PATH
+        )
+        self.assertEqual("120000", record.git_mode)
+
+        bound = self._bind()
+        inventory_record = next(
+            item for item in bound.inventory() if item.path == GIT_SYMLINK_PATH
+        )
+        self.assertEqual("120000", inventory_record.git_mode)
+        self.assertEqual(
+            GIT_SYMLINK_TARGET,
+            bound.read_bytes(
+                GIT_SYMLINK_PATH, maximum_bytes=len(GIT_SYMLINK_TARGET)
+            ),
+        )
+        self.assertTrue(bound.finalize().verification_succeeded)
 
     def test_read_and_inventory_budgets_are_hard_and_failed_reads_are_not_logged(self) -> None:
         limits = SealedTreeAccessLimits(

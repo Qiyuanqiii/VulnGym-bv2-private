@@ -25,7 +25,7 @@ from vulngym_agent.benchmark.sealed_tree_access import (
 )
 from vulngym_agent.benchmark.worker_handoff import (
     WorkerHandoffError,
-    WorkerHandoffV1,
+    WorkerHandoffV2,
 )
 from vulngym_agent.orchestrator.budget import Budget, Limits
 from vulngym_agent.orchestrator.discovery_pipeline import (
@@ -176,7 +176,7 @@ def execute_discovery_worker_v1(
     """Execute one closed D2/D3/D4 run over a key-free read-only mount."""
 
     try:
-        handoff = WorkerHandoffV1.from_bytes(
+        handoff = WorkerHandoffV2.from_bytes(
             handoff_payload,
             expected_sha256=expected_handoff_sha256,
             expected_wire_sha256=expected_handoff_wire_sha256,
