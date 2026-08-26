@@ -1741,8 +1741,9 @@ def initialize_replay_authoring_v1(
         raise ReplayAuthoringError(
             "invalid_argument", "empty authoring pair could not be constructed"
         ) from None
+    initialized = _summary(d2, d3, status="initialized")
     _publish_pair_directory(draft_root, d2, d3)
-    return _summary(d2, d3, status="initialized")
+    return initialized
 
 
 def _validate_task_and_key(

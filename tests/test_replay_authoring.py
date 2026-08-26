@@ -744,6 +744,64 @@ class ReplayAuthoringTests(unittest.TestCase):
                     "d2",
                 )
 
+    def test_init_summary_control_flow_failures_are_precommit(self) -> None:
+        for index, failure in enumerate(
+            (KeyboardInterrupt(), BaseException("summary interrupted")),
+            start=1,
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                output = self.root / f"summary-interrupted-{index}"
+                with (
+                    mock.patch.object(
+                        authoring_module, "_summary", side_effect=failure
+                    ),
+                    self.assertRaises(type(failure)) as captured,
+                ):
+                    initialize_replay_authoring_v1(TASK_ID, output)
+                self.assertIs(captured.exception, failure)
+                self.assertFalse(output.exists())
+                self.assertFalse(
+                    any(
+                        item.name.startswith(
+                            f".{output.name}.replay-authoring-"
+                        )
+                        for item in self.root.iterdir()
+                    )
+                )
+
+    def test_cli_init_summary_interrupt_is_proven_precommit(self) -> None:
+        output = self.root / "cli-summary-interrupted"
+        args = SimpleNamespace(
+            command="init",
+            draft_root=output,
+            task_file=self.root / "task-input.json",
+        )
+        parser = SimpleNamespace(parse_args=lambda _argv: args)
+        stream = io.StringIO()
+        with (
+            mock.patch.object(authoring_cli, "_parser", return_value=parser),
+            mock.patch.object(authoring_cli, "_assert_no_overlap"),
+            mock.patch.object(authoring_cli, "_task", return_value=self.task),
+            mock.patch.object(
+                authoring_module, "_summary", side_effect=KeyboardInterrupt()
+            ),
+            mock.patch.object(authoring_cli.sys, "stderr", stream),
+        ):
+            self.assertEqual(
+                authoring_cli.main([]), authoring_cli.EXIT_INTERRUPTED
+            )
+        self.assertEqual(
+            stream.getvalue(),
+            "error[interrupted]: replay authoring failed\n",
+        )
+        self.assertFalse(output.exists())
+        self.assertFalse(
+            any(
+                item.name.startswith(f".{output.name}.replay-authoring-")
+                for item in self.root.iterdir()
+            )
+        )
+
     def test_precommit_publication_interrupt_is_preserved_and_cleaned(self) -> None:
         output = self.root / "interrupted-publication"
         with mock.patch.object(

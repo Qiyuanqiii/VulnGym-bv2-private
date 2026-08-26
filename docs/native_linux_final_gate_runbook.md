@@ -1,9 +1,11 @@
 # Native Linux 20+50 final-gate runbook
 
-This runbook prepares and operates the mandatory E4 gate. It does not claim
-that the gate has run: acceptance exists only after a real native-Linux
-execution publishes a `closed` receipt, an independent readback succeeds, and
-the externally held receipt pins are retained.
+This runbook prepares and operates the mandatory E4 mechanical gate. It does
+not claim that the gate has run. A real native-Linux execution establishes
+mechanical closure only after it publishes a `closed` receipt, an independent
+readback succeeds, and the externally held receipt pins are retained. Dataset
+acceptance additionally requires the separately specified trusted-gold quality
+threshold.
 
 The preflight command is intentionally read-only with respect to Docker and
 the benchmark inputs. It never starts Docker, pulls or builds an image, creates

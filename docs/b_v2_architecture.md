@@ -207,9 +207,9 @@ finding，对等价端点稳定去重；每题默认 Top 64，`--top-k` 硬上�
 阶段 A/B 解决公开离线数据契约与结果投影，阶段 C 解决源码交付边界。原有
 `LocalStructuredT2Producer` 仍是依赖公告、fix commit 与显式 source hints 的传统 Entry
 链路；D0–D4 则以独立的 source-discovery producer/reviewer 实现纯源码多候选路径。
-最终验收前置条件 **E：隔离 50/20 运行** 已完成 E3 单题 OCI 竖切，尚缺 E4 批次调度与
-native Linux 50/20 门禁——必须在逐题进程隔离、断网、严格只读输入和 gold 物理隔离的
-环境中执行，再由独立 evaluator 汇总验收。
+最终验收前置条件 **E：隔离 50/20 运行** 已完成 E3 单题 OCI 竖切与 E4 固定批次调度、
+投影、final-gate 发布及读回实现；尚缺的是在专用 native Linux 环境中的真实 20 test +
+50 train 全量实跑及后续质量验收。
 
 ### 2.6 Sealed source snapshot（阶段 C）
 

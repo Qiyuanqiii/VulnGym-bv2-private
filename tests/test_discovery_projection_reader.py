@@ -269,6 +269,17 @@ class DiscoveryProjectionReaderTests(unittest.TestCase):
             truncated_findings=0,
             task_deferred=0,
         )
+        two_findings = harness.DiscoveryProjectionStats(
+            candidate_count=2,
+            emit_review_count=2,
+            reject_review_count=0,
+            defer_review_count=0,
+            trace_node_count=0,
+            unique_findings=2,
+            emitted_findings=2,
+            truncated_findings=0,
+            task_deferred=0,
+        )
         deferred = harness.DiscoveryProjectionStats(
             candidate_count=0,
             emit_review_count=0,
@@ -286,8 +297,16 @@ class DiscoveryProjectionReaderTests(unittest.TestCase):
         )
         for stats, statuses in (
             ((zero_finding,), ("finalized",)),
+            (
+                (zero_finding, two_findings),
+                ("finalized", "finalized"),
+            ),
             ((deferred,), ("deferred",)),
         ):
+            if len(stats) == 2:
+                self.assertEqual(
+                    len(stats), sum(item.unique_findings for item in stats)
+                )
             with self.subTest(statuses=statuses), self.assertRaises(
                 DiscoveryProjectionReaderError
             ) as captured:
