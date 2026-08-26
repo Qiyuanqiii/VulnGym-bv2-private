@@ -547,9 +547,12 @@ current invocation, but cannot prove prior store-use history or the split/task
 identity and digest pins supplied to earlier invocations.
 `--github-transport ssh` derives only the fixed
 `git@github.com:<owner>/<repo>.git` transport from the already verified HTTPS
-identity and requires an explicit SSH executable with batch/no-prompt host-key
-checking. It ignores ambient user SSH configuration and disables proxy command
-and proxy jump rewriting; an arbitrary SSH URL is never an input.
+identity and requires an explicit SSH executable. The command connects only to
+GitHub's official `ssh.github.com:443` endpoint with batch/no-prompt strict
+host-key checking. It reads no ambient user SSH configuration and disables proxy
+command and proxy jump rewriting; an arbitrary SSH URL is never an input. Git
+for Windows receives a POSIX-shell-quoted executable path, so native and bundled
+OpenSSH paths cannot be reinterpreted through backslash escaping.
 
 ```bash
 # Acquire both splits and publish canonical host-specific source maps plus a

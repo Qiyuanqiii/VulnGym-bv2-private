@@ -5,6 +5,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -891,11 +892,33 @@ class SourceAcquisitionContractTests(unittest.TestCase):
                 ssh_executable=Path("C:/trusted/ssh.exe"),
             )
         self.assertNotIn("attacker-controlled", environment["GIT_SSH_COMMAND"])
-        self.assertIn("BatchMode=yes", environment["GIT_SSH_COMMAND"])
-        self.assertIn("NumberOfPasswordPrompts=0", environment["GIT_SSH_COMMAND"])
-        self.assertIn("ProxyCommand=none", environment["GIT_SSH_COMMAND"])
-        self.assertIn("ProxyJump=none", environment["GIT_SSH_COMMAND"])
-        self.assertIn("StrictHostKeyChecking=yes", environment["GIT_SSH_COMMAND"])
+        expected_ssh = str(Path("C:/trusted/ssh.exe"))
+        if os.name == "nt":
+            expected_ssh = expected_ssh.replace("\\", "/")
+        self.assertEqual(
+            shlex.split(environment["GIT_SSH_COMMAND"]),
+            [
+                expected_ssh,
+                "-F",
+                "none",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "NumberOfPasswordPrompts=0",
+                "-o",
+                "ProxyCommand=none",
+                "-o",
+                "ProxyJump=none",
+                "-o",
+                "StrictHostKeyChecking=yes",
+                "-o",
+                "ConnectTimeout=30",
+                "-o",
+                "HostName=ssh.github.com",
+                "-p",
+                "443",
+            ],
+        )
         self.assertEqual(environment["GIT_TERMINAL_PROMPT"], "0")
         self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
 

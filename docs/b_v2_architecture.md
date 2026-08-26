@@ -249,8 +249,10 @@ required refs，逐 commit 执行 `cat-file`，拒绝 `count-objects` 中非零�
 prune-packable，并以 `git fsck --full --strict --unreachable --no-reflogs --no-progress`
 拒绝 allowed refs 不可达的对象。默认 HTTPS；受控网络必须使用 SSH 时，只能通过
 `--github-transport ssh --ssh-executable /usr/bin/ssh` 将已验证 HTTPS identity 派生为固定
-GitHub SSH transport，并强制 BatchMode/no-prompt/host-key checking、忽略 ambient 用户 SSH
-配置且禁用 ProxyCommand/ProxyJump，不能接收任意 SSH URL。
+GitHub SSH transport；连接端固定为官方 `ssh.github.com:443`，并强制
+BatchMode/no-prompt/strict host-key checking、忽略 ambient 用户 SSH 配置且禁用
+ProxyCommand/ProxyJump，不能接收任意 SSH URL。Windows 上的显式 SSH executable 会先转换为
+Git for Windows POSIX shell 可安全解析的路径，再统一做 shell quoting，避免反斜杠被吞掉。
 
 `prepare` 或 `verify` 每次调用的输入都是该 repository store 的完整授权 union。
 单 split 运行只能使用该 split 专属的独立 store；combined/reused store 每次都

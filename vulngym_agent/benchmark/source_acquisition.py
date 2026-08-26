@@ -354,20 +354,34 @@ def _git_environment(
                 "SSH transport requires an explicit SSH executable",
                 exit_status=2,
             )
+        ssh_command = str(ssh_executable)
+        if os.name == "nt":
+            # Git for Windows evaluates GIT_SSH_COMMAND with its POSIX shell.
+            # Backslashes from list2cmdline would therefore be consumed as
+            # escapes before a native or bundled OpenSSH binary can start.
+            ssh_command = ssh_command.replace("\\", "/")
         command = [
-            str(ssh_executable),
+            ssh_command,
             "-F",
-            os.devnull,
-            "-oBatchMode=yes",
-            "-oNumberOfPasswordPrompts=0",
-            "-oProxyCommand=none",
-            "-oProxyJump=none",
-            "-oStrictHostKeyChecking=yes",
-            "-oConnectTimeout=30",
+            "none",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "NumberOfPasswordPrompts=0",
+            "-o",
+            "ProxyCommand=none",
+            "-o",
+            "ProxyJump=none",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "ConnectTimeout=30",
+            "-o",
+            "HostName=ssh.github.com",
+            "-p",
+            "443",
         ]
-        environment["GIT_SSH_COMMAND"] = (
-            subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
-        )
+        environment["GIT_SSH_COMMAND"] = shlex.join(command)
         environment["GIT_SSH_VARIANT"] = "ssh"
     return environment
 
