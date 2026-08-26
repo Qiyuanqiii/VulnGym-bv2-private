@@ -120,13 +120,15 @@ def _hygiene(index: int, commit_count: int) -> dict[str, object]:
         "full_fsck": True,
         "garbage_count": 0,
         "garbage_size_kib": 0,
-        "loose_object_count": commit_count,
-        "loose_object_size_kib": 1,
+        "loose_object_count": 0,
+        "loose_object_size_kib": 0,
+        "multi_pack_index_present": True,
+        "multi_pack_index_verified": True,
         "non_shallow": True,
         "observed_ref_count": commit_count,
-        "pack_count": 0,
-        "pack_size_kib": 0,
-        "packed_object_count": 0,
+        "pack_count": 1,
+        "pack_size_kib": 1,
+        "packed_object_count": commit_count,
         "promisor_absent": True,
         "prune_packable_count": 0,
         "ref_inventory_sha256": _sha(f"refs-{index}"),
@@ -187,10 +189,12 @@ def _report_value() -> dict[str, object]:
             "requires_exact_ref_closure": True,
             "requires_final_full_fsck": True,
             "requires_final_non_shallow": True,
+            "requires_final_verified_multi_pack_index": True,
             "requires_strict_git_output": True,
             "requires_zero_garbage": True,
             "requires_zero_prune_packable": True,
             "requires_zero_unreachable_objects": True,
+            "writes_verified_multi_pack_index": True,
         },
         "github_transport": "https",
         "git_version": "2.51.0.windows.1",
@@ -364,6 +368,29 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 train_evidence=train_evidence,  # type: ignore[arg-type]
             )
 
+    def test_verified_multi_pack_index_protocol_is_required(self) -> None:
+        test_evidence, train_evidence = self._evidence()
+        for field in (
+            "requires_final_verified_multi_pack_index",
+            "writes_verified_multi_pack_index",
+        ):
+            with self.subTest(field=field):
+                raw = _report_value()
+                protocol = raw["fetch_protocol"]
+                assert isinstance(protocol, dict)
+                protocol[field] = False
+                report, report_sha256 = _report_bytes(raw)
+                with self.assertRaisesRegex(
+                    SourceSealingClosureError, "fetch protocol"
+                ):
+                    SourceSealingClosureReceiptV1.from_verified_evidence(
+                        implementation_commit="a" * 40,
+                        acquisition_report_bytes=report,
+                        expected_acquisition_report_sha256=report_sha256,
+                        test_evidence=test_evidence,  # type: ignore[arg-type]
+                        train_evidence=train_evidence,  # type: ignore[arg-type]
+                    )
+
     def test_all_ready_commit_contradictions_are_rejected(self) -> None:
         test_evidence, train_evidence = self._evidence()
         for field in (
@@ -427,6 +454,8 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 "alternates_absent",
                 "bare_repository",
                 "full_fsck",
+                "multi_pack_index_present",
+                "multi_pack_index_verified",
                 "non_shallow",
                 "promisor_absent",
                 "refs_closed",
@@ -442,6 +471,8 @@ class SourceSealingReceiptTests(unittest.TestCase):
             ("required-refs", "required_ref_count", 2),
             ("observed-refs", "observed_ref_count", 2),
             ("stored-objects", "stored_object_count", 0),
+            ("pack-count", "pack_count", 0),
+            ("packed-objects", "packed_object_count", 0),
             ("storage-entries", "storage_object_entry_count", 0),
             ("storage-bytes", "storage_object_total_bytes", 0),
         ]

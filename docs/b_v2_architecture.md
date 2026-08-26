@@ -253,6 +253,12 @@ GitHub SSH transport；连接端固定为官方 `ssh.github.com:443`，并强制
 BatchMode/no-prompt/strict host-key checking、忽略 ambient 用户 SSH 配置且禁用
 ProxyCommand/ProxyJump，不能接收任意 SSH URL。Windows 上的显式 SSH executable 会先转换为
 Git for Windows POSIX shell 可安全解析的路径，再统一做 shell quoting，避免反斜杠被吞掉。
+repository 确认 non-shallow 后，`prepare` 会在最终对象校验前写入并验证 Git 的派生
+multi-pack index；写入前后精确 refs、object counts、non-shallow 状态与 pack payload
+inventory 必须保持不变。`verify` 只验证已有索引，绝不写入。MIDX 仅用于加速大型 multi-pack store
+的对象查找，不能替代 full fsck、exact-ref closure 或逐 commit source audit。v3 contract
+要求至少一个 pack 且其中至少有一个 object；loose-only store 会被明确拒绝，而不是静默豁免
+MIDX 验证。
 
 `prepare` 或 `verify` 每次调用的输入都是该 repository store 的完整授权 union。
 单 split 运行只能使用该 split 专属的独立 store；combined/reused store 每次都
@@ -288,7 +294,7 @@ python -m vulngym_agent.source_acquisition_cli verify \
 输出的 acquisition report 不含宿主机路径，逐 commit 记录 root tree、tree mode、
 symlink/gitlink/LFS、资源上限、扫描完整性和稳定状态码；逐 repository 的 object-hygiene
 摘要还绑定精确 ref inventory、最终 non-shallow 状态、full-fsck reachability 结果、零
-garbage/prune-packable count，以及 path-free 的有界 storage inventory。source-map 因包含 canonical
+garbage/prune-packable count、已验证 MIDX 状态，以及 path-free 的有界 storage inventory。source-map 因包含 canonical
 absolute repo path，其 digest 必然与平台/部署路径绑定。fetch/fsck 成功不等于 sealed-ready：
 report 与 CLI summary 都闭合 `ready_task_count/blocked_task_count`；有 policy-blocked commit
 时仍发布诊断控制文件，但 CLI 返回 10，禁止自动化误把“取源成功”解释成“可制备”。输出

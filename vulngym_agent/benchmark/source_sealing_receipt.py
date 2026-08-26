@@ -406,7 +406,7 @@ def _freeze_acquisition(value: object) -> SourceAcquisitionClosureV1:
 
 
 @dataclass(frozen=True, slots=True)
-class _AcquisitionSplitPinV2:
+class _AcquisitionSplitPinV3:
     split: Literal["test", "train"]
     task_count: int
     task_export_sha256: str
@@ -414,11 +414,11 @@ class _AcquisitionSplitPinV2:
 
 
 @dataclass(frozen=True, slots=True)
-class _AcquisitionReportClosureV2:
+class _AcquisitionReportClosureV3:
     acquisition: SourceAcquisitionClosureV1
-    split_pins: tuple[_AcquisitionSplitPinV2, _AcquisitionSplitPinV2]
+    split_pins: tuple[_AcquisitionSplitPinV3, _AcquisitionSplitPinV3]
 
-    def split_pin(self, split: Literal["test", "train"]) -> _AcquisitionSplitPinV2:
+    def split_pin(self, split: Literal["test", "train"]) -> _AcquisitionSplitPinV3:
         for pin in self.split_pins:
             if pin.split == split:
                 return pin
@@ -427,7 +427,7 @@ class _AcquisitionReportClosureV2:
         )
 
 
-def _parse_ready_commit_v2(value: object) -> str:
+def _parse_ready_commit_v3(value: object) -> str:
     raw = _strict_object(
         value,
         keys=frozenset(
@@ -526,7 +526,7 @@ def _parse_ready_commit_v2(value: object) -> str:
     return raw["commit"]  # type: ignore[return-value]
 
 
-def _parse_repository_hygiene_v2(
+def _parse_repository_hygiene_v3(
     value: object,
     *,
     commit_count: int,
@@ -543,6 +543,8 @@ def _parse_repository_hygiene_v2(
                 "garbage_size_kib",
                 "loose_object_count",
                 "loose_object_size_kib",
+                "multi_pack_index_present",
+                "multi_pack_index_verified",
                 "non_shallow",
                 "observed_ref_count",
                 "pack_count",
@@ -569,6 +571,8 @@ def _parse_repository_hygiene_v2(
         "alternates_absent",
         "bare_repository",
         "full_fsck",
+        "multi_pack_index_present",
+        "multi_pack_index_verified",
         "non_shallow",
         "promisor_absent",
         "refs_closed",
@@ -613,6 +617,8 @@ def _parse_repository_hygiene_v2(
         or raw["stored_object_count"]
         != raw["loose_object_count"] + raw["packed_object_count"]
         or raw["stored_object_count"] < 1
+        or raw["pack_count"] < 1
+        or raw["packed_object_count"] < 1
         or raw["storage_object_entry_count"] < 1
         or raw["storage_object_total_bytes"] < 1
     ):
@@ -634,11 +640,11 @@ def _parse_repository_hygiene_v2(
     return raw, True
 
 
-def _parse_acquisition_report_v2(
+def _parse_acquisition_report_v3(
     payload: bytes,
     *,
     expected_acquisition_report_sha256: str,
-) -> _AcquisitionReportClosureV2:
+) -> _AcquisitionReportClosureV3:
     report_sha256 = _require_expected_sha256(
         expected_acquisition_report_sha256,
         name="expected_acquisition_report_sha256",
@@ -669,7 +675,7 @@ def _parse_acquisition_report_v2(
                 "task_count",
             }
         ),
-        name="source-acquisition report v2",
+        name="source-acquisition report v3",
     )
     if (
         raw["contract_version"] != SOURCE_ACQUISITION_CONTRACT_VERSION
@@ -691,10 +697,12 @@ def _parse_acquisition_report_v2(
         "requires_exact_ref_closure": True,
         "requires_final_full_fsck": True,
         "requires_final_non_shallow": True,
+        "requires_final_verified_multi_pack_index": True,
         "requires_strict_git_output": True,
         "requires_zero_garbage": True,
         "requires_zero_prune_packable": True,
         "requires_zero_unreachable_objects": True,
+        "writes_verified_multi_pack_index": True,
     }
     if raw["fetch_protocol"] != expected_protocol:
         raise SourceSealingClosureError(
@@ -705,7 +713,7 @@ def _parse_acquisition_report_v2(
         raise SourceSealingClosureError(
             "invalid_closure", "source-acquisition report requires two exports"
         )
-    split_pins: list[_AcquisitionSplitPinV2] = []
+    split_pins: list[_AcquisitionSplitPinV3] = []
     for expected_split, export_value in zip(("test", "train"), exports):
         export = _strict_object(
             export_value,
@@ -728,7 +736,7 @@ def _parse_acquisition_report_v2(
                 "invalid_closure", "source-acquisition export split/count is invalid"
             )
         split_pins.append(
-            _AcquisitionSplitPinV2(
+            _AcquisitionSplitPinV3(
                 split=expected_split,  # type: ignore[arg-type]
                 task_count=export["task_count"],  # type: ignore[arg-type]
                 task_export_sha256=_require_sha256(
@@ -759,7 +767,7 @@ def _parse_acquisition_report_v2(
             raise SourceSealingClosureError(
                 "invalid_closure", "each source repository requires commits"
             )
-        commits = tuple(_parse_ready_commit_v2(item) for item in commits_value)
+        commits = tuple(_parse_ready_commit_v3(item) for item in commits_value)
         if tuple(sorted(commits)) != commits or len(set(commits)) != len(commits):
             raise SourceSealingClosureError(
                 "invalid_contract", "repository commits are not canonical"
@@ -777,7 +785,7 @@ def _parse_acquisition_report_v2(
                 "invalid_contract", "repository URL is not canonical"
             ) from error
         repository_urls.append(repo_url)  # type: ignore[arg-type]
-        hygiene, exact_object_closure = _parse_repository_hygiene_v2(
+        hygiene, exact_object_closure = _parse_repository_hygiene_v3(
             repository["object_hygiene"], commit_count=len(commits)
         )
         success_counts["bare_repository_count"] += int(
@@ -849,7 +857,7 @@ def _parse_acquisition_report_v2(
         **success_counts,
         **residue_counts,
     )
-    return _AcquisitionReportClosureV2(
+    return _AcquisitionReportClosureV3(
         acquisition=SourceAcquisitionClosureV1(
             acquisition_report_sha256=report_sha256,
             repository_count=len(repositories),
@@ -1052,14 +1060,14 @@ def _freeze_split(value: object) -> SourceSealingSplitClosureV1:
 def _split_from_evidence(
     *,
     split: Literal["test", "train"],
-    acquisition_pin: _AcquisitionSplitPinV2,
+    acquisition_pin: _AcquisitionSplitPinV3,
     evidence: tuple[
         SnapshotBatchVerificationEvidenceV1,
         SnapshotBatchVerificationEvidenceV1,
     ],
 ) -> SourceSealingSplitClosureV1:
     if (
-        type(acquisition_pin) is not _AcquisitionSplitPinV2
+        type(acquisition_pin) is not _AcquisitionSplitPinV3
         or acquisition_pin.split != split
         or acquisition_pin.task_count != _SPLIT_COUNTS[split]
     ):
@@ -1349,9 +1357,9 @@ class SourceSealingClosureReceiptV1:
             SnapshotBatchVerificationEvidenceV1,
         ],
     ) -> "SourceSealingClosureReceiptV1":
-        """Bind a pinned v2 acquisition report and trusted verifier evidence."""
+        """Bind a pinned v3 acquisition report and trusted verifier evidence."""
 
-        report = _parse_acquisition_report_v2(
+        report = _parse_acquisition_report_v3(
             acquisition_report_bytes,
             expected_acquisition_report_sha256=(
                 expected_acquisition_report_sha256

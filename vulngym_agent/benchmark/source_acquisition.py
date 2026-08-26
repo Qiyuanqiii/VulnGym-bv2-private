@@ -63,7 +63,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 
 
 SOURCE_ACQUISITION_CONTRACT_VERSION: Final[str] = (
-    "vulngym.source-acquisition.v2"
+    "vulngym.source-acquisition.v3"
 )
 SOURCE_ACQUISITION_REPORT_NAME: Final[str] = "acquisition-report.json"
 SOURCE_NOT_READY_EXIT_STATUS: Final[int] = 10
@@ -92,6 +92,7 @@ _MAX_DEEPEN_ROUNDS: Final[int] = 2_048
 _MAX_TOTAL_NETWORK_SECONDS: Final[float] = 6.0 * 60.0 * 60.0
 _MAX_RECOVERY_ARTIFACTS: Final[int] = 256
 _MAX_RECOVERY_ARTIFACT_BYTES: Final[int] = 4 * 1024 * 1024 * 1024
+_MULTI_PACK_INDEX_NAME: Final[str] = "multi-pack-index"
 _ALLOWED_LOCAL_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
     {
         "core.bare",
@@ -1006,6 +1007,17 @@ def _read_count_objects(
     return values
 
 
+def _assert_packed_storage(
+    counts: Mapping[str, int], *, status: int
+) -> None:
+    if counts["packs"] < 1 or counts["in-pack"] < 1:
+        raise SourceAcquisitionError(
+            "packed_storage_required",
+            "source acquisition v3 requires packed storage for its verified MIDX",
+            exit_status=status,
+        )
+
+
 def _run_full_reachability_fsck(
     repository_root: Path,
     *,
@@ -1076,6 +1088,8 @@ def _object_hygiene_report(
         "garbage_size_kib": counts["size-garbage"],
         "loose_object_count": counts["count"],
         "loose_object_size_kib": counts["size"],
+        "multi_pack_index_present": True,
+        "multi_pack_index_verified": True,
         "non_shallow": storage_seal.shallow_sha256 is None,
         "observed_ref_count": len(refs),
         "pack_count": counts["packs"],
@@ -1139,6 +1153,14 @@ def _assert_all_repository_closures_unchanged(
         _assert_recovery_state_clean(repository_root, status=status)
         _assert_acquisition_config(
             repository_root,
+            git_executable=git_executable,
+            github_transport=github_transport,
+            ssh_executable=ssh_executable,
+            status=status,
+        )
+        _verify_multi_pack_index(
+            repository_root,
+            repository,
             git_executable=git_executable,
             github_transport=github_transport,
             ssh_executable=ssh_executable,
@@ -1389,6 +1411,13 @@ def _fetch_missing_commits(
             # the fixed boundary comparison above is the progress authority.
             pass
 
+    _write_verified_multi_pack_index(
+        repository_root,
+        repository,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+    )
     _, final_refs = verify_segment(verify_commit_objects=True)
     if any(
         final_refs.get(f"refs/vulngym/{commit}") != commit for commit in required
@@ -1397,6 +1426,310 @@ def _fetch_missing_commits(
             "ref_binding_mismatch",
             "segmented fetch did not close every exact ref",
             exit_status=3,
+        )
+
+
+def _write_verified_multi_pack_index(
+    repository_root: Path,
+    repository: GitRepository,
+    *,
+    git_executable: Path,
+    github_transport: Literal["https", "ssh"],
+    ssh_executable: Path | None,
+) -> None:
+    """Write only derived pack lookup metadata after full history is present."""
+
+    _assert_recovery_state_clean(repository_root, status=3)
+    if repository.history_is_shallow():
+        raise SourceAcquisitionError(
+            "shallow_repository_rejected",
+            "multi-pack indexing requires complete repository history",
+            exit_status=3,
+        )
+    refs_before = _read_vulngym_refs(
+        repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=3,
+    )
+    counts_before = _read_count_objects(
+        repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=3,
+    )
+    _assert_packed_storage(counts_before, status=3)
+    pack_payload_before = _capture_pack_payload_inventory(
+        repository_root, status=3
+    )
+    _run_multi_pack_index_command(
+        repository_root,
+        ("multi-pack-index", "write"),
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=3,
+        error_code="multi_pack_index_write_failed",
+    )
+    _assert_multi_pack_index_file(repository_root, status=3)
+
+    refs_after = _read_vulngym_refs(
+        repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=3,
+    )
+    counts_after = _read_count_objects(
+        repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=3,
+    )
+    pack_payload_after = _capture_pack_payload_inventory(
+        repository_root, status=3
+    )
+    if (
+        repository.history_is_shallow()
+        or refs_after != refs_before
+        or counts_after != counts_before
+        or pack_payload_after != pack_payload_before
+    ):
+        raise SourceAcquisitionError(
+            "repository_changed",
+            "multi-pack indexing changed repository facts",
+            exit_status=3,
+        )
+    _verify_multi_pack_index(
+        repository_root,
+        repository,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=3,
+    )
+
+
+def _capture_pack_payload_inventory(
+    repository_root: Path, *, status: int
+) -> tuple[int, int, str]:
+    """Seal pack payload metadata while excluding the derived MIDX file."""
+
+    pack_root = repository_root / "objects" / "pack"
+    records: list[bytes] = []
+    total_bytes = 0
+    try:
+        with os.scandir(pack_root) as entries:
+            for entry in entries:
+                name = entry.name
+                if name == _MULTI_PACK_INDEX_NAME:
+                    continue
+                if name.startswith(_MULTI_PACK_INDEX_NAME):
+                    raise SourceAcquisitionError(
+                        "multi_pack_index_layout_rejected",
+                        "incremental or bitmap multi-pack indexes are forbidden",
+                        exit_status=status,
+                    )
+                state = os.lstat(entry.path)
+                reparse_flag = getattr(
+                    stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                )
+                if (
+                    not stat.S_ISREG(state.st_mode)
+                    or stat.S_ISLNK(state.st_mode)
+                    or bool(
+                        getattr(state, "st_file_attributes", 0)
+                        & reparse_flag
+                    )
+                    or state.st_nlink != 1
+                ):
+                    raise SourceAcquisitionError(
+                        "pack_payload_rejected",
+                        "pack payload metadata is not a direct regular file",
+                        exit_status=status,
+                    )
+                if len(records) >= _MAX_RECOVERY_ARTIFACTS * 16:
+                    raise SourceAcquisitionError(
+                        "pack_inventory_limit",
+                        "pack payload inventory exceeds its fixed entry budget",
+                        exit_status=status,
+                    )
+                total_bytes += state.st_size
+                identity = (
+                    state.st_dev,
+                    state.st_ino,
+                    state.st_size,
+                    getattr(state, "st_mtime_ns", None),
+                )
+                records.append(
+                    name.encode("utf-8", errors="strict")
+                    + b"\0"
+                    + b":".join(
+                        str(value).encode("ascii") for value in identity
+                    )
+                )
+    except SourceAcquisitionError:
+        raise
+    except (OSError, UnicodeError) as error:
+        raise SourceAcquisitionError(
+            "pack_payload_rejected",
+            "pack payload metadata cannot be inspected safely",
+            exit_status=status,
+        ) from error
+    return (
+        len(records),
+        total_bytes,
+        hashlib.sha256(b"\0".join(sorted(records))).hexdigest(),
+    )
+
+
+def _assert_multi_pack_index_file(
+    repository_root: Path, *, status: int
+) -> tuple[int, int, int, int | None]:
+    path = repository_root / "objects" / "pack" / _MULTI_PACK_INDEX_NAME
+    try:
+        state = os.lstat(path)
+    except FileNotFoundError as error:
+        raise SourceAcquisitionError(
+            "multi_pack_index_missing",
+            "the verified multi-pack index is absent",
+            exit_status=status,
+        ) from error
+    except OSError as error:
+        raise SourceAcquisitionError(
+            "multi_pack_index_rejected",
+            "the multi-pack index cannot be inspected",
+            exit_status=status,
+        ) from error
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    if (
+        not stat.S_ISREG(state.st_mode)
+        or stat.S_ISLNK(state.st_mode)
+        or bool(getattr(state, "st_file_attributes", 0) & reparse_flag)
+        or state.st_nlink != 1
+    ):
+        raise SourceAcquisitionError(
+            "multi_pack_index_rejected",
+            "the multi-pack index is not a direct single-link regular file",
+            exit_status=status,
+        )
+    return (
+        state.st_dev,
+        state.st_ino,
+        state.st_size,
+        getattr(state, "st_mtime_ns", None),
+    )
+
+
+def _run_multi_pack_index_command(
+    repository_root: Path,
+    arguments: tuple[str, ...],
+    *,
+    git_executable: Path,
+    github_transport: Literal["https", "ssh"],
+    ssh_executable: Path | None,
+    status: int,
+    error_code: str,
+) -> None:
+    _assert_recovery_state_clean(repository_root, status=status)
+    try:
+        result = _run_git(
+            git_executable,
+            repository_root,
+            arguments,
+            github_transport=github_transport,
+            ssh_executable=ssh_executable,
+            timeout_seconds=_GIT_FSCK_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except BaseException as error:
+        try:
+            _assert_recovery_state_clean(repository_root, status=status)
+        except SourceAcquisitionError as cleanup_error:
+            raise cleanup_error from error
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        raise SourceAcquisitionError(
+            error_code,
+            "a bounded multi-pack index operation failed",
+            exit_status=status,
+        ) from error
+    command_error: SourceAcquisitionError | None = None
+    if result.returncode != 0 or result.stdout or result.stderr:
+        command_error = SourceAcquisitionError(
+            error_code,
+            "Git rejected a multi-pack index operation",
+            exit_status=status,
+        )
+    try:
+        _assert_recovery_state_clean(repository_root, status=status)
+    except SourceAcquisitionError as cleanup_error:
+        if command_error is not None:
+            raise cleanup_error from command_error
+        raise
+    if command_error is not None:
+        raise command_error
+
+
+def _verify_multi_pack_index(
+    repository_root: Path,
+    repository: GitRepository,
+    *,
+    git_executable: Path,
+    github_transport: Literal["https", "ssh"],
+    ssh_executable: Path | None,
+    status: int,
+) -> None:
+    """Verify the required MIDX without mutating a prepared repository."""
+
+    _assert_recovery_state_clean(repository_root, status=status)
+    pack_payload_before = _capture_pack_payload_inventory(
+        repository_root, status=status
+    )
+    index_before = _assert_multi_pack_index_file(
+        repository_root, status=status
+    )
+    try:
+        storage_before = repository.capture_storage_seal()
+    except GitFactError as error:
+        raise SourceAcquisitionError(
+            "repository_rejected",
+            "repository storage failed its multi-pack index seal",
+            exit_status=status,
+        ) from error
+    _run_multi_pack_index_command(
+        repository_root,
+        ("multi-pack-index", "verify"),
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=status,
+        error_code="multi_pack_index_verify_failed",
+    )
+    index_after = _assert_multi_pack_index_file(repository_root, status=status)
+    pack_payload_after = _capture_pack_payload_inventory(
+        repository_root, status=status
+    )
+    try:
+        storage_after = repository.capture_storage_seal()
+    except GitFactError as error:
+        raise SourceAcquisitionError(
+            "repository_rejected",
+            "repository storage changed during multi-pack index verification",
+            exit_status=status,
+        ) from error
+    if (
+        index_after != index_before
+        or pack_payload_after != pack_payload_before
+        or storage_after != storage_before
+    ):
+        raise SourceAcquisitionError(
+            "repository_changed",
+            "repository storage changed during multi-pack index verification",
+            exit_status=status,
         )
 
 
@@ -1443,6 +1776,15 @@ def _verify_repository(
     )
     counts_before = _read_count_objects(
         repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=status,
+    )
+    _assert_packed_storage(counts_before, status=status)
+    _verify_multi_pack_index(
+        repository_root,
+        repository,
         git_executable=git_executable,
         github_transport=github_transport,
         ssh_executable=ssh_executable,
@@ -1590,6 +1932,8 @@ def _acquisition_report_payload(
                 "requires_zero_garbage": True,
                 "requires_zero_prune_packable": True,
                 "requires_zero_unreachable_objects": True,
+                "requires_final_verified_multi_pack_index": True,
+                "writes_verified_multi_pack_index": True,
             },
             "github_transport": github_transport,
             "git_version": git_version,

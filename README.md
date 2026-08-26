@@ -538,6 +538,14 @@ required refs exactly, verifies every commit with `cat-file`, rejects nonzero
 `count-objects` garbage or prune-packable counts, and runs
 `git fsck --full --strict --unreachable --no-reflogs --no-progress` to reject
 objects unreachable from the allowed refs. HTTPS is the default transport.
+After a repository is confirmed non-shallow, `prepare` writes and verifies
+Git's derived multi-pack index before final object checks. The operation must
+leave exact refs, object counts, non-shallow state, and the pack payload
+inventory unchanged. `verify` only verifies the existing index and never writes one.
+MIDX accelerates lookup in large multi-pack stores; it does not replace full
+fsck, exact-ref closure, or per-commit source auditing. The v3 contract requires
+at least one pack containing at least one object; loose-only stores are rejected
+instead of being silently exempted from MIDX verification.
 Each prepare or verify invocation is the complete authorization union for its
 repository store. A single-split run therefore requires a dedicated independent
 store; every combined or reused store run must supply the same complete
@@ -587,8 +595,8 @@ python -m vulngym_agent.source_acquisition_cli verify \
 symlink/gitlink/LFS counts, policy limits, scan completeness, and stable
 readiness status codes without host paths. Its per-repository object-hygiene
 summary also binds the exact ref inventory, final non-shallow state, full-fsck
-reachability result, zero garbage/prune-packable counts, and a path-free bounded
-storage inventory. `test-source-map.json` and
+reachability result, verified MIDX state, zero garbage/prune-packable counts,
+and a path-free bounded storage inventory. `test-source-map.json` and
 `train-source-map.json` intentionally contain canonical absolute repository
 paths, so their digests are host-specific. A successful fetch is not a claim
 that sealed preparation is ready: the JSON summary and report close over

@@ -230,6 +230,14 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         self.assertTrue(
             report["fetch_protocol"]["requires_zero_unreachable_objects"]
         )
+        self.assertTrue(
+            report["fetch_protocol"]["writes_verified_multi_pack_index"]
+        )
+        self.assertTrue(
+            report["fetch_protocol"][
+                "requires_final_verified_multi_pack_index"
+            ]
+        )
         self.assertTrue(report["ready"])
         self.assertEqual(report["ready_task_count"], 70)
         self.assertEqual(report["blocked_task_count"], 0)
@@ -241,6 +249,8 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         self.assertTrue(hygiene["full_fsck"])
         self.assertEqual(hygiene["garbage_count"], 0)
         self.assertEqual(hygiene["garbage_size_kib"], 0)
+        self.assertTrue(hygiene["multi_pack_index_present"])
+        self.assertTrue(hygiene["multi_pack_index_verified"])
         self.assertTrue(hygiene["non_shallow"])
         self.assertTrue(hygiene["promisor_absent"])
         self.assertEqual(hygiene["observed_ref_count"], 70)
@@ -311,6 +321,11 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         )
         self.assertFalse((repository / "objects" / "info" / "alternates").exists())
         self.assertFalse((repository / "shallow").exists())
+        multi_pack_index = repository / "objects" / "pack" / "multi-pack-index"
+        self.assertTrue(multi_pack_index.is_file())
+        self._git(
+            "multi-pack-index", "verify", cwd=repository
+        )
         test_map = json.loads(
             (self.output / "test-source-map.json").read_bytes()
         )
@@ -321,11 +336,14 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
 
         real_run = source_acquisition._run_git
         fetches: list[tuple[str, ...]] = []
+        multi_pack_operations: list[tuple[str, ...]] = []
 
         def traced_run(*args, **kwargs):
             arguments = tuple(args[2])
             if arguments and arguments[0] == "fetch":
                 fetches.append(arguments)
+            if arguments and arguments[0] == "multi-pack-index":
+                multi_pack_operations.append(arguments)
             return real_run(*args, **kwargs)
 
         with mock.patch.object(source_acquisition, "_run_git", side_effect=traced_run):
@@ -337,7 +355,12 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(second, summary)
         self.assertEqual(fetches, [])
+        self.assertIn(
+            ("multi-pack-index", "write"),
+            multi_pack_operations,
+        )
 
+        multi_pack_operations.clear()
         with mock.patch.object(source_acquisition, "_run_git", side_effect=traced_run):
             verified = verify_source_acquisition(
                 self.inputs,
@@ -347,6 +370,64 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(verified, summary)
         self.assertEqual(fetches, [])
+        self.assertTrue(multi_pack_operations)
+        self.assertFalse(
+            any("write" in arguments for arguments in multi_pack_operations)
+        )
+
+    def test_single_pack_midx_is_verified_and_corruption_is_read_only(self) -> None:
+        repository_root = self.root / "single-pack.git"
+        self._git("init", "--quiet", "--bare", str(repository_root))
+        commit = self.all_commits[-1]
+        self._git(
+            "fetch",
+            "--atomic",
+            "--force",
+            "--no-progress",
+            "--no-recurse-submodules",
+            "--no-tags",
+            "--no-write-fetch-head",
+            self.origin.as_uri(),
+            f"+{commit}:refs/vulngym/{commit}",
+            cwd=repository_root,
+        )
+        self._git("repack", "-ad", cwd=repository_root)
+        pack_root = repository_root / "objects" / "pack"
+        self.assertEqual(len(tuple(pack_root.glob("*.pack"))), 1)
+        repository = source_acquisition.GitRepository(
+            repository_root,
+            timeout_seconds=30,
+            git_executable=self.git,
+        )
+        source_acquisition._write_verified_multi_pack_index(
+            repository_root,
+            repository,
+            git_executable=self.git,
+            github_transport="https",
+            ssh_executable=None,
+        )
+        multi_pack_index = pack_root / "multi-pack-index"
+        self.assertTrue(multi_pack_index.is_file())
+        self._git("multi-pack-index", "verify", cwd=repository_root)
+
+        corrupted = bytearray(multi_pack_index.read_bytes())
+        self.assertGreater(len(corrupted), 12)
+        corrupted[-1] ^= 1
+        multi_pack_index.write_bytes(corrupted)
+        with self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._verify_multi_pack_index(
+                repository_root,
+                repository,
+                git_executable=self.git,
+                github_transport="https",
+                ssh_executable=None,
+                status=4,
+            )
+        self.assertEqual(
+            captured.exception.code, "multi_pack_index_verify_failed"
+        )
+        self.assertEqual(captured.exception.exit_status, 4)
+        self.assertEqual(multi_pack_index.read_bytes(), corrupted)
 
     def test_post_publish_global_closure_failure_is_uncertain(self) -> None:
         failure = SourceAcquisitionError(
@@ -749,6 +830,8 @@ class SourceAcquisitionContractTests(unittest.TestCase):
         ), mock.patch.object(
             source_acquisition, "_assert_acquisition_config"
         ), mock.patch.object(
+            source_acquisition, "_verify_multi_pack_index"
+        ), mock.patch.object(
             source_acquisition, "_read_vulngym_refs", side_effect=refs_for_root
         ), mock.patch.object(
             source_acquisition, "_read_count_objects", return_value=counts
@@ -807,6 +890,292 @@ class SourceAcquisitionContractTests(unittest.TestCase):
                 for argument in arguments
             )
         )
+
+    def test_multi_pack_index_is_verified_and_preserves_repository_facts(self) -> None:
+        commit = "1" * 40
+        refs = {f"refs/vulngym/{commit}": commit}
+        counts = {
+            "count": 0,
+            "size": 0,
+            "in-pack": 10,
+            "packs": 2,
+            "size-pack": 1,
+            "prune-packable": 0,
+            "garbage": 0,
+            "size-garbage": 0,
+        }
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.history_is_shallow.side_effect = (False, False)
+        storage_seal = object()
+        repository.capture_storage_seal.return_value = storage_seal
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ) as recovery, mock.patch.object(
+            source_acquisition, "_read_vulngym_refs", return_value=refs
+        ) as read_refs, mock.patch.object(
+            source_acquisition, "_read_count_objects", return_value=counts
+        ) as read_counts, mock.patch.object(
+            source_acquisition,
+            "_capture_pack_payload_inventory",
+            return_value=(4, 100, "a" * 64),
+        ) as pack_inventory, mock.patch.object(
+            source_acquisition,
+            "_assert_multi_pack_index_file",
+            return_value=(1, 2, 3, 4),
+        ) as index_file, mock.patch.object(
+            source_acquisition, "_run_git", return_value=completed
+        ) as runner:
+            source_acquisition._write_verified_multi_pack_index(
+                Path("C:/trusted/repository.git"),
+                repository,
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+            )
+        self.assertEqual(
+            [call.args[2] for call in runner.call_args_list],
+            [
+                ("multi-pack-index", "write"),
+                ("multi-pack-index", "verify"),
+            ],
+        )
+        self.assertGreaterEqual(recovery.call_count, 6)
+        self.assertEqual(read_refs.call_count, 2)
+        self.assertEqual(read_counts.call_count, 2)
+        self.assertEqual(pack_inventory.call_count, 4)
+        self.assertEqual(index_file.call_count, 3)
+        self.assertEqual(repository.history_is_shallow.call_count, 2)
+        self.assertEqual(repository.capture_storage_seal.call_count, 2)
+
+    def test_multi_pack_index_rejects_changed_object_counts(self) -> None:
+        refs = {"refs/vulngym/" + "1" * 40: "1" * 40}
+        before = {
+            "count": 0,
+            "size": 0,
+            "in-pack": 10,
+            "packs": 2,
+            "size-pack": 1,
+            "prune-packable": 0,
+            "garbage": 0,
+            "size-garbage": 0,
+        }
+        after = dict(before, packs=3)
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.history_is_shallow.side_effect = (False, False)
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition, "_read_vulngym_refs", return_value=refs
+        ), mock.patch.object(
+            source_acquisition, "_read_count_objects", side_effect=(before, after)
+        ), mock.patch.object(
+            source_acquisition,
+            "_capture_pack_payload_inventory",
+            return_value=(4, 100, "a" * 64),
+        ), mock.patch.object(
+            source_acquisition,
+            "_assert_multi_pack_index_file",
+            return_value=(1, 2, 3, 4),
+        ), mock.patch.object(
+            source_acquisition, "_run_git", return_value=completed
+        ), self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._write_verified_multi_pack_index(
+                Path("C:/trusted/repository.git"),
+                repository,
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+            )
+        self.assertEqual(captured.exception.code, "repository_changed")
+
+    def test_multi_pack_index_requires_at_least_one_pack(self) -> None:
+        counts = {
+            "count": 3,
+            "size": 1,
+            "in-pack": 0,
+            "packs": 0,
+            "size-pack": 0,
+            "prune-packable": 0,
+            "garbage": 0,
+            "size-garbage": 0,
+        }
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.history_is_shallow.return_value = False
+        with mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition, "_read_vulngym_refs", return_value={}
+        ), mock.patch.object(
+            source_acquisition, "_read_count_objects", return_value=counts
+        ), mock.patch.object(
+            source_acquisition, "_run_git"
+        ) as runner, self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._write_verified_multi_pack_index(
+                Path("C:/trusted/repository.git"),
+                repository,
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+            )
+        self.assertEqual(captured.exception.code, "packed_storage_required")
+        self.assertEqual(captured.exception.exit_status, 3)
+        runner.assert_not_called()
+        with self.assertRaises(SourceAcquisitionError) as verify_captured:
+            source_acquisition._assert_packed_storage(counts, status=4)
+        self.assertEqual(
+            verify_captured.exception.code, "packed_storage_required"
+        )
+        self.assertEqual(verify_captured.exception.exit_status, 4)
+
+    def test_multi_pack_index_failure_preserves_cleanup_required(self) -> None:
+        failed = subprocess.CompletedProcess(
+            args=(), returncode=3, stdout=b"", stderr=b"simulated failure"
+        )
+        cleanup = SourceAcquisitionError(
+            "cleanup_required", "simulated lock residue", exit_status=3
+        )
+        with mock.patch.object(
+            source_acquisition,
+            "_assert_recovery_state_clean",
+            side_effect=(None, cleanup),
+        ), mock.patch.object(
+            source_acquisition, "_run_git", return_value=failed
+        ), self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._run_multi_pack_index_command(
+                Path("C:/trusted/repository.git"),
+                ("multi-pack-index", "write"),
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+                status=3,
+                error_code="multi_pack_index_write_failed",
+            )
+        self.assertIs(captured.exception, cleanup)
+        self.assertIsInstance(
+            captured.exception.__cause__, SourceAcquisitionError
+        )
+        self.assertEqual(
+            captured.exception.__cause__.code,
+            "multi_pack_index_write_failed",
+        )
+
+    def test_multi_pack_index_interrupt_is_preserved_unless_cleanup_is_required(
+        self,
+    ) -> None:
+        for interruption in (KeyboardInterrupt(), SystemExit(7)):
+            with self.subTest(interruption=type(interruption).__name__), (
+                mock.patch.object(
+                    source_acquisition,
+                    "_assert_recovery_state_clean",
+                    side_effect=(None, None),
+                )
+            ), mock.patch.object(
+                source_acquisition, "_run_git", side_effect=interruption
+            ), self.assertRaises(type(interruption)) as captured:
+                source_acquisition._run_multi_pack_index_command(
+                    Path("C:/trusted/repository.git"),
+                    ("multi-pack-index", "write"),
+                    git_executable=Path("C:/trusted/git.exe"),
+                    github_transport="https",
+                    ssh_executable=None,
+                    status=3,
+                    error_code="multi_pack_index_write_failed",
+                )
+            self.assertIs(captured.exception, interruption)
+
+        interruption = KeyboardInterrupt()
+        cleanup = SourceAcquisitionError(
+            "cleanup_required", "simulated MIDX lock residue", exit_status=3
+        )
+        with mock.patch.object(
+            source_acquisition,
+            "_assert_recovery_state_clean",
+            side_effect=(None, cleanup),
+        ), mock.patch.object(
+            source_acquisition, "_run_git", side_effect=interruption
+        ), self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._run_multi_pack_index_command(
+                Path("C:/trusted/repository.git"),
+                ("multi-pack-index", "write"),
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+                status=3,
+                error_code="multi_pack_index_write_failed",
+            )
+        self.assertIs(captured.exception, cleanup)
+        self.assertIs(captured.exception.__cause__, interruption)
+
+    def test_multi_pack_index_verify_is_read_only_and_requires_stable_storage(
+        self,
+    ) -> None:
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.capture_storage_seal.side_effect = (object(), object())
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition,
+            "_capture_pack_payload_inventory",
+            return_value=(4, 100, "a" * 64),
+        ), mock.patch.object(
+            source_acquisition,
+            "_assert_multi_pack_index_file",
+            return_value=(1, 2, 3, 4),
+        ), mock.patch.object(
+            source_acquisition, "_run_git", return_value=completed
+        ) as runner, self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._verify_multi_pack_index(
+                Path("C:/trusted/repository.git"),
+                repository,
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+                status=4,
+            )
+        self.assertEqual(captured.exception.code, "repository_changed")
+        self.assertEqual(captured.exception.exit_status, 4)
+        self.assertEqual(
+            runner.call_args.args[2],
+            ("multi-pack-index", "verify"),
+        )
+
+    def test_multi_pack_index_verify_rejects_missing_file_without_git(self) -> None:
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        missing = SourceAcquisitionError(
+            "multi_pack_index_missing", "simulated missing MIDX", exit_status=4
+        )
+        with mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition,
+            "_capture_pack_payload_inventory",
+            return_value=(4, 100, "a" * 64),
+        ), mock.patch.object(
+            source_acquisition,
+            "_assert_multi_pack_index_file",
+            side_effect=missing,
+        ), mock.patch.object(
+            source_acquisition, "_run_git"
+        ) as runner, self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._verify_multi_pack_index(
+                Path("C:/trusted/repository.git"),
+                repository,
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+                status=4,
+            )
+        self.assertIs(captured.exception, missing)
+        runner.assert_not_called()
 
     def test_reachability_fsck_uses_only_explicit_commit_roots(self) -> None:
         commits = ("2" * 40, "1" * 40)
@@ -1129,6 +1498,18 @@ class SourceAcquisitionContractTests(unittest.TestCase):
             )
 
             artifact.unlink()
+            multi_pack_lock = pack / "multi-pack-index.lock"
+            multi_pack_lock.write_bytes(b"unresolved MIDX transaction")
+            with self.assertRaises(SourceAcquisitionError) as captured:
+                source_acquisition._assert_recovery_state_clean(
+                    repository, status=3
+                )
+            self.assertEqual(captured.exception.code, "cleanup_required")
+            self.assertEqual(
+                multi_pack_lock.read_bytes(), b"unresolved MIDX transaction"
+            )
+
+            multi_pack_lock.unlink()
             promisor = pack / ("a" * 40 + ".promisor")
             promisor.write_bytes(b"")
             with self.assertRaises(SourceAcquisitionError) as captured:
