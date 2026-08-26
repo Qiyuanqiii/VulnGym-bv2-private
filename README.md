@@ -530,9 +530,21 @@ verified task exports; operators do not hand-author repository identities or
 commit pins. It accepts canonical `https://github.com/<owner>/<repo>`
 identities only, creates one independent bare SHA-1 object store at
 `<repository-store>/<owner>/<repo>.git`, and binds every exact commit to
-`refs/vulngym/<commit>`. Fetches are full (no shallow/filter/alternate/worktree
-storage), non-interactive, followed by storage checks, exact ref/cat-file
-verification, and `git fsck --full --strict`. HTTPS is the default transport.
+`refs/vulngym/<commit>`. Acquisition may start with bounded shallow fetches and
+repeatedly deepen, but readiness and publication require a final non-shallow
+repository. Filter/promisor/alternate/worktree storage and interactive prompts
+remain forbidden. Final verification requires the observed ref set to equal the
+required refs exactly, verifies every commit with `cat-file`, rejects nonzero
+`count-objects` garbage or prune-packable counts, and runs
+`git fsck --full --strict --unreachable --no-reflogs --no-progress` to reject
+objects unreachable from the allowed refs. HTTPS is the default transport.
+Each prepare or verify invocation is the complete authorization union for its
+repository store. A single-split run therefore requires a dedicated independent
+store; every combined or reused store run must supply the same complete
+test+train union and exact digest pins. This is an operator/deployment contract:
+the implementation enforces the exact refs and object closure derived from the
+current invocation, but cannot prove prior store-use history or the split/task
+identity and digest pins supplied to earlier invocations.
 `--github-transport ssh` derives only the fixed
 `git@github.com:<owner>/<repo>.git` transport from the already verified HTTPS
 identity and requires an explicit SSH executable with batch/no-prompt host-key
@@ -570,7 +582,10 @@ python -m vulngym_agent.source_acquisition_cli verify \
 
 `acquisition-report.json` records per-commit root tree, Git mode counts,
 symlink/gitlink/LFS counts, policy limits, scan completeness, and stable
-readiness status codes without host paths. `test-source-map.json` and
+readiness status codes without host paths. Its per-repository object-hygiene
+summary also binds the exact ref inventory, final non-shallow state, full-fsck
+reachability result, zero garbage/prune-packable counts, and a path-free bounded
+storage inventory. `test-source-map.json` and
 `train-source-map.json` intentionally contain canonical absolute repository
 paths, so their digests are host-specific. A successful fetch is not a claim
 that sealed preparation is ready: the JSON summary and report close over

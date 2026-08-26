@@ -3,6 +3,8 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -56,6 +58,28 @@ class SourceAcquisitionCliTests(unittest.TestCase):
             DIGEST,
             *extra,
         ]
+
+    def test_repository_store_help_states_complete_union_contract(self) -> None:
+        for command in ("prepare", "verify"):
+            with self.subTest(command=command):
+                standard_output = StringIO()
+                with redirect_stdout(standard_output), self.assertRaises(
+                    SystemExit
+                ) as captured:
+                    source_acquisition_cli.main([command, "--help"])
+                self.assertEqual(captured.exception.code, 0)
+                help_text = " ".join(standard_output.getvalue().split())
+                self.assertIn(
+                    "single split runs require an independent store", help_text
+                )
+                self.assertIn(
+                    "same complete test+train union and exact digest pins",
+                    help_text,
+                )
+                self.assertIn(
+                    "cannot prove prior store-use history",
+                    help_text,
+                )
 
     def test_prepare_prints_canonical_summary_and_returns_ready_status(self) -> None:
         standard_output = StringIO()
@@ -144,6 +168,151 @@ class SourceAcquisitionCliTests(unittest.TestCase):
                     standard_error.getvalue(),
                     "error[publication_uncertain]: source acquisition output may be committed\n",
                 )
+
+    def test_verify_stdout_control_flow_failures_are_stable_io_failures(self) -> None:
+        class FatalOutput(BaseException):
+            pass
+
+        arguments = self._argv()
+        arguments[0] = "verify"
+        for failure in (
+            BrokenPipeError("closed stdout"),
+            KeyboardInterrupt(),
+            FatalOutput(),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                standard_error = StringIO()
+                with (
+                    mock.patch.object(
+                        source_acquisition_cli,
+                        "verify_source_acquisition",
+                        return_value=_summary(ready=True),
+                    ),
+                    mock.patch.object(
+                        source_acquisition_cli,
+                        "_print_json",
+                        side_effect=failure,
+                    ),
+                    redirect_stderr(standard_error),
+                ):
+                    status = source_acquisition_cli.main(arguments)
+                self.assertEqual(5, status)
+                self.assertEqual(
+                    "error[io_failed]: source acquisition command failed\n",
+                    standard_error.getvalue(),
+                )
+                self.assertNotIn("C:/trusted", standard_error.getvalue())
+
+    def test_failed_injected_stdout_is_detached_but_not_closed(self) -> None:
+        class FlushFailureStringIO(StringIO):
+            def flush(self) -> None:
+                raise BrokenPipeError("closed stdout")
+
+        expected_errors = {
+            "prepare": (
+                "error[publication_uncertain]: "
+                "source acquisition output may be committed\n"
+            ),
+            "verify": "error[io_failed]: source acquisition command failed\n",
+        }
+        for command, expected_error in expected_errors.items():
+            with self.subTest(command=command):
+                output = FlushFailureStringIO()
+                standard_error = StringIO()
+                arguments = self._argv()
+                arguments[0] = command
+                operation = (
+                    "prepare_source_acquisition"
+                    if command == "prepare"
+                    else "verify_source_acquisition"
+                )
+                with (
+                    mock.patch.object(
+                        source_acquisition_cli,
+                        operation,
+                        return_value=_summary(ready=True),
+                    ),
+                    mock.patch.object(sys, "stdout", output),
+                    redirect_stderr(standard_error),
+                ):
+                    status = source_acquisition_cli.main(arguments)
+                    self.assertIsNone(sys.stdout)
+
+                self.assertEqual(5, status)
+                self.assertFalse(output.closed)
+                self.assertEqual(expected_error, standard_error.getvalue())
+
+    def test_closed_stdout_pipe_has_stable_process_exit_status(self) -> None:
+        child_code = """
+import sys
+from unittest import mock
+
+from vulngym_agent import source_acquisition_cli
+
+command = sys.argv[1]
+summary = type(
+    "Summary",
+    (),
+    {"ready": True, "to_dict": lambda self: {"ok": True}},
+)()
+operation = (
+    "prepare_source_acquisition"
+    if command == "prepare"
+    else "verify_source_acquisition"
+)
+mock.patch.object(
+    source_acquisition_cli,
+    operation,
+    return_value=summary,
+).start()
+arguments = [
+    command,
+    "--repository-store", "sensitive-repository-store",
+    "--output-dir", "sensitive-output-dir",
+    "--git-executable", "sensitive-git",
+    "--test-task-export-dir", "sensitive-task-export",
+    "--test-expected-tasks-sha256", "a" * 64,
+]
+
+# The parent closes its stdout reader before releasing this one-byte gate.
+sys.stdin.buffer.read(1)
+raise SystemExit(source_acquisition_cli.main(arguments))
+"""
+        repository_root = Path(__file__).resolve().parents[1]
+        expected_errors = {
+            "prepare": (
+                "error[publication_uncertain]: "
+                "source acquisition output may be committed"
+            ),
+            "verify": "error[io_failed]: source acquisition command failed",
+        }
+
+        for command, expected_error in expected_errors.items():
+            with self.subTest(command=command):
+                process = subprocess.Popen(
+                    [sys.executable, "-B", "-c", child_code, command],
+                    cwd=repository_root,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.assertIsNotNone(process.stdin)
+                self.assertIsNotNone(process.stdout)
+                self.assertIsNotNone(process.stderr)
+                assert process.stdin is not None
+                assert process.stdout is not None
+                assert process.stderr is not None
+                process.stdout.close()
+                process.stdin.write(b"1")
+                process.stdin.close()
+                status = process.wait(timeout=30)
+                error = process.stderr.read().decode("utf-8", errors="strict")
+                process.stderr.close()
+
+                self.assertEqual(5, status)
+                self.assertEqual([expected_error], error.splitlines())
+                self.assertNotIn(str(repository_root), error)
+                self.assertNotIn("sensitive-", error)
 
     def test_keyboard_interrupt_before_prepare_commit_is_preserved(self) -> None:
         with mock.patch.object(

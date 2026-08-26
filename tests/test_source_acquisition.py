@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unittest
 from unittest import mock
+import zlib
 
 from vulngym_agent.benchmark.contracts import SnapshotTaskSpec
 from vulngym_agent.benchmark.snapshot_batch import (
@@ -208,13 +209,56 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         self.assertEqual(report["github_transport"], "https")
         self.assertEqual(report["task_count"], 70)
         self.assertEqual(report["repository_count"], 1)
+        self.assertRegex(
+            report["git_version"], r"[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9A-Za-z-]+)*"
+        )
+        self.assertEqual(
+            [item["source_map_sha256"] for item in report["exports"]],
+            [item.source_map_sha256 for item in summary.source_maps],
+        )
         self.assertEqual(report["fetch_protocol"]["initial_depth"], 32)
         self.assertEqual(report["fetch_protocol"]["deepen_by"], 32)
+        self.assertTrue(report["fetch_protocol"]["requires_exact_ref_closure"])
+        self.assertTrue(report["fetch_protocol"]["requires_final_full_fsck"])
         self.assertTrue(report["fetch_protocol"]["requires_final_non_shallow"])
+        self.assertTrue(report["fetch_protocol"]["requires_strict_git_output"])
+        self.assertTrue(report["fetch_protocol"]["requires_zero_garbage"])
+        self.assertTrue(
+            report["fetch_protocol"]["requires_zero_prune_packable"]
+        )
+        self.assertTrue(
+            report["fetch_protocol"]["requires_zero_unreachable_objects"]
+        )
         self.assertTrue(report["ready"])
         self.assertEqual(report["ready_task_count"], 70)
         self.assertEqual(report["blocked_task_count"], 0)
-        commit_audits = report["repositories"][0]["commits"]
+        repository_report = report["repositories"][0]
+        hygiene = repository_report["object_hygiene"]
+        self.assertTrue(hygiene["all_objects_reachable"])
+        self.assertTrue(hygiene["alternates_absent"])
+        self.assertTrue(hygiene["bare_repository"])
+        self.assertTrue(hygiene["full_fsck"])
+        self.assertEqual(hygiene["garbage_count"], 0)
+        self.assertEqual(hygiene["garbage_size_kib"], 0)
+        self.assertTrue(hygiene["non_shallow"])
+        self.assertTrue(hygiene["promisor_absent"])
+        self.assertEqual(hygiene["observed_ref_count"], 70)
+        self.assertEqual(hygiene["prune_packable_count"], 0)
+        self.assertEqual(hygiene["required_ref_count"], 70)
+        self.assertTrue(hygiene["refs_closed"])
+        self.assertTrue(hygiene["replace_refs_absent"])
+        self.assertTrue(hygiene["sha1_object_format"])
+        self.assertEqual(hygiene["unreachable_object_count"], 0)
+        self.assertRegex(hygiene["ref_inventory_sha256"], r"[0-9a-f]{64}")
+        self.assertRegex(hygiene["storage_inventory_sha256"], r"[0-9a-f]{64}")
+        self.assertGreater(hygiene["storage_object_entry_count"], 0)
+        self.assertGreater(hygiene["storage_object_total_bytes"], 0)
+        self.assertEqual(
+            hygiene["loose_object_count"] + hygiene["packed_object_count"],
+            hygiene["stored_object_count"],
+        )
+        self.assertGreater(hygiene["pack_count"], 0)
+        commit_audits = repository_report["commits"]
         self.assertEqual(len(commit_audits), 70)
         self.assertEqual(
             {audit["commit"] for audit in commit_audits}, set(self.commits)
@@ -229,6 +273,7 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
             self.assertEqual(audit["gitlink_count"], 0)
             self.assertEqual(audit["lfs_pointer_count"], 0)
             self.assertEqual(audit["status_codes"], [])
+
         def string_values(value):
             if isinstance(value, str):
                 yield value
@@ -302,6 +347,37 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         self.assertEqual(verified, summary)
         self.assertEqual(fetches, [])
 
+    def test_post_publish_global_closure_failure_is_uncertain(self) -> None:
+        failure = SourceAcquisitionError(
+            "repository_changed",
+            "simulated post-publication repository change",
+            exit_status=4,
+        )
+        with mock.patch.object(
+            source_acquisition,
+            "_assert_all_repository_closures_unchanged",
+            side_effect=(None, failure),
+        ), self.assertRaises(SourceAcquisitionError) as captured:
+            self._prepare()
+
+        self.assertEqual(captured.exception.code, "publication_uncertain")
+        self.assertEqual(captured.exception.exit_status, 5)
+        self.assertIs(captured.exception.__cause__, failure)
+        self.assertTrue(self.output.is_dir())
+        self.assertTrue((self.output / "acquisition-report.json").is_file())
+
+    def test_summary_construction_failure_precedes_publication(self) -> None:
+        failure = RuntimeError("simulated summary construction failure")
+        with mock.patch.object(
+            source_acquisition,
+            "SourceAcquisitionSummary",
+            side_effect=failure,
+        ), self.assertRaises(RuntimeError) as captured:
+            self._prepare()
+
+        self.assertIs(captured.exception, failure)
+        self.assertFalse(self.output.exists())
+
     def test_ref_rebinding_is_rejected(self) -> None:
         self._prepare()
         repository = self.repository_store / "example" / "project.git"
@@ -319,6 +395,97 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
                 git_executable=self.git,
             )
         self.assertEqual(captured.exception.code, "repository_refs_rejected")
+
+    def test_extra_well_formed_vulngym_ref_is_rejected(self) -> None:
+        self._prepare()
+        repository = self.repository_store / "example" / "project.git"
+        extra = self.all_commits[0]
+        self.assertNotIn(extra, self.commits)
+        self._git(
+            "update-ref",
+            f"refs/vulngym/{extra}",
+            extra,
+            cwd=repository,
+        )
+        with self.assertRaises(SourceAcquisitionError) as captured:
+            verify_source_acquisition(
+                self.inputs,
+                repository_store=self.repository_store,
+                output_dir=self.output,
+                git_executable=self.git,
+            )
+        self.assertEqual(captured.exception.code, "ref_closure_mismatch")
+
+    def test_git_count_objects_garbage_is_rejected(self) -> None:
+        self._prepare()
+        repository = self.repository_store / "example" / "project.git"
+        garbage = repository / "objects" / "pack" / "unexpected-garbage"
+        garbage.write_bytes(b"not a Git pack artifact")
+        with self.assertRaises(SourceAcquisitionError) as captured:
+            verify_source_acquisition(
+                self.inputs,
+                repository_store=self.repository_store,
+                output_dir=self.output,
+                git_executable=self.git,
+            )
+        self.assertEqual(captured.exception.code, "object_storage_garbage")
+
+    def test_prune_packable_loose_duplicate_is_rejected(self) -> None:
+        self._prepare()
+        repository = self.repository_store / "example" / "project.git"
+        object_id = self.commits[-1]
+        object_type = self._git(
+            "cat-file", "-t", object_id, cwd=repository
+        ).stdout.strip()
+        body = self._git(
+            "cat-file", object_type.decode("ascii"), object_id, cwd=repository
+        ).stdout
+        loose_payload = (
+            object_type
+            + b" "
+            + str(len(body)).encode("ascii")
+            + b"\0"
+            + body
+        )
+        self.assertEqual(
+            hashlib.sha1(loose_payload, usedforsecurity=False).hexdigest(),
+            object_id,
+        )
+        loose = repository / "objects" / object_id[:2] / object_id[2:]
+        loose.parent.mkdir(exist_ok=True)
+        loose.write_bytes(zlib.compress(loose_payload))
+        count = self._git("count-objects", "-v", cwd=repository).stdout
+        self.assertIn(b"prune-packable: 1\n", count)
+
+        with self.assertRaises(SourceAcquisitionError) as captured:
+            verify_source_acquisition(
+                self.inputs,
+                repository_store=self.repository_store,
+                output_dir=self.output,
+                git_executable=self.git,
+            )
+        self.assertEqual(captured.exception.code, "prune_packable_objects_rejected")
+
+    def test_unreachable_object_is_rejected(self) -> None:
+        self._prepare()
+        repository = self.repository_store / "example" / "project.git"
+        unreachable = self._git(
+            "hash-object",
+            "-w",
+            "--stdin",
+            cwd=repository,
+            input_data=b"unreachable source-acquisition test object\n",
+        ).stdout.decode("ascii").strip()
+        self.assertRegex(unreachable, r"[0-9a-f]{40}")
+
+        with self.assertRaises(SourceAcquisitionError) as captured:
+            verify_source_acquisition(
+                self.inputs,
+                repository_store=self.repository_store,
+                output_dir=self.output,
+                git_executable=self.git,
+            )
+        self.assertEqual(captured.exception.code, "unreachable_objects_rejected")
 
     def test_interrupted_deepen_preserves_completed_segments_and_resumes(self) -> None:
         real_run = source_acquisition._run_git
@@ -458,6 +625,147 @@ class SourceAcquisitionContractTests(unittest.TestCase):
             raise unittest.SkipTest("Git is unavailable")
         cls.git = Path(found).resolve()
 
+    def test_git_version_output_is_strict_and_reportable(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout=b"git version 2.51.0.windows.1\n",
+            stderr=b"",
+        )
+        with mock.patch.object(
+            source_acquisition, "_run_git", return_value=completed
+        ):
+            self.assertEqual(
+                source_acquisition._read_git_version(
+                    self.git,
+                    github_transport="https",
+                    ssh_executable=None,
+                ),
+                "2.51.0.windows.1",
+            )
+
+        for stdout, stderr in (
+            (b"git version 2.51\n", b""),
+            (b"git version 2.51.0\nextra\n", b""),
+            (b"git version 2.51.0\n", b"warning\n"),
+        ):
+            with self.subTest(stdout=stdout, stderr=stderr), mock.patch.object(
+                source_acquisition,
+                "_run_git",
+                return_value=subprocess.CompletedProcess(
+                    args=(), returncode=0, stdout=stdout, stderr=stderr
+                ),
+            ), self.assertRaises(SourceAcquisitionError) as captured:
+                source_acquisition._read_git_version(
+                    self.git,
+                    github_transport="https",
+                    ssh_executable=None,
+                )
+            self.assertEqual(captured.exception.code, "git_version_rejected")
+
+    def test_show_ref_rejects_foreign_loose_replace_and_packed_refs(self) -> None:
+        allowed = "1" * 40
+        allowed_line = f"{allowed} refs/vulngym/{allowed}\n"
+        cases = {
+            "loose branch": f"{allowed} refs/heads/main\n",
+            "replace ref": f"{allowed} refs/replace/{'2' * 40}\n",
+            # show-ref flattens loose and packed storage to the same wire form;
+            # this case represents a foreign name read from packed-refs.
+            "packed tag": f"{allowed} refs/tags/packed-only\n",
+        }
+        for label, foreign_line in cases.items():
+            completed = subprocess.CompletedProcess(
+                args=(),
+                returncode=0,
+                stdout=(allowed_line + foreign_line).encode("ascii"),
+                stderr=b"",
+            )
+            with self.subTest(label=label), mock.patch.object(
+                source_acquisition,
+                "_run_git",
+                return_value=completed,
+            ) as runner, self.assertRaises(SourceAcquisitionError) as captured:
+                source_acquisition._read_vulngym_refs(
+                    Path("C:/trusted/repository.git"),
+                    git_executable=Path("C:/trusted/git.exe"),
+                    github_transport="https",
+                    ssh_executable=None,
+                    status=4,
+                )
+            self.assertEqual(captured.exception.code, "repository_refs_rejected")
+            self.assertEqual(captured.exception.exit_status, 4)
+            self.assertEqual(runner.call_args.args[2], ("show-ref",))
+
+    def test_global_union_recheck_detects_earlier_repository_mutation(self) -> None:
+        first_url = "https://github.com/example/project-a"
+        second_url = "https://github.com/example/project-b"
+        first_commit = "1" * 40
+        second_commit = "2" * 40
+        first_refs = {f"refs/vulngym/{first_commit}": first_commit}
+        second_refs = {f"refs/vulngym/{second_commit}": second_commit}
+        counts = {"count": 1}
+        first_captured_seal = object()
+        first_mutated_seal = object()
+        second_seal = object()
+        first_repository = mock.Mock(spec=source_acquisition.GitRepository)
+        first_repository.assert_bare_storage_safe.return_value = (
+            first_mutated_seal
+        )
+        first_repository.history_is_shallow.return_value = False
+        second_repository = mock.Mock(spec=source_acquisition.GitRepository)
+        second_repository.assert_bare_storage_safe.return_value = second_seal
+        second_repository.history_is_shallow.return_value = False
+        roots = {
+            first_url: Path("C:/trusted/project-a.git"),
+            second_url: Path("C:/trusted/project-b.git"),
+        }
+        repositories = {
+            first_url: first_repository,
+            second_url: second_repository,
+        }
+        groups = {
+            first_url: (first_commit,),
+            second_url: (second_commit,),
+        }
+        expected = {
+            first_url: source_acquisition._repository_closure_v2(
+                storage_seal=first_captured_seal,
+                refs=first_refs,
+                counts=counts,
+            ),
+            second_url: source_acquisition._repository_closure_v2(
+                storage_seal=second_seal,
+                refs=second_refs,
+                counts=counts,
+            ),
+        }
+
+        def refs_for_root(root, **_kwargs):
+            return first_refs if root == roots[first_url] else second_refs
+
+        with mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition, "_assert_acquisition_config"
+        ), mock.patch.object(
+            source_acquisition, "_read_vulngym_refs", side_effect=refs_for_root
+        ), mock.patch.object(
+            source_acquisition, "_read_count_objects", return_value=counts
+        ), self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._assert_all_repository_closures_unchanged(
+                roots,
+                repositories,
+                groups,
+                expected,
+                git_executable=self.git,
+                github_transport="https",
+                ssh_executable=None,
+                status=4,
+            )
+        self.assertEqual(captured.exception.code, "repository_changed")
+        self.assertEqual(captured.exception.exit_status, 4)
+        second_repository.assert_bare_storage_safe.assert_not_called()
+
     def test_fetch_is_exact_atomic_segmented_and_has_no_checkout_surface(self) -> None:
         commit = "1" * 40
         repository = mock.Mock(spec=source_acquisition.GitRepository)
@@ -497,6 +805,38 @@ class SourceAcquisitionContractTests(unittest.TestCase):
                 argument.startswith(("--filter", "--shallow"))
                 for argument in arguments
             )
+        )
+
+    def test_reachability_fsck_uses_only_explicit_commit_roots(self) -> None:
+        commits = ("2" * 40, "1" * 40)
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.object(
+            source_acquisition,
+            "_run_git",
+            return_value=completed,
+        ) as runner:
+            source_acquisition._run_full_reachability_fsck(
+                Path("C:/trusted/repository.git"),
+                commits=commits,
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+                status=4,
+            )
+        self.assertEqual(
+            runner.call_args.args[2],
+            (
+                "fsck",
+                "--full",
+                "--strict",
+                "--unreachable",
+                "--no-reflogs",
+                "--no-progress",
+                "1" * 40,
+                "2" * 40,
+            ),
         )
 
     def test_github_transport_mapping_is_derived_not_caller_supplied(self) -> None:

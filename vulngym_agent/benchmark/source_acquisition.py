@@ -63,7 +63,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 
 
 SOURCE_ACQUISITION_CONTRACT_VERSION: Final[str] = (
-    "vulngym.source-acquisition.v1"
+    "vulngym.source-acquisition.v2"
 )
 SOURCE_ACQUISITION_REPORT_NAME: Final[str] = "acquisition-report.json"
 SOURCE_NOT_READY_EXIT_STATUS: Final[int] = 10
@@ -77,6 +77,9 @@ GITHUB_TRANSPORTS: Final[tuple[str, str]] = ("https", "ssh")
 
 _SHA1_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
+_GIT_VERSION_RE: Final[re.Pattern[bytes]] = re.compile(
+    rb"git version ([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9A-Za-z-]+)*)\n\Z"
+)
 _GITHUB_PREFIX: Final[str] = "https://github.com/"
 _MAX_OUTPUT_FILE_BYTES: Final[int] = 8 * 1024 * 1024
 _GIT_SHORT_TIMEOUT_SECONDS: Final[float] = 120.0
@@ -100,6 +103,22 @@ _ALLOWED_LOCAL_CONFIG_KEYS: Final[frozenset[str]] = frozenset(
         "core.symlinks",
         "extensions.objectformat",
     }
+)
+_COUNT_OBJECT_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "count",
+        "size",
+        "in-pack",
+        "packs",
+        "size-pack",
+        "prune-packable",
+        "garbage",
+        "size-garbage",
+    }
+)
+_FSCK_NOTICE_PREFIXES: Final[tuple[bytes, ...]] = (
+    b"notice: HEAD points to an unborn branch ",
+    b"notice: No default references",
 )
 
 
@@ -232,6 +251,15 @@ class SourceAcquisitionSummary:
             "source_maps": [item.to_dict() for item in self.source_maps],
             "task_count": self.task_count,
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _RepositoryClosureV2:
+    """Exact path-free state retained for later all-repository rechecks."""
+
+    storage_seal: GitStorageSeal
+    refs: tuple[tuple[str, str], ...]
+    counts: tuple[tuple[str, int], ...]
 
 
 def _sha256(payload: bytes) -> str:
@@ -408,6 +436,33 @@ def _run_git(
             "git_command_failed", "a trusted Git command failed", exit_status=3
         )
     return result
+
+
+def _read_git_version(
+    git_executable: Path,
+    *,
+    github_transport: Literal["https", "ssh"],
+    ssh_executable: Path | None,
+) -> str:
+    """Return one fail-closed Git implementation version for the report."""
+
+    result = _run_git(
+        git_executable,
+        None,
+        ("version",),
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        timeout_seconds=_GIT_SHORT_TIMEOUT_SECONDS,
+        check=False,
+    )
+    match = _GIT_VERSION_RE.fullmatch(result.stdout)
+    if result.returncode != 0 or result.stderr or match is None:
+        raise SourceAcquisitionError(
+            "git_version_rejected",
+            "Git version output does not match the supported strict contract",
+            exit_status=2,
+        )
+    return match.group(1).decode("ascii")
 
 
 def _load_exports(
@@ -839,6 +894,292 @@ def _read_vulngym_refs(
     return refs
 
 
+def _expected_vulngym_refs(commits: Sequence[str]) -> dict[str, str]:
+    return {f"refs/vulngym/{commit}": commit for commit in sorted(commits)}
+
+
+def _assert_exact_vulngym_refs(
+    refs: Mapping[str, str], commits: Sequence[str], *, status: int
+) -> str:
+    expected = _expected_vulngym_refs(commits)
+    if dict(refs) != expected:
+        raise SourceAcquisitionError(
+            "ref_closure_mismatch",
+            "repository refs do not exactly match the required commit set",
+            exit_status=status,
+        )
+    payload = b"vulngym.source-acquisition.ref-inventory.v1\0" + b"".join(
+        ref_name.encode("ascii")
+        + b"\0"
+        + object_id.encode("ascii")
+        + b"\n"
+        for ref_name, object_id in sorted(expected.items())
+    )
+    return _sha256(payload)
+
+
+def _read_count_objects(
+    repository_root: Path,
+    *,
+    git_executable: Path,
+    github_transport: Literal["https", "ssh"],
+    ssh_executable: Path | None,
+    status: int,
+) -> dict[str, int]:
+    result = _run_git(
+        git_executable,
+        repository_root,
+        ("count-objects", "-v"),
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        timeout_seconds=_GIT_SHORT_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SourceAcquisitionError(
+            "count_objects_failed",
+            "Git object storage counters could not be verified",
+            exit_status=status,
+        )
+    try:
+        lines = result.stdout.decode("ascii", errors="strict").splitlines()
+    except UnicodeDecodeError as error:
+        raise SourceAcquisitionError(
+            "count_objects_failed",
+            "Git object storage counters are not canonical ASCII",
+            exit_status=status,
+        ) from error
+    values: dict[str, int] = {}
+    for line in lines:
+        name, separator, raw_value = line.partition(": ")
+        if (
+            not separator
+            or name not in _COUNT_OBJECT_FIELDS
+            or name in values
+            or not raw_value.isascii()
+            or not raw_value.isdecimal()
+        ):
+            raise SourceAcquisitionError(
+                "count_objects_failed",
+                "Git object storage counters exceed the fixed contract",
+                exit_status=status,
+            )
+        values[name] = int(raw_value)
+    if set(values) != _COUNT_OBJECT_FIELDS:
+        raise SourceAcquisitionError(
+            "count_objects_failed",
+            "Git object storage counters are incomplete",
+            exit_status=status,
+        )
+    if values["garbage"] != 0 or values["size-garbage"] != 0:
+        raise SourceAcquisitionError(
+            "object_storage_garbage",
+            "Git object storage contains garbage",
+            exit_status=status,
+        )
+    if values["prune-packable"] != 0:
+        raise SourceAcquisitionError(
+            "prune_packable_objects_rejected",
+            "Git object storage contains redundant loose objects",
+            exit_status=status,
+        )
+    if result.stderr:
+        raise SourceAcquisitionError(
+            "count_objects_failed",
+            "Git object storage counters emitted unexpected diagnostics",
+            exit_status=status,
+        )
+    return values
+
+
+def _run_full_reachability_fsck(
+    repository_root: Path,
+    *,
+    commits: Sequence[str],
+    git_executable: Path,
+    github_transport: Literal["https", "ssh"],
+    ssh_executable: Path | None,
+    status: int,
+) -> None:
+    result = _run_git(
+        git_executable,
+        repository_root,
+        (
+            "fsck",
+            "--full",
+            "--strict",
+            "--unreachable",
+            "--no-reflogs",
+            "--no-progress",
+            *sorted(commits),
+        ),
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        timeout_seconds=_GIT_FSCK_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SourceAcquisitionError(
+            "repository_fsck_failed",
+            "Git fsck rejected a source object store",
+            exit_status=status,
+        )
+    stdout_lines = result.stdout.splitlines()
+    stderr_lines = result.stderr.splitlines()
+    if any(
+        line.startswith((b"unreachable ", b"dangling "))
+        for line in (*stdout_lines, *stderr_lines)
+    ):
+        raise SourceAcquisitionError(
+            "unreachable_objects_rejected",
+            "Git object storage contains objects unreachable from allowed refs",
+            exit_status=status,
+        )
+    if stdout_lines or any(
+        not line.startswith(_FSCK_NOTICE_PREFIXES) for line in stderr_lines
+    ):
+        raise SourceAcquisitionError(
+            "repository_fsck_output_rejected",
+            "Git fsck emitted unexpected diagnostics",
+            exit_status=status,
+        )
+
+
+def _object_hygiene_report(
+    *,
+    counts: Mapping[str, int],
+    refs: Mapping[str, str],
+    commits: Sequence[str],
+    ref_inventory_sha256: str,
+    storage_seal: GitStorageSeal,
+) -> dict[str, object]:
+    return {
+        "all_objects_reachable": True,
+        "alternates_absent": True,
+        "bare_repository": True,
+        "full_fsck": True,
+        "garbage_count": counts["garbage"],
+        "garbage_size_kib": counts["size-garbage"],
+        "loose_object_count": counts["count"],
+        "loose_object_size_kib": counts["size"],
+        "non_shallow": storage_seal.shallow_sha256 is None,
+        "observed_ref_count": len(refs),
+        "pack_count": counts["packs"],
+        "pack_size_kib": counts["size-pack"],
+        "packed_object_count": counts["in-pack"],
+        "prune_packable_count": counts["prune-packable"],
+        "promisor_absent": True,
+        "stored_object_count": counts["count"] + counts["in-pack"],
+        "ref_inventory_sha256": ref_inventory_sha256,
+        "refs_closed": True,
+        "replace_refs_absent": True,
+        "required_ref_count": len(commits),
+        "storage_inventory_sha256": storage_seal.object_inventory_sha256,
+        "storage_object_entry_count": storage_seal.object_entry_count,
+        "storage_object_total_bytes": storage_seal.object_total_bytes,
+        "sha1_object_format": True,
+        "unreachable_object_count": 0,
+    }
+
+
+def _repository_closure_v2(
+    *,
+    storage_seal: GitStorageSeal,
+    refs: Mapping[str, str],
+    counts: Mapping[str, int],
+) -> _RepositoryClosureV2:
+    return _RepositoryClosureV2(
+        storage_seal=storage_seal,
+        refs=tuple(sorted(refs.items())),
+        counts=tuple(sorted(counts.items())),
+    )
+
+
+def _assert_all_repository_closures_unchanged(
+    repository_roots: Mapping[str, Path],
+    repositories: Mapping[str, GitRepository],
+    groups: Mapping[str, Sequence[str]],
+    expected: Mapping[str, _RepositoryClosureV2],
+    *,
+    git_executable: Path,
+    github_transport: Literal["https", "ssh"],
+    ssh_executable: Path | None,
+    status: int,
+) -> None:
+    """Recheck the complete authorized repository union without deletion."""
+
+    if (
+        set(repository_roots) != set(groups)
+        or set(repositories) != set(groups)
+        or set(expected) != set(groups)
+    ):
+        raise SourceAcquisitionError(
+            "repository_closure_incomplete",
+            "the all-repository closure set is incomplete",
+            exit_status=status,
+        )
+    for repo_url in sorted(groups, key=lambda value: value.encode("utf-8")):
+        repository_root = repository_roots[repo_url]
+        repository = repositories[repo_url]
+        commits = groups[repo_url]
+        _assert_recovery_state_clean(repository_root, status=status)
+        _assert_acquisition_config(
+            repository_root,
+            git_executable=git_executable,
+            github_transport=github_transport,
+            ssh_executable=ssh_executable,
+            status=status,
+        )
+        try:
+            before = repository.assert_bare_storage_safe()
+            if repository.history_is_shallow():
+                raise SourceAcquisitionError(
+                    "shallow_repository_rejected",
+                    "source repositories must not be shallow",
+                    exit_status=status,
+                )
+        except GitFactError as error:
+            raise SourceAcquisitionError(
+                "repository_rejected",
+                "a repository failed its global closure recheck",
+                exit_status=status,
+            ) from error
+        refs = _read_vulngym_refs(
+            repository_root,
+            git_executable=git_executable,
+            github_transport=github_transport,
+            ssh_executable=ssh_executable,
+            status=status,
+        )
+        _assert_exact_vulngym_refs(refs, commits, status=status)
+        counts = _read_count_objects(
+            repository_root,
+            git_executable=git_executable,
+            github_transport=github_transport,
+            ssh_executable=ssh_executable,
+            status=status,
+        )
+        try:
+            after = repository.assert_bare_storage_safe()
+        except GitFactError as error:
+            raise SourceAcquisitionError(
+                "repository_rejected",
+                "a repository changed during its global closure recheck",
+                exit_status=status,
+            ) from error
+        current = _repository_closure_v2(
+            storage_seal=after,
+            refs=refs,
+            counts=counts,
+        )
+        if before != after or current != expected[repo_url]:
+            raise SourceAcquisitionError(
+                "repository_changed",
+                "a repository changed after its individual verification",
+                exit_status=status,
+            )
+
+
 def _fetch_missing_commits(
     repository_root: Path,
     repository: GitRepository,
@@ -1054,10 +1395,14 @@ def _verify_repository(
     github_transport: Literal["https", "ssh"],
     ssh_executable: Path | None,
     status: int,
-) -> dict[str, SealedSnapshotSourceAudit]:
+) -> tuple[
+    dict[str, SealedSnapshotSourceAudit],
+    dict[str, object],
+    _RepositoryClosureV2,
+]:
     try:
         _assert_recovery_state_clean(repository_root, status=status)
-        before_fsck = repository.assert_bare_storage_safe()
+        before_verification = repository.assert_bare_storage_safe()
         if repository.history_is_shallow():
             raise SourceAcquisitionError(
                 "shallow_repository_rejected",
@@ -1070,37 +1415,28 @@ def _verify_repository(
             "a repository failed its storage verification",
             exit_status=status,
         ) from error
-    fsck = _run_git(
-        git_executable,
+    refs_before = _read_vulngym_refs(
         repository_root,
-        ("fsck", "--full", "--strict", "--no-progress"),
+        git_executable=git_executable,
         github_transport=github_transport,
         ssh_executable=ssh_executable,
-        timeout_seconds=_GIT_FSCK_TIMEOUT_SECONDS,
-        check=False,
+        status=status,
     )
-    if fsck.returncode != 0:
-        raise SourceAcquisitionError(
-            "repository_fsck_failed",
-            "Git fsck rejected a source object store",
-            exit_status=status,
-        )
-    try:
-        after_fsck = repository.assert_bare_storage_safe()
-    except GitFactError as error:
-        raise SourceAcquisitionError(
-            "repository_rejected",
-            "repository storage changed during full fsck",
-            exit_status=status,
-        ) from error
-    if after_fsck != before_fsck:
-        raise SourceAcquisitionError(
-            "repository_changed",
-            "repository storage changed during full fsck",
-            exit_status=status,
-        )
-    refs = _read_vulngym_refs(
+    ref_inventory_sha256 = _assert_exact_vulngym_refs(
+        refs_before,
+        commits,
+        status=status,
+    )
+    counts_before = _read_count_objects(
         repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=status,
+    )
+    _run_full_reachability_fsck(
+        repository_root,
+        commits=commits,
         git_executable=git_executable,
         github_transport=github_transport,
         ssh_executable=ssh_executable,
@@ -1110,37 +1446,93 @@ def _verify_repository(
     blob_cache: dict[str, tuple[int, bool | None]] = {}
     try:
         for commit in commits:
-            if refs.get(f"refs/vulngym/{commit}") != commit:
-                raise SourceAcquisitionError(
-                    "ref_binding_mismatch",
-                    "a required commit ref is absent or rebound",
-                    exit_status=status,
-                )
             audits[commit] = audit_sealed_snapshot_source(
                 repository,
                 commit,
                 blob_cache=blob_cache,
             )
-        repository.assert_bare_storage_safe()
     except (GitFactError, SealedSnapshotError) as error:
         raise SourceAcquisitionError(
             "commit_verification_failed",
             "an exact commit failed cat-file verification",
             exit_status=status,
         ) from error
-    return audits
+    refs_after = _read_vulngym_refs(
+        repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=status,
+    )
+    after_ref_inventory_sha256 = _assert_exact_vulngym_refs(
+        refs_after,
+        commits,
+        status=status,
+    )
+    counts_after = _read_count_objects(
+        repository_root,
+        git_executable=git_executable,
+        github_transport=github_transport,
+        ssh_executable=ssh_executable,
+        status=status,
+    )
+    try:
+        after_verification = repository.assert_bare_storage_safe()
+    except GitFactError as error:
+        raise SourceAcquisitionError(
+            "repository_rejected",
+            "repository storage changed during object verification",
+            exit_status=status,
+        ) from error
+    if (
+        after_verification != before_verification
+        or refs_after != refs_before
+        or after_ref_inventory_sha256 != ref_inventory_sha256
+        or counts_after != counts_before
+    ):
+        raise SourceAcquisitionError(
+            "repository_changed",
+            "repository storage changed during object verification",
+            exit_status=status,
+        )
+    return (
+        audits,
+        _object_hygiene_report(
+            counts=counts_after,
+            refs=refs_after,
+            commits=commits,
+            ref_inventory_sha256=after_ref_inventory_sha256,
+            storage_seal=after_verification,
+        ),
+        _repository_closure_v2(
+            storage_seal=after_verification,
+            refs=refs_after,
+            counts=counts_after,
+        ),
+    )
 
 
 def _acquisition_report_payload(
     exports: Sequence[VerifiedTaskExport],
+    source_maps: Sequence[SnapshotSourceMapDocument],
     repository_audits: Mapping[
         str, Mapping[str, SealedSnapshotSourceAudit]
     ],
+    repository_hygiene: Mapping[str, Mapping[str, object]],
     *,
     github_transport: Literal["https", "ssh"],
+    git_version: str,
 ) -> bytes:
+    source_maps_by_split = {document.split: document for document in source_maps}
+    if set(source_maps_by_split) != {export.split for export in exports}:
+        raise SourceAcquisitionError(
+            "source_map_rejected",
+            "source-map documents do not close over task exports",
+            exit_status=3,
+        )
     export_records = [
         {
+            "source_map_sha256": source_maps_by_split[export.split].sha256,
             "split": export.split,
             "task_count": len(export.tasks),
             "tasks_sha256": export.tasks_sha256,
@@ -1153,6 +1545,7 @@ def _acquisition_report_payload(
                 audit.to_dict()
                 for _, audit in sorted(commits.items())
             ],
+            "object_hygiene": dict(repository_hygiene[repo_url]),
             "repo_url": repo_url,
         }
         for repo_url, commits in sorted(
@@ -1176,10 +1569,16 @@ def _acquisition_report_payload(
                 "initial_depth": _FETCH_DEPTH_STEP,
                 "max_deepen_rounds": _MAX_DEEPEN_ROUNDS,
                 "max_total_network_seconds": int(_MAX_TOTAL_NETWORK_SECONDS),
+                "requires_exact_ref_closure": True,
                 "requires_final_full_fsck": True,
                 "requires_final_non_shallow": True,
+                "requires_strict_git_output": True,
+                "requires_zero_garbage": True,
+                "requires_zero_prune_packable": True,
+                "requires_zero_unreachable_objects": True,
             },
             "github_transport": github_transport,
+            "git_version": git_version,
             "kind": "source_acquisition_report",
             "profile_id": PROFILE_ID,
             "public_manifest_sha256": PROFILE_MANIFEST_SHA256,
@@ -1333,6 +1732,11 @@ def _prepare_or_verify_source_acquisition(
         )
     else:
         ssh = None
+    git_version = _read_git_version(
+        git,
+        github_transport=github_transport,
+        ssh_executable=ssh,
+    )
     try:
         store = _canonical_existing_path(repository_store, directory=True, status=2)
     except SnapshotBatchError as error:
@@ -1403,7 +1807,10 @@ def _prepare_or_verify_source_acquisition(
             )
 
     source_paths: dict[str, Path] = {}
+    source_repositories: dict[str, GitRepository] = {}
     source_audits: dict[str, dict[str, SealedSnapshotSourceAudit]] = {}
+    source_hygiene: dict[str, dict[str, object]] = {}
+    source_closures: dict[str, _RepositoryClosureV2] = {}
     for repo_url, commits in groups.items():
         repository_root, repository = _initialize_or_open_repository(
             store,
@@ -1445,7 +1852,11 @@ def _prepare_or_verify_source_acquisition(
             ssh_executable=ssh,
             status=3 if acquire else 4,
         )
-        source_audits[repo_url] = _verify_repository(
+        (
+            source_audits[repo_url],
+            source_hygiene[repo_url],
+            source_closures[repo_url],
+        ) = _verify_repository(
             repository_root,
             repository,
             commits,
@@ -1455,6 +1866,7 @@ def _prepare_or_verify_source_acquisition(
             status=3 if acquire else 4,
         )
         source_paths[repo_url] = repository_root
+        source_repositories[repo_url] = repository
 
     documents: list[SnapshotSourceMapDocument] = []
     try:
@@ -1474,36 +1886,29 @@ def _prepare_or_verify_source_acquisition(
             "source-map construction failed its shared contract",
             exit_status=3 if acquire else 4,
         ) from error
+    _assert_all_repository_closures_unchanged(
+        source_paths,
+        source_repositories,
+        groups,
+        source_closures,
+        git_executable=git,
+        github_transport=github_transport,
+        ssh_executable=ssh,
+        status=3 if acquire else 4,
+    )
     report_payload = _acquisition_report_payload(
         exports,
+        documents,
         source_audits,
+        source_hygiene,
         github_transport=github_transport,
+        git_version=git_version,
     )
     files = {
         SOURCE_MAP_FILE_NAMES[document.split]: document.payload
         for document in documents
     }
     files[SOURCE_ACQUISITION_REPORT_NAME] = report_payload
-    output = _verify_or_publish_output(
-        output_dir,
-        files,
-        protected_roots=(store, *(export.root for export in exports)),
-        publish=acquire,
-    )
-    try:
-        for export, document in zip(exports, documents):
-            load_verified_snapshot_source_map(
-                output / SOURCE_MAP_FILE_NAMES[export.split],
-                expected_source_map_sha256=document.sha256,
-                task_export=export,
-            )
-    except SnapshotBatchError as error:
-        raise SourceAcquisitionError(
-            "source_map_readback_failed",
-            "a published source map failed shared-contract readback",
-            exit_status=4,
-        ) from error
-
     summaries = tuple(
         AcquiredSourceMapSummary(
             split=document.split,
@@ -1520,7 +1925,7 @@ def _prepare_or_verify_source_acquisition(
     ]
     ready_task_count = sum(audit.ready for audit in audits)
     blocked_task_count = len(audits) - ready_task_count
-    return SourceAcquisitionSummary(
+    summary = SourceAcquisitionSummary(
         github_transport=github_transport,
         repository_count=len(groups),
         task_count=sum(len(export.tasks) for export in exports),
@@ -1530,6 +1935,49 @@ def _prepare_or_verify_source_acquisition(
         acquisition_report_sha256=_sha256(report_payload),
         source_maps=summaries,
     )
+    output = _verify_or_publish_output(
+        output_dir,
+        files,
+        protected_roots=(store, *(export.root for export in exports)),
+        publish=acquire,
+    )
+    try:
+        try:
+            for export, document in zip(exports, documents):
+                load_verified_snapshot_source_map(
+                    output / SOURCE_MAP_FILE_NAMES[export.split],
+                    expected_source_map_sha256=document.sha256,
+                    task_export=export,
+                )
+        except SnapshotBatchError as error:
+            raise SourceAcquisitionError(
+                "source_map_readback_failed",
+                "a published source map failed shared-contract readback",
+                exit_status=4,
+            ) from error
+
+        _assert_all_repository_closures_unchanged(
+            source_paths,
+            source_repositories,
+            groups,
+            source_closures,
+            git_executable=git,
+            github_transport=github_transport,
+            ssh_executable=ssh,
+            status=4,
+        )
+    except BaseException as error:
+        if acquire and not output_exists:
+            raise SourceAcquisitionError(
+                "publication_uncertain",
+                (
+                    "acquisition output may be committed but repository closure "
+                    "is not verified"
+                ),
+                exit_status=5,
+            ) from error
+        raise
+    return summary
 
 
 def prepare_source_acquisition(
@@ -1541,7 +1989,13 @@ def prepare_source_acquisition(
     github_transport: Literal["https", "ssh"] = "https",
     ssh_executable: Path | None = None,
 ) -> SourceAcquisitionSummary:
-    """Acquire missing objects, verify them, and publish source-map controls."""
+    """Acquire and publish one complete authorized input union.
+
+    ``inputs`` is the complete authorization for ``repository_store`` in this
+    run.  Reusing one store with a disjoint test-only or train-only input is
+    unsupported; exact ref closure will reject objects authorized only by an
+    omitted split.  The official 70-task operation supplies both splits once.
+    """
 
     return _prepare_or_verify_source_acquisition(
         inputs,
@@ -1563,7 +2017,11 @@ def verify_source_acquisition(
     github_transport: Literal["https", "ssh"] = "https",
     ssh_executable: Path | None = None,
 ) -> SourceAcquisitionSummary:
-    """Verify repositories and controls without initializing or fetching."""
+    """Verify one complete authorized input union without fetching.
+
+    As with preparation, callers must supply the full test+train authorization
+    union for a combined store; split-by-split reuse of that store is rejected.
+    """
 
     return _prepare_or_verify_source_acquisition(
         inputs,

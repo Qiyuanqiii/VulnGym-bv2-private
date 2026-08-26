@@ -32,7 +32,18 @@ def _sha256(value: str) -> str:
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--repository-store", type=Path, required=True)
+    parser.add_argument(
+        "--repository-store",
+        type=Path,
+        required=True,
+        help=(
+            "operator contract: store dedicated to this complete input union; "
+            "single split runs require an independent store, and every combined "
+            "or reused store run must use the same complete test+train union and "
+            "exact digest pins. Verification enforces only refs and objects derived "
+            "from the current invocation; it cannot prove prior store-use history"
+        ),
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--git-executable", type=Path, required=True)
     parser.add_argument(
@@ -97,16 +108,35 @@ def _print_json(value: object) -> None:
             allow_nan=False,
             sort_keys=True,
             separators=(",", ":"),
-        )
+        ),
+        flush=True,
     )
 
 
-def _report_publication_uncertain() -> int:
+def _suppress_failed_stdout_finalization() -> None:
+    """Prevent a poisoned stdout buffer from changing the process exit status."""
+
+    stream = sys.stdout
     try:
-        print(
-            "error[publication_uncertain]: source acquisition output may be committed",
-            file=sys.stderr,
-        )
+        stream.flush()
+    except BaseException:
+        # CPython retries flushing sys.stdout during finalization and changes
+        # the requested status to 120 if that retry fails. Detach only the
+        # broken process-global reference; never close a caller-owned stream.
+        if sys.stdout is stream:
+            sys.stdout = None
+
+
+def _report_output_failure(*, publication_uncertain: bool) -> int:
+    _suppress_failed_stdout_finalization()
+    code = "publication_uncertain" if publication_uncertain else "io_failed"
+    message = (
+        "source acquisition output may be committed"
+        if publication_uncertain
+        else "source acquisition command failed"
+    )
+    try:
+        print(f"error[{code}]: {message}", file=sys.stderr)
     except BaseException:
         pass
     return 5
@@ -147,9 +177,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         _print_json(summary.to_dict())
     except BaseException:
-        if args.command == "prepare":
-            return _report_publication_uncertain()
-        raise
+        return _report_output_failure(
+            publication_uncertain=args.command == "prepare"
+        )
     return 0 if summary.ready else SOURCE_NOT_READY_EXIT_STATUS
 
 

@@ -242,12 +242,22 @@ SHA-256、同一 HMAC key 和
 source-map 由受信的 `source_acquisition_cli prepare` 从一至两个已验证 answer-free task
 export 机械生成，不要求操作员手写 URL 或 commit。它只接受 canonical GitHub HTTPS
 identity，按 `<store>/<owner>/<repo>.git` 建立互不共享对象的 bare SHA-1 repository，并把
-每个精确 commit 固定在 `refs/vulngym/<commit>`；fetch 禁止 shallow、filter、alternate、
-worktree 与交互式凭据提示，随后执行 storage checks、ref/cat-file 闭合和
-`git fsck --full --strict`。默认 HTTPS；受控网络必须使用 SSH 时，只能通过
+每个精确 commit 固定在 `refs/vulngym/<commit>`。获取可以从有界 shallow fetch 开始并
+反复 deepen，但 readiness 与发布只接受最终 non-shallow repository；filter、promisor、
+alternate、worktree 与交互式凭据提示始终禁止。最终验证要求 observed ref set 精确等于
+required refs，逐 commit 执行 `cat-file`，拒绝 `count-objects` 中非零的 garbage 或
+prune-packable，并以 `git fsck --full --strict --unreachable --no-reflogs --no-progress`
+拒绝 allowed refs 不可达的对象。默认 HTTPS；受控网络必须使用 SSH 时，只能通过
 `--github-transport ssh --ssh-executable /usr/bin/ssh` 将已验证 HTTPS identity 派生为固定
 GitHub SSH transport，并强制 BatchMode/no-prompt/host-key checking、忽略 ambient 用户 SSH
 配置且禁用 ProxyCommand/ProxyJump，不能接收任意 SSH URL。
+
+`prepare` 或 `verify` 每次调用的输入都是该 repository store 的完整授权 union。
+单 split 运行只能使用该 split 专属的独立 store；combined/reused store 每次都
+必须提供相同的完整 test+train union 和精确 digest pins。这是 operator/deployment
+约束：实现只强制检查当前调用输入推导出的精确 refs 与 object closure，不能证明
+该 store 的历史使用方式，也不能证明历次调用使用了相同的 split/task identity
+与 digest pins。
 
 ```bash
 python -m vulngym_agent.source_acquisition_cli prepare \
@@ -274,7 +284,9 @@ python -m vulngym_agent.source_acquisition_cli verify \
 ```
 
 输出的 acquisition report 不含宿主机路径，逐 commit 记录 root tree、tree mode、
-symlink/gitlink/LFS、资源上限、扫描完整性和稳定状态码；source-map 因包含 canonical
+symlink/gitlink/LFS、资源上限、扫描完整性和稳定状态码；逐 repository 的 object-hygiene
+摘要还绑定精确 ref inventory、最终 non-shallow 状态、full-fsck reachability 结果、零
+garbage/prune-packable count，以及 path-free 的有界 storage inventory。source-map 因包含 canonical
 absolute repo path，其 digest 必然与平台/部署路径绑定。fetch/fsck 成功不等于 sealed-ready：
 report 与 CLI summary 都闭合 `ready_task_count/blocked_task_count`；有 policy-blocked commit
 时仍发布诊断控制文件，但 CLI 返回 10，禁止自动化误把“取源成功”解释成“可制备”。输出
