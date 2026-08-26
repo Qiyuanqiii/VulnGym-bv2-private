@@ -5,6 +5,8 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -139,6 +141,177 @@ class SnapshotCliTests(unittest.TestCase):
         self.assertEqual(DIGEST, verify.call_args.kwargs["expected_manifest_sha256"])
         self.assertEqual(KEY_ID, verify.call_args.kwargs["expected_key_id"])
         self.assertEqual(KEY, verify.call_args.kwargs["attestation_key"])
+
+    def test_verify_output_control_flow_failures_are_stable_io_failures(self) -> None:
+        class FatalOutput(BaseException):
+            pass
+
+        (self.root / "sealed").mkdir()
+        for failure in (
+            BrokenPipeError("closed stdout"),
+            KeyboardInterrupt(),
+            FatalOutput(),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                error = StringIO()
+                with (
+                    mock.patch.object(
+                        snapshot_cli,
+                        "verify_snapshot_batch",
+                        return_value=self._summary(),
+                    ),
+                    mock.patch.object(
+                        snapshot_cli, "_print_json", side_effect=failure
+                    ),
+                    redirect_stderr(error),
+                ):
+                    status = snapshot_cli.main(
+                        [
+                            "verify-batch",
+                            "--sealed-root",
+                            str(self.root / "sealed"),
+                            "--expected-manifest-sha256",
+                            DIGEST,
+                            "--key-file",
+                            str(self.key_file),
+                            "--expected-key-id",
+                            KEY_ID,
+                        ]
+                    )
+                self.assertEqual(5, status)
+                self.assertEqual(
+                    "error[io_failed]: snapshot batch command failed\n",
+                    error.getvalue(),
+                )
+                self.assertNotIn(str(self.root), error.getvalue())
+
+    def test_failed_injected_stdout_is_detached_but_not_closed(self) -> None:
+        class FlushFailureStringIO(StringIO):
+            def flush(self) -> None:
+                raise BrokenPipeError("closed stdout")
+
+        output = FlushFailureStringIO()
+        error = StringIO()
+        with (
+            mock.patch.object(
+                snapshot_cli,
+                "prepare_snapshot_batch",
+                return_value=self._summary(),
+            ),
+            mock.patch.object(sys, "stdout", output),
+            redirect_stderr(error),
+        ):
+            status = snapshot_cli.main(self._prepare_arguments())
+            self.assertIsNone(sys.stdout)
+
+        self.assertEqual(5, status)
+        self.assertFalse(output.closed)
+        self.assertEqual(
+            "error[publication_uncertain]: "
+            "snapshot batch output may be committed\n",
+            error.getvalue(),
+        )
+
+    def test_closed_stdout_pipe_has_stable_process_exit_status(self) -> None:
+        child_code = """
+import sys
+from unittest import mock
+
+from vulngym_agent import snapshot_cli
+
+command = sys.argv[1]
+summary = type("Summary", (), {"to_dict": lambda self: {"ok": True}})()
+patchers = [
+    mock.patch.object(snapshot_cli, "_paths_overlap", return_value=False),
+    mock.patch.object(
+        snapshot_cli,
+        "_read_key_file",
+        return_value=bytearray(b"K" * 32),
+    ),
+]
+if command == "prepare":
+    patchers.append(
+        mock.patch.object(
+            snapshot_cli,
+            "prepare_snapshot_batch",
+            return_value=summary,
+        )
+    )
+    arguments = [
+        "prepare",
+        "--task-export-dir", "task-export",
+        "--expected-tasks-sha256", "a" * 64,
+        "--expected-public-manifest-sha256", "a" * 64,
+        "--source-map", "source-map.json",
+        "--expected-source-map-sha256", "a" * 64,
+        "--output-dir", "sealed",
+        "--key-file", "key.bin",
+        "--key-id", "test-key",
+    ]
+else:
+    patchers.extend(
+        [
+            mock.patch.object(
+                snapshot_cli,
+                "_batch_canonical_existing_path",
+                return_value=None,
+            ),
+            mock.patch.object(
+                snapshot_cli,
+                "verify_snapshot_batch",
+                return_value=summary,
+            ),
+        ]
+    )
+    arguments = [
+        "verify-batch",
+        "--sealed-root", "sealed",
+        "--expected-manifest-sha256", "a" * 64,
+        "--key-file", "key.bin",
+        "--expected-key-id", "test-key",
+    ]
+for patcher in patchers:
+    patcher.start()
+
+# The parent closes its stdout reader before releasing this one-byte gate.
+sys.stdin.buffer.read(1)
+raise SystemExit(snapshot_cli.main(arguments))
+"""
+        repository_root = Path(__file__).resolve().parents[1]
+        expected_errors = {
+            "prepare": (
+                "error[publication_uncertain]: "
+                "snapshot batch output may be committed"
+            ),
+            "verify": "error[io_failed]: snapshot batch command failed",
+        }
+
+        for command, expected_error in expected_errors.items():
+            with self.subTest(command=command):
+                process = subprocess.Popen(
+                    [sys.executable, "-B", "-c", child_code, command],
+                    cwd=repository_root,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                self.assertIsNotNone(process.stdin)
+                self.assertIsNotNone(process.stdout)
+                self.assertIsNotNone(process.stderr)
+                assert process.stdin is not None
+                assert process.stdout is not None
+                assert process.stderr is not None
+                process.stdout.close()
+                process.stdin.write(b"1")
+                process.stdin.close()
+                status = process.wait(timeout=30)
+                error = process.stderr.read().decode("utf-8", errors="strict")
+                process.stderr.close()
+
+                self.assertEqual(5, status)
+                self.assertEqual([expected_error], error.splitlines())
+                self.assertNotIn(str(repository_root), error)
+                self.assertNotIn(KEY.decode("ascii"), error)
 
     def test_missing_verify_root_uses_verification_exit_class(self) -> None:
         error = StringIO()

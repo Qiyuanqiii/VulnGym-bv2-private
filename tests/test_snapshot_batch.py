@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import hmac
+from io import StringIO
 import json
 import os
 from pathlib import Path
@@ -10,6 +12,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from vulngym_agent import snapshot_cli
 from vulngym_agent.benchmark.contracts import SnapshotTaskSpec
 from vulngym_agent.benchmark.harness import (
     PROFILE_ID,
@@ -27,6 +30,7 @@ from vulngym_agent.benchmark.snapshot_batch import (
     SnapshotBatchError,
     prepare_snapshot_batch,
     verify_snapshot_batch,
+    verify_snapshot_batch_with_evidence,
 )
 from vulngym_agent.tools.git.repository import GitRepository
 
@@ -202,6 +206,177 @@ class SnapshotBatchTests(unittest.TestCase):
         self.assertEqual(prepared.to_dict(), verified.to_dict())
         self.assertEqual(prepared.tasks, verified.tasks)
         self.assertNotIn(str(self.repo), json.dumps(prepared.to_dict()))
+
+    def test_trusted_evidence_requires_two_actual_full_verifications(self) -> None:
+        prepared = self._prepare()
+        with mock.patch.object(
+            snapshot_batch, "_OFFICIAL_SPLIT_COUNTS", {"train": 2, "test": 1}
+        ), mock.patch.object(
+            snapshot_batch,
+            "verify_snapshot_batch",
+            wraps=snapshot_batch.verify_snapshot_batch,
+        ) as verifier:
+            first = verify_snapshot_batch_with_evidence(
+                prepared.batch_root,
+                expected_manifest_sha256=prepared.manifest_sha256,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+            )
+            second = verify_snapshot_batch_with_evidence(
+                prepared.batch_root,
+                expected_manifest_sha256=prepared.manifest_sha256,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+            )
+
+        self.assertEqual(verifier.call_count, 2)
+        self.assertNotEqual(first.run_id, second.run_id)
+        self.assertEqual(first.semantic_sha256, second.semantic_sha256)
+        self.assertEqual(first.task_records_sha256, second.task_records_sha256)
+        self.assertEqual(
+            first.key_equality_tag_sha256, second.key_equality_tag_sha256
+        )
+        wire = json.dumps(first.to_dict(), sort_keys=True)
+        self.assertNotIn(str(prepared.batch_root), wire)
+        self.assertNotIn(KEY.decode("ascii"), wire)
+
+    def test_trusted_evidence_rejects_a_nondefault_snapshot_policy(self) -> None:
+        prepared = self._prepare()
+        custom_policy = SnapshotPolicy(max_files=99_999)
+        with mock.patch.object(snapshot_batch, "verify_snapshot_batch") as verifier:
+            with self.assertRaisesRegex(SnapshotBatchError, "fixed default policy"):
+                verify_snapshot_batch_with_evidence(
+                    prepared.batch_root,
+                    expected_manifest_sha256=prepared.manifest_sha256,
+                    attestation_key=KEY,
+                    expected_key_id=KEY_ID,
+                    policy=custom_policy,
+                )
+        verifier.assert_not_called()
+
+    def test_cli_prepare_output_interrupt_is_committed_uncertain_then_pinned_verify(
+        self,
+    ) -> None:
+        class FatalOutput(BaseException):
+            pass
+
+        key_file = self.root / "snapshot.key"
+        key_file.write_bytes(KEY)
+        key_file.chmod(0o600)
+
+        for index, failure in enumerate(
+            (
+                BrokenPipeError("closed stdout"),
+                KeyboardInterrupt(),
+                FatalOutput(),
+            ),
+            start=1,
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                sealed = self.root / f"cli-committed-{index}"
+                prepare_error = StringIO()
+                with (
+                    mock.patch.object(
+                        snapshot_batch,
+                        "_OFFICIAL_SPLIT_COUNTS",
+                        {"train": 2, "test": 1},
+                    ),
+                    mock.patch.object(
+                        snapshot_cli, "_print_json", side_effect=failure
+                    ),
+                    redirect_stderr(prepare_error),
+                ):
+                    status = snapshot_cli.main(
+                        [
+                            "prepare",
+                            "--task-export-dir",
+                            str(self.export_dir),
+                            "--expected-tasks-sha256",
+                            self.tasks_sha256,
+                            "--expected-public-manifest-sha256",
+                            PROFILE_MANIFEST_SHA256,
+                            "--source-map",
+                            str(self.source_map),
+                            "--expected-source-map-sha256",
+                            self.source_map_sha256,
+                            "--output-dir",
+                            str(sealed),
+                            "--key-file",
+                            str(key_file),
+                            "--key-id",
+                            KEY_ID,
+                        ]
+                    )
+                self.assertEqual(5, status)
+                self.assertEqual(
+                    "error[publication_uncertain]: snapshot batch output may be committed\n",
+                    prepare_error.getvalue(),
+                )
+                self.assertNotIn(str(self.root), prepare_error.getvalue())
+                self.assertEqual(
+                    {"bundles", "control"},
+                    {item.name for item in sealed.iterdir()},
+                )
+
+                manifest_sha256 = hashlib.sha256(
+                    (sealed / "control" / "manifest.jsonl").read_bytes()
+                ).hexdigest()
+                wrong_pin_error = StringIO()
+                with (
+                    mock.patch.object(
+                        snapshot_batch,
+                        "_OFFICIAL_SPLIT_COUNTS",
+                        {"train": 2, "test": 1},
+                    ),
+                    redirect_stderr(wrong_pin_error),
+                ):
+                    wrong_pin_status = snapshot_cli.main(
+                        [
+                            "verify-batch",
+                            "--sealed-root",
+                            str(sealed),
+                            "--expected-manifest-sha256",
+                            "0" * 64,
+                            "--key-file",
+                            str(key_file),
+                            "--expected-key-id",
+                            KEY_ID,
+                        ]
+                    )
+                self.assertEqual(4, wrong_pin_status)
+                self.assertIn(
+                    "error[batch_manifest_digest_mismatch]",
+                    wrong_pin_error.getvalue(),
+                )
+                self.assertTrue(sealed.is_dir())
+
+                verify_output = StringIO()
+                with (
+                    mock.patch.object(
+                        snapshot_batch,
+                        "_OFFICIAL_SPLIT_COUNTS",
+                        {"train": 2, "test": 1},
+                    ),
+                    redirect_stdout(verify_output),
+                ):
+                    verify_status = snapshot_cli.main(
+                        [
+                            "verify-batch",
+                            "--sealed-root",
+                            str(sealed),
+                            "--expected-manifest-sha256",
+                            manifest_sha256,
+                            "--key-file",
+                            str(key_file),
+                            "--expected-key-id",
+                            KEY_ID,
+                        ]
+                    )
+                self.assertEqual(0, verify_status)
+                self.assertEqual(
+                    manifest_sha256,
+                    json.loads(verify_output.getvalue())["manifest_sha256"],
+                )
 
     def test_v2_verifier_rejects_a_self_consistent_legacy_v1_batch(self) -> None:
         prepared = self._prepare("legacy-v1-batch")

@@ -73,8 +73,38 @@ def _print_json(value: object) -> None:
             allow_nan=False,
             sort_keys=True,
             separators=(",", ":"),
-        )
+        ),
+        flush=True,
     )
+
+
+def _suppress_failed_stdout_finalization() -> None:
+    """Prevent a poisoned stdout buffer from changing the process exit status."""
+
+    stream = sys.stdout
+    try:
+        stream.flush()
+    except BaseException:
+        # CPython retries flushing sys.stdout during finalization and changes
+        # the requested status to 120 if that retry fails. Detach only the
+        # broken process-global reference; never close a caller-owned stream.
+        if sys.stdout is stream:
+            sys.stdout = None
+
+
+def _report_output_failure(*, publication_uncertain: bool) -> int:
+    _suppress_failed_stdout_finalization()
+    code = "publication_uncertain" if publication_uncertain else "io_failed"
+    message = (
+        "snapshot batch output may be committed"
+        if publication_uncertain
+        else "snapshot batch command failed"
+    )
+    try:
+        print(f"error[{code}]: {message}", file=sys.stderr)
+    except BaseException:
+        pass
+    return 5
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -125,7 +155,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 5
     finally:
         zero_secret_buffer_v1(key)
-    _print_json(summary.to_dict())
+    try:
+        _print_json(summary.to_dict())
+    except BaseException:
+        return _report_output_failure(
+            publication_uncertain=args.command == "prepare"
+        )
     return 0
 
 

@@ -22,7 +22,9 @@ import os
 import re
 import secrets
 import stat
-from dataclasses import dataclass, field
+import threading
+import time
+from dataclasses import InitVar, dataclass, field
 from pathlib import Path
 from typing import Any, Final, Iterable, Mapping, Sequence
 
@@ -65,6 +67,25 @@ _BATCH_ATTESTATION_DOMAIN: Final[bytes] = (
 _BATCH_MATERIALIZED_DOMAIN: Final[bytes] = (
     b"VulnGym sealed snapshot batch materialized state v2\0"
 )
+SNAPSHOT_BATCH_EVIDENCE_CONTRACT_VERSION: Final[int] = 1
+SNAPSHOT_BATCH_EVIDENCE_KIND: Final[str] = (
+    "vulngym.sealed-snapshot-verification-evidence.v1"
+)
+SNAPSHOT_BATCH_EVIDENCE_SEMANTIC_DOMAIN: Final[bytes] = (
+    b"VulnGym sealed snapshot verification evidence v1\0"
+)
+SNAPSHOT_BATCH_EVIDENCE_RUN_ID_DOMAIN: Final[bytes] = (
+    b"VulnGym sealed snapshot verification run id v1\0"
+)
+SNAPSHOT_BATCH_KEY_EQUALITY_TAG_DOMAIN: Final[bytes] = (
+    b"VulnGym sealed snapshot key equality tag v1\0"
+)
+SNAPSHOT_BATCH_OUTPUT_IDENTITY_DOMAIN: Final[bytes] = (
+    b"VulnGym sealed snapshot output filesystem identity v1\0"
+)
+SNAPSHOT_BATCH_TASK_RECORDS_DOMAIN: Final[bytes] = (
+    b"VulnGym sealed snapshot batch task records v1\0"
+)
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _KEY_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
@@ -86,6 +107,11 @@ _MAX_BATCH_CLEANUP_NODES: Final[int] = (
 _MIN_KEY_BYTES: Final[int] = 32
 _MAX_KEY_BYTES: Final[int] = 4_096
 _OFFICIAL_SPLIT_COUNTS: Final[Mapping[str, int]] = {"train": 50, "test": 20}
+_SNAPSHOT_BATCH_EVIDENCE_MINT: Final[object] = object()
+_SNAPSHOT_BATCH_RUN_NONCE_BYTES: Final[int] = 32
+_SNAPSHOT_BATCH_KEY_EQUALITY_PEPPER: Final[bytes] = secrets.token_bytes(32)
+_SNAPSHOT_BATCH_EVIDENCE_REGISTRY_MAX: Final[int] = 64
+_SNAPSHOT_BATCH_EVIDENCE_TTL_SECONDS: Final[float] = 24 * 60 * 60
 
 
 class SnapshotBatchError(RuntimeError):
@@ -260,6 +286,316 @@ class SnapshotBatchSummary:
         }
 
 
+def _snapshot_batch_key_equality_tag(key_material: bytearray) -> str:
+    return hmac.new(
+        _SNAPSHOT_BATCH_KEY_EQUALITY_PEPPER,
+        SNAPSHOT_BATCH_KEY_EQUALITY_TAG_DOMAIN
+        + len(key_material).to_bytes(8, "big")
+        + key_material,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _snapshot_batch_output_identity_sha256(
+    output_identity: tuple[int, int],
+) -> str:
+    return _sha256(
+        SNAPSHOT_BATCH_OUTPUT_IDENTITY_DOMAIN
+        + _canonical_json(
+            {"device": output_identity[0], "file_id": output_identity[1]}
+        )
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotBatchVerificationEvidenceV1:
+    """Mint-only, path-free evidence from one complete batch verification."""
+
+    summary: SnapshotBatchSummary
+    _key_material: InitVar[bytearray]
+    _output_identity: InitVar[tuple[int, int]]
+    _run_nonce: InitVar[bytearray]
+    _mint: InitVar[object]
+    summary_wire_sha256: str = field(init=False)
+    task_records_sha256: str = field(init=False)
+    key_equality_tag_sha256: str = field(init=False)
+    output_identity_sha256: str = field(init=False)
+    semantic_sha256: str = field(init=False)
+    run_id: str = field(init=False)
+
+    def __post_init__(
+        self,
+        _key_material: bytearray,
+        _output_identity: tuple[int, int],
+        _run_nonce: bytearray,
+        _mint: object,
+    ) -> None:
+        if _mint is not _SNAPSHOT_BATCH_EVIDENCE_MINT:
+            raise SnapshotBatchError(
+                "untrusted_evidence",
+                "verification evidence must be minted by the trusted verifier",
+                exit_status=2,
+            )
+        if type(self.summary) is not SnapshotBatchSummary:
+            raise SnapshotBatchError(
+                "untrusted_evidence",
+                "verification evidence requires an exact verified summary",
+                exit_status=2,
+            )
+        if (
+            type(_key_material) is not bytearray
+            or not _MIN_KEY_BYTES <= len(_key_material) <= _MAX_KEY_BYTES
+            or type(_run_nonce) is not bytearray
+            or len(_run_nonce) != _SNAPSHOT_BATCH_RUN_NONCE_BYTES
+            or type(_output_identity) is not tuple
+            or len(_output_identity) != 2
+            or any(type(value) is not int or value < 0 for value in _output_identity)
+            or type(self.summary.tasks) is not tuple
+            or any(type(task) is not SnapshotBatchTask for task in self.summary.tasks)
+        ):
+            raise SnapshotBatchError(
+                "untrusted_evidence",
+                "verification evidence inputs violate the fixed contract",
+                exit_status=2,
+            )
+        summary_wire = _canonical_json(self.summary.to_dict()) + b"\n"
+        task_records = b"".join(
+            _canonical_json(task.to_record()) + b"\n"
+            for task in self.summary.tasks
+        )
+        summary_wire_sha256 = _sha256(summary_wire)
+        task_records_sha256 = _sha256(
+            SNAPSHOT_BATCH_TASK_RECORDS_DOMAIN + task_records
+        )
+        key_equality_tag_sha256 = _snapshot_batch_key_equality_tag(_key_material)
+        output_identity_sha256 = _snapshot_batch_output_identity_sha256(
+            _output_identity
+        )
+        core = {
+            "contract_version": SNAPSHOT_BATCH_EVIDENCE_CONTRACT_VERSION,
+            "key_equality_tag_sha256": key_equality_tag_sha256,
+            "kind": SNAPSHOT_BATCH_EVIDENCE_KIND,
+            "output_identity_sha256": output_identity_sha256,
+            "summary": self.summary.to_dict(),
+            "summary_wire_sha256": summary_wire_sha256,
+            "task_records_sha256": task_records_sha256,
+        }
+        semantic_sha256 = _sha256(
+            SNAPSHOT_BATCH_EVIDENCE_SEMANTIC_DOMAIN + _canonical_json(core)
+        )
+        run_id = _sha256(
+            SNAPSHOT_BATCH_EVIDENCE_RUN_ID_DOMAIN
+            + _run_nonce
+            + bytes.fromhex(semantic_sha256)
+        )
+        object.__setattr__(self, "summary_wire_sha256", summary_wire_sha256)
+        object.__setattr__(self, "task_records_sha256", task_records_sha256)
+        object.__setattr__(self, "key_equality_tag_sha256", key_equality_tag_sha256)
+        object.__setattr__(self, "output_identity_sha256", output_identity_sha256)
+        object.__setattr__(self, "semantic_sha256", semantic_sha256)
+        object.__setattr__(self, "run_id", run_id)
+
+    def _core_dict(self) -> dict[str, object]:
+        return {
+            "contract_version": SNAPSHOT_BATCH_EVIDENCE_CONTRACT_VERSION,
+            "key_equality_tag_sha256": self.key_equality_tag_sha256,
+            "kind": SNAPSHOT_BATCH_EVIDENCE_KIND,
+            "output_identity_sha256": self.output_identity_sha256,
+            "summary": self.summary.to_dict(),
+            "summary_wire_sha256": self.summary_wire_sha256,
+            "task_records_sha256": self.task_records_sha256,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        expected = _sha256(
+            SNAPSHOT_BATCH_EVIDENCE_SEMANTIC_DOMAIN
+            + _canonical_json(self._core_dict())
+        )
+        if expected != self.semantic_sha256:
+            raise SnapshotBatchError(
+                "untrusted_evidence",
+                "verification evidence changed after trusted minting",
+                exit_status=4,
+            )
+        return {
+            **self._core_dict(),
+            "run_id": self.run_id,
+            "semantic_sha256": self.semantic_sha256,
+        }
+
+
+_SNAPSHOT_BATCH_EVIDENCE_LOCK: Final[threading.Lock] = threading.Lock()
+
+
+@dataclass(frozen=True, slots=True)
+class _SnapshotBatchEvidenceRegistration:
+    evidence: SnapshotBatchVerificationEvidenceV1
+    wire_sha256: str
+    batch_root: Path
+    output_identity: tuple[int, int]
+    minted_monotonic: float
+
+
+_SNAPSHOT_BATCH_EVIDENCE_REGISTRY: Final[
+    dict[int, _SnapshotBatchEvidenceRegistration]
+] = {}
+
+
+def _purge_expired_snapshot_batch_evidence_locked(now: float) -> None:
+    expired = tuple(
+        evidence_id
+        for evidence_id, registration in _SNAPSHOT_BATCH_EVIDENCE_REGISTRY.items()
+        if now < registration.minted_monotonic
+        or now - registration.minted_monotonic
+        > _SNAPSHOT_BATCH_EVIDENCE_TTL_SECONDS
+    )
+    for evidence_id in expired:
+        _SNAPSHOT_BATCH_EVIDENCE_REGISTRY.pop(evidence_id, None)
+
+
+def _register_snapshot_batch_verification_evidence(
+    evidence: SnapshotBatchVerificationEvidenceV1,
+    *,
+    batch_root: Path,
+    output_identity: tuple[int, int],
+) -> None:
+    wire_sha256 = _sha256(_canonical_json(evidence.to_dict()))
+    minted_monotonic = time.monotonic()
+    with _SNAPSHOT_BATCH_EVIDENCE_LOCK:
+        _purge_expired_snapshot_batch_evidence_locked(minted_monotonic)
+        if len(_SNAPSHOT_BATCH_EVIDENCE_REGISTRY) >= (
+            _SNAPSHOT_BATCH_EVIDENCE_REGISTRY_MAX
+        ):
+            raise SnapshotBatchError(
+                "evidence_registry_full",
+                "verification evidence registry reached its fixed capacity",
+                exit_status=4,
+            )
+        if id(evidence) in _SNAPSHOT_BATCH_EVIDENCE_REGISTRY:
+            raise SnapshotBatchError(
+                "untrusted_evidence",
+                "verification evidence identity is already registered",
+                exit_status=4,
+            )
+        _SNAPSHOT_BATCH_EVIDENCE_REGISTRY[id(evidence)] = (
+            _SnapshotBatchEvidenceRegistration(
+                evidence=evidence,
+                wire_sha256=wire_sha256,
+                batch_root=batch_root,
+                output_identity=output_identity,
+                minted_monotonic=minted_monotonic,
+            )
+        )
+
+
+def _claim_snapshot_batch_verification_evidence_batch(
+    *,
+    test_evidence: tuple[
+        SnapshotBatchVerificationEvidenceV1,
+        SnapshotBatchVerificationEvidenceV1,
+    ],
+    train_evidence: tuple[
+        SnapshotBatchVerificationEvidenceV1,
+        SnapshotBatchVerificationEvidenceV1,
+    ],
+) -> None:
+    """Atomically consume four fresh, unchanged trusted verifier mints.
+
+    The final root checks close deletion, replacement, rename, and same-path
+    split reuse between verification and receipt creation.  They cannot make
+    mutable filesystem contents transactionally immutable: the formal caller
+    must isolate both roots read-only and exclude concurrent writers after the
+    verification runs.
+    """
+
+    if (
+        type(test_evidence) is not tuple
+        or type(train_evidence) is not tuple
+        or len(test_evidence) != 2
+        or len(train_evidence) != 2
+    ):
+        raise SnapshotBatchError(
+            "untrusted_evidence",
+            "verification evidence must be an exact two-round split pair",
+            exit_status=2,
+        )
+    evidence_values = (*test_evidence, *train_evidence)
+    if any(
+        type(evidence) is not SnapshotBatchVerificationEvidenceV1
+        for evidence in evidence_values
+    ) or len({id(evidence) for evidence in evidence_values}) != len(
+        evidence_values
+    ):
+        raise SnapshotBatchError(
+            "untrusted_evidence",
+            "verification evidence was forged, copied, or reused",
+            exit_status=2,
+        )
+
+    with _SNAPSHOT_BATCH_EVIDENCE_LOCK:
+        now = time.monotonic()
+        registrations: list[_SnapshotBatchEvidenceRegistration] = []
+        for evidence in evidence_values:
+            registration = _SNAPSHOT_BATCH_EVIDENCE_REGISTRY.get(id(evidence))
+            if (
+                registration is None
+                or registration.evidence is not evidence
+                or now < registration.minted_monotonic
+                or now - registration.minted_monotonic
+                > _SNAPSHOT_BATCH_EVIDENCE_TTL_SECONDS
+                or registration.wire_sha256
+                != _sha256(_canonical_json(evidence.to_dict()))
+                or evidence.summary.batch_root != registration.batch_root
+                or evidence.output_identity_sha256
+                != _snapshot_batch_output_identity_sha256(
+                    registration.output_identity
+                )
+            ):
+                raise SnapshotBatchError(
+                    "untrusted_evidence",
+                    "verification evidence was forged, changed, stale, or reused",
+                    exit_status=2,
+                )
+            current_root = _canonical_existing_path(
+                registration.batch_root,
+                directory=True,
+                status=4,
+            )
+            current_identity = _directory_identity(
+                _require_safe_directory(current_root, status=4)
+            )
+            if (
+                current_root != registration.batch_root
+                or current_identity != registration.output_identity
+            ):
+                raise SnapshotBatchError(
+                    "stale_evidence",
+                    "verified snapshot output changed before evidence claim",
+                    exit_status=4,
+                )
+            registrations.append(registration)
+
+        test_first, test_second, train_first, train_second = registrations
+        if (
+            test_first.batch_root != test_second.batch_root
+            or test_first.output_identity != test_second.output_identity
+            or train_first.batch_root != train_second.batch_root
+            or train_first.output_identity != train_second.output_identity
+            or test_first.batch_root == train_first.batch_root
+            or test_first.output_identity == train_first.output_identity
+        ):
+            raise SnapshotBatchError(
+                "untrusted_evidence",
+                "verification evidence reuses or changes a split output root",
+                exit_status=2,
+            )
+
+        # No passed registration is consumed until every registry, wire, TTL,
+        # path, and current-identity check has succeeded for all four values.
+        for evidence in evidence_values:
+            del _SNAPSHOT_BATCH_EVIDENCE_REGISTRY[id(evidence)]
+
+
 @dataclass(frozen=True, slots=True)
 class VerifiedTaskExport:
     """One fully authenticated answer-free task export.
@@ -422,6 +758,34 @@ def _copy_key(value: object) -> bytes:
             exit_status=2,
         )
     return key
+
+
+def _copy_key_buffer(value: object) -> bytearray:
+    """Copy key material into a mutable buffer that callers can zero."""
+
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise SnapshotBatchError(
+            "invalid_key", "attestation key must be bytes-like", exit_status=2
+        )
+    try:
+        key = bytearray(value)
+    except (BufferError, TypeError, ValueError):
+        raise SnapshotBatchError(
+            "invalid_key", "attestation key must be a flat byte buffer", exit_status=2
+        ) from None
+    if not _MIN_KEY_BYTES <= len(key) <= _MAX_KEY_BYTES:
+        _zero_buffer(key)
+        raise SnapshotBatchError(
+            "invalid_key",
+            "attestation key violates its fixed byte budget",
+            exit_status=2,
+        )
+    return key
+
+
+def _zero_buffer(value: bytearray) -> None:
+    for index in range(len(value)):
+        value[index] = 0
 
 
 def _validate_key_id(value: object) -> str:
@@ -2966,14 +3330,78 @@ def verify_snapshot_batch(
     )
 
 
+def verify_snapshot_batch_with_evidence(
+    batch_root: str | os.PathLike[str],
+    *,
+    expected_manifest_sha256: str,
+    attestation_key: bytes | bytearray | memoryview,
+    expected_key_id: str,
+    policy: SnapshotPolicy = DEFAULT_SNAPSHOT_POLICY,
+) -> SnapshotBatchVerificationEvidenceV1:
+    """Run full verification and mint non-replayable path-free evidence."""
+
+    if type(policy) is not SnapshotPolicy or policy != DEFAULT_SNAPSHOT_POLICY:
+        raise SnapshotBatchError(
+            "invalid_policy",
+            "trusted verification evidence requires the fixed default policy",
+            exit_status=2,
+        )
+    root = _canonical_existing_path(batch_root, directory=True, status=4)
+    before_identity = _directory_identity(_require_safe_directory(root, status=4))
+    key_buffer = _copy_key_buffer(attestation_key)
+    run_nonce = bytearray(_SNAPSHOT_BATCH_RUN_NONCE_BYTES)
+    try:
+        run_nonce[:] = secrets.token_bytes(_SNAPSHOT_BATCH_RUN_NONCE_BYTES)
+        summary = verify_snapshot_batch(
+            root,
+            expected_manifest_sha256=expected_manifest_sha256,
+            attestation_key=key_buffer,
+            expected_key_id=expected_key_id,
+            policy=policy,
+        )
+        after_identity = _directory_identity(
+            _require_safe_directory(root, status=4)
+        )
+        if summary.batch_root != root or after_identity != before_identity:
+            raise SnapshotBatchError(
+                "batch_changed",
+                "batch root identity changed across evidence minting",
+                exit_status=4,
+            )
+        evidence = SnapshotBatchVerificationEvidenceV1(
+            summary=summary,
+            _key_material=key_buffer,
+            _output_identity=after_identity,
+            _run_nonce=run_nonce,
+            _mint=_SNAPSHOT_BATCH_EVIDENCE_MINT,
+        )
+        _register_snapshot_batch_verification_evidence(
+            evidence,
+            batch_root=root,
+            output_identity=after_identity,
+        )
+        return evidence
+    finally:
+        _zero_buffer(run_nonce)
+        _zero_buffer(key_buffer)
+
+
 __all__ = [
     "BATCH_CONTRACT_VERSION",
     "SOURCE_MAP_KIND",
     "SOURCE_MAP_SCHEMA_VERSION",
+    "SNAPSHOT_BATCH_EVIDENCE_CONTRACT_VERSION",
+    "SNAPSHOT_BATCH_EVIDENCE_KIND",
+    "SNAPSHOT_BATCH_EVIDENCE_RUN_ID_DOMAIN",
+    "SNAPSHOT_BATCH_EVIDENCE_SEMANTIC_DOMAIN",
+    "SNAPSHOT_BATCH_KEY_EQUALITY_TAG_DOMAIN",
+    "SNAPSHOT_BATCH_OUTPUT_IDENTITY_DOMAIN",
+    "SNAPSHOT_BATCH_TASK_RECORDS_DOMAIN",
     "SnapshotSourceMapDocument",
     "SnapshotBatchError",
     "SnapshotBatchSummary",
     "SnapshotBatchTask",
+    "SnapshotBatchVerificationEvidenceV1",
     "VerifiedSnapshotSourceMap",
     "VerifiedTaskExport",
     "build_snapshot_source_map_document",
@@ -2981,4 +3409,5 @@ __all__ = [
     "load_verified_task_export",
     "prepare_snapshot_batch",
     "verify_snapshot_batch",
+    "verify_snapshot_batch_with_evidence",
 ]
