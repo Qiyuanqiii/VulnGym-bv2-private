@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -42,6 +43,34 @@ def _canonical(value: object) -> bytes:
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
+
+
+def _fetch_storage_seal(
+    *,
+    object_entry_count: int = 3,
+    object_total_bytes: int = 300,
+    object_inventory_sha256: str = "a" * 64,
+    refs_entry_count: int = 0,
+    refs_total_bytes: int = 0,
+    refs_inventory_sha256: str = "b" * 64,
+    shallow_sha256: str | None = None,
+) -> source_acquisition.GitStorageSeal:
+    return source_acquisition.GitStorageSeal(
+        git_directory_identity=(1, 1),
+        object_directory_identity=(1, 2),
+        refs_directory_identity=(1, 3),
+        pack_directory_identity=(1, 4),
+        config_identity=(1, 5, 10, 100),
+        head_identity=(1, 6, 10, 100),
+        packed_refs_identity=None,
+        object_entry_count=object_entry_count,
+        object_total_bytes=object_total_bytes,
+        object_inventory_sha256=object_inventory_sha256,
+        refs_entry_count=refs_entry_count,
+        refs_total_bytes=refs_total_bytes,
+        refs_inventory_sha256=refs_inventory_sha256,
+        shallow_sha256=shallow_sha256,
+    )
 
 
 class SourceAcquisitionIntegrationTests(unittest.TestCase):
@@ -207,6 +236,9 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         self.assertEqual(
             report["contract_version"], SOURCE_ACQUISITION_CONTRACT_VERSION
         )
+        self.assertEqual(
+            report["contract_version"], "vulngym.source-acquisition.v4"
+        )
         self.assertEqual(report["github_transport"], "https")
         self.assertEqual(report["task_count"], 70)
         self.assertEqual(report["repository_count"], 1)
@@ -219,6 +251,12 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(report["fetch_protocol"]["initial_depth"], 32)
         self.assertEqual(report["fetch_protocol"]["deepen_by"], 32)
+        self.assertEqual(
+            report["fetch_protocol"][
+                "max_transient_fetch_retries_per_repository"
+            ],
+            1,
+        )
         self.assertTrue(report["fetch_protocol"]["requires_exact_ref_closure"])
         self.assertTrue(report["fetch_protocol"]["requires_final_full_fsck"])
         self.assertTrue(report["fetch_protocol"]["requires_final_non_shallow"])
@@ -236,6 +274,11 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         self.assertTrue(
             report["fetch_protocol"][
                 "requires_final_verified_multi_pack_index"
+            ]
+        )
+        self.assertTrue(
+            report["fetch_protocol"][
+                "retry_requires_unchanged_repository_seal"
             ]
         )
         self.assertTrue(report["ready"])
@@ -580,7 +623,7 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
                 value == "--deepen=32" for value in arguments
             ):
                 deepen_calls += 1
-                if deepen_calls == 2:
+                if deepen_calls in {2, 3}:
                     raise SourceAcquisitionError(
                         "git_command_failed",
                         "simulated connection interruption",
@@ -607,7 +650,9 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
         shallow = repository / "shallow"
         self.assertTrue(shallow.is_file())
         completed_boundary = hashlib.sha256(shallow.read_bytes()).hexdigest()
-        self.assertEqual(deepen_calls, 2)
+        # The second segment consumes the one repository-wide retry token and
+        # then fails closed, preserving the first completed deepen for resume.
+        self.assertEqual(deepen_calls, 3)
 
         resumed_fetches: list[tuple[str, ...]] = []
 
@@ -853,6 +898,7 @@ class SourceAcquisitionContractTests(unittest.TestCase):
     def test_fetch_is_exact_atomic_segmented_and_has_no_checkout_surface(self) -> None:
         commit = "1" * 40
         repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.capture_storage_seal.return_value = _fetch_storage_seal()
         failure = SourceAcquisitionError(
             "git_command_failed", "simulated network failure", exit_status=3
         )
@@ -860,6 +906,8 @@ class SourceAcquisitionContractTests(unittest.TestCase):
             source_acquisition, "_run_git", side_effect=failure
         ) as runner, mock.patch.object(
             source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition, "_read_vulngym_refs", return_value={}
         ), self.assertRaises(SourceAcquisitionError):
             source_acquisition._fetch_missing_commits(
                 Path("C:/trusted/repository.git"),
@@ -871,7 +919,10 @@ class SourceAcquisitionContractTests(unittest.TestCase):
                 github_transport="ssh",
                 ssh_executable=Path("C:/trusted/ssh.exe"),
             )
-        arguments = runner.call_args.args[2]
+        self.assertEqual(runner.call_count, 2)
+        first_arguments = runner.call_args_list[0].args[2]
+        arguments = runner.call_args_list[1].args[2]
+        self.assertEqual(arguments, first_arguments)
         self.assertEqual(arguments[0], "fetch")
         for required in (
             "--atomic",
@@ -890,6 +941,310 @@ class SourceAcquisitionContractTests(unittest.TestCase):
                 for argument in arguments
             )
         )
+
+    def test_one_transient_fetch_failure_retries_with_same_arguments(self) -> None:
+        commit = "1" * 40
+        ref_name = f"refs/vulngym/{commit}"
+        refs = {ref_name: commit}
+        before = _fetch_storage_seal()
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.capture_storage_seal.side_effect = (
+            before,
+            before,
+            before,
+            before,
+            before,
+            before,
+            before,
+            before,
+        )
+        repository.history_is_shallow.return_value = False
+        failure = SourceAcquisitionError(
+            "git_command_failed", "simulated transient failure", exit_status=3
+        )
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.object(
+            source_acquisition, "_run_git", side_effect=(failure, completed)
+        ) as runner, mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition,
+            "_read_vulngym_refs",
+            side_effect=({}, {}, refs, refs),
+        ), mock.patch.object(
+            source_acquisition, "_write_verified_multi_pack_index"
+        ):
+            source_acquisition._fetch_missing_commits(
+                Path("C:/trusted/repository.git"),
+                repository,
+                repo_url=REPO_URL,
+                commits=(commit,),
+                refs={},
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+            )
+        self.assertEqual(runner.call_count, 2)
+        self.assertEqual(
+            runner.call_args_list[0].args[2], runner.call_args_list[1].args[2]
+        )
+        repository.commit_tree.assert_called_once_with(commit)
+
+    def test_transient_retry_token_is_shared_across_fetch_segments(self) -> None:
+        commit = "1" * 40
+        refs = {f"refs/vulngym/{commit}": commit}
+        before = _fetch_storage_seal()
+        shallow = replace(before, shallow_sha256="c" * 64)
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.capture_storage_seal.side_effect = (
+            before,
+            before,
+            before,
+            before,
+            shallow,
+            shallow,
+            shallow,
+            shallow,
+        )
+        repository.history_is_shallow.return_value = True
+        first_failure = SourceAcquisitionError(
+            "git_command_failed", "initial transient failure", exit_status=3
+        )
+        deepen_failure = SourceAcquisitionError(
+            "git_command_failed", "deepen transient failure", exit_status=3
+        )
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.object(
+            source_acquisition,
+            "_run_git",
+            side_effect=(first_failure, completed, deepen_failure),
+        ) as runner, mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition,
+            "_read_vulngym_refs",
+            side_effect=({}, {}, refs, refs),
+        ), self.assertRaises(SourceAcquisitionError) as captured:
+            source_acquisition._fetch_missing_commits(
+                Path("C:/trusted/repository.git"),
+                repository,
+                repo_url=REPO_URL,
+                commits=(commit,),
+                refs={},
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+            )
+        self.assertIs(captured.exception, deepen_failure)
+        self.assertEqual(runner.call_count, 3)
+        self.assertEqual(
+            runner.call_args_list[0].args[2], runner.call_args_list[1].args[2]
+        )
+        self.assertIn("--deepen=32", runner.call_args_list[2].args[2])
+
+    def test_transient_fetch_retry_uses_the_original_network_budget(self) -> None:
+        commit = "1" * 40
+        refs = {f"refs/vulngym/{commit}": commit}
+        seal = _fetch_storage_seal()
+        repository = mock.Mock(spec=source_acquisition.GitRepository)
+        repository.capture_storage_seal.return_value = seal
+        repository.history_is_shallow.return_value = False
+        failure = SourceAcquisitionError(
+            "git_command_failed", "simulated transient failure", exit_status=3
+        )
+        completed = subprocess.CompletedProcess(
+            args=(), returncode=0, stdout=b"", stderr=b""
+        )
+        with mock.patch.object(
+            source_acquisition, "_run_git", side_effect=(failure, completed)
+        ) as runner, mock.patch.object(
+            source_acquisition, "_assert_recovery_state_clean"
+        ), mock.patch.object(
+            source_acquisition,
+            "_read_vulngym_refs",
+            side_effect=({}, {}, refs, refs),
+        ), mock.patch.object(
+            source_acquisition, "_write_verified_multi_pack_index"
+        ), mock.patch.object(
+            source_acquisition.time,
+            "monotonic",
+            side_effect=(0.0, 19_000.0, 21_000.0, 21_001.0),
+        ):
+            source_acquisition._fetch_missing_commits(
+                Path("C:/trusted/repository.git"),
+                repository,
+                repo_url=REPO_URL,
+                commits=(commit,),
+                refs={},
+                git_executable=Path("C:/trusted/git.exe"),
+                github_transport="https",
+                ssh_executable=None,
+            )
+        self.assertEqual(
+            [call.kwargs["timeout_seconds"] for call in runner.call_args_list],
+            [2_600.0, 600.0],
+        )
+
+    def test_fetch_retry_rejects_changed_control_plane(self) -> None:
+        commit = "1" * 40
+        before = _fetch_storage_seal()
+        cases = {
+            "logical-refs": (
+                before,
+                {f"refs/vulngym/{'2' * 40}": "2" * 40},
+            ),
+            "refs-storage": (
+                replace(
+                    before,
+                    refs_entry_count=1,
+                    refs_total_bytes=41,
+                    refs_inventory_sha256="9" * 64,
+                ),
+                {},
+            ),
+            "shallow": (replace(before, shallow_sha256="d" * 64), {}),
+            "identity": (
+                replace(before, config_identity=(1, 50, 10, 100)),
+                {},
+            ),
+            "object-shrink": (
+                replace(
+                    before,
+                    object_entry_count=before.object_entry_count - 1,
+                    object_total_bytes=before.object_total_bytes - 1,
+                    object_inventory_sha256="e" * 64,
+                ),
+                {},
+            ),
+            "object-replacement-without-growth": (
+                replace(before, object_inventory_sha256="f" * 64),
+                {},
+            ),
+            "object-replacement-with-aggregate-growth": (
+                replace(
+                    before,
+                    object_entry_count=before.object_entry_count + 2,
+                    object_total_bytes=before.object_total_bytes + 500,
+                    object_inventory_sha256="7" * 64,
+                ),
+                {},
+            ),
+        }
+        for label, (changed, changed_refs) in cases.items():
+            with self.subTest(label=label):
+                repository = mock.Mock(spec=source_acquisition.GitRepository)
+                repository.capture_storage_seal.side_effect = (
+                    before,
+                    before,
+                    changed,
+                    changed,
+                )
+                failure = SourceAcquisitionError(
+                    "git_command_failed",
+                    "simulated transient failure",
+                    exit_status=3,
+                )
+                with mock.patch.object(
+                    source_acquisition, "_run_git", side_effect=failure
+                ) as runner, mock.patch.object(
+                    source_acquisition, "_assert_recovery_state_clean"
+                ), mock.patch.object(
+                    source_acquisition,
+                    "_read_vulngym_refs",
+                    side_effect=({}, changed_refs),
+                ), self.assertRaises(SourceAcquisitionError) as captured:
+                    source_acquisition._fetch_missing_commits(
+                        Path("C:/trusted/repository.git"),
+                        repository,
+                        repo_url=REPO_URL,
+                        commits=(commit,),
+                        refs={},
+                        git_executable=Path("C:/trusted/git.exe"),
+                        github_transport="https",
+                        ssh_executable=None,
+                    )
+                self.assertEqual(captured.exception.code, "repository_changed")
+                self.assertEqual(runner.call_count, 1)
+
+    def test_nontransient_fetch_failures_and_interrupts_are_not_retried(self) -> None:
+        commit = "1" * 40
+        failures: tuple[BaseException, ...] = (
+            SourceAcquisitionError("git_timeout", "timeout", exit_status=3),
+            SourceAcquisitionError(
+                "git_output_limit", "output limit", exit_status=3
+            ),
+            SourceAcquisitionError(
+                "git_unavailable", "unavailable", exit_status=3
+            ),
+            KeyboardInterrupt(),
+            SystemExit(7),
+        )
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                repository = mock.Mock(spec=source_acquisition.GitRepository)
+                repository.capture_storage_seal.return_value = _fetch_storage_seal()
+                with mock.patch.object(
+                    source_acquisition, "_run_git", side_effect=failure
+                ) as runner, mock.patch.object(
+                    source_acquisition, "_assert_recovery_state_clean"
+                ), mock.patch.object(
+                    source_acquisition, "_read_vulngym_refs", return_value={}
+                ), self.assertRaises(type(failure)) as captured:
+                    source_acquisition._fetch_missing_commits(
+                        Path("C:/trusted/repository.git"),
+                        repository,
+                        repo_url=REPO_URL,
+                        commits=(commit,),
+                        refs={},
+                        git_executable=Path("C:/trusted/git.exe"),
+                        github_transport="https",
+                        ssh_executable=None,
+                    )
+                self.assertIs(captured.exception, failure)
+                self.assertEqual(runner.call_count, 1)
+
+    def test_fetch_failure_preserves_cleanup_required(self) -> None:
+        commit = "1" * 40
+        for failure in (
+            SourceAcquisitionError(
+                "git_command_failed", "simulated transient failure", exit_status=3
+            ),
+            KeyboardInterrupt(),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                repository = mock.Mock(spec=source_acquisition.GitRepository)
+                repository.capture_storage_seal.return_value = (
+                    _fetch_storage_seal()
+                )
+                cleanup = SourceAcquisitionError(
+                    "cleanup_required", "simulated lock residue", exit_status=3
+                )
+                with mock.patch.object(
+                    source_acquisition, "_run_git", side_effect=failure
+                ) as runner, mock.patch.object(
+                    source_acquisition,
+                    "_assert_recovery_state_clean",
+                    side_effect=(None, None, cleanup),
+                ), mock.patch.object(
+                    source_acquisition, "_read_vulngym_refs", return_value={}
+                ), self.assertRaises(SourceAcquisitionError) as captured:
+                    source_acquisition._fetch_missing_commits(
+                        Path("C:/trusted/repository.git"),
+                        repository,
+                        repo_url=REPO_URL,
+                        commits=(commit,),
+                        refs={},
+                        git_executable=Path("C:/trusted/git.exe"),
+                        github_transport="https",
+                        ssh_executable=None,
+                    )
+                self.assertIs(captured.exception, cleanup)
+                self.assertIs(captured.exception.__cause__, failure)
+                self.assertEqual(runner.call_count, 1)
 
     def test_multi_pack_index_is_verified_and_preserves_repository_facts(self) -> None:
         commit = "1" * 40

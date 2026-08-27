@@ -63,7 +63,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 
 
 SOURCE_ACQUISITION_CONTRACT_VERSION: Final[str] = (
-    "vulngym.source-acquisition.v3"
+    "vulngym.source-acquisition.v4"
 )
 SOURCE_ACQUISITION_REPORT_NAME: Final[str] = "acquisition-report.json"
 SOURCE_NOT_READY_EXIT_STATUS: Final[int] = 10
@@ -90,6 +90,7 @@ _GIT_MAX_STDERR_BYTES: Final[int] = 4 * 1024 * 1024
 _FETCH_DEPTH_STEP: Final[int] = 32
 _MAX_DEEPEN_ROUNDS: Final[int] = 2_048
 _MAX_TOTAL_NETWORK_SECONDS: Final[float] = 6.0 * 60.0 * 60.0
+_MAX_TRANSIENT_FETCH_RETRIES_PER_REPOSITORY: Final[int] = 1
 _MAX_RECOVERY_ARTIFACTS: Final[int] = 256
 _MAX_RECOVERY_ARTIFACT_BYTES: Final[int] = 4 * 1024 * 1024 * 1024
 _MULTI_PACK_INDEX_NAME: Final[str] = "multi-pack-index"
@@ -1013,7 +1014,7 @@ def _assert_packed_storage(
     if counts["packs"] < 1 or counts["in-pack"] < 1:
         raise SourceAcquisitionError(
             "packed_storage_required",
-            "source acquisition v3 requires packed storage for its verified MIDX",
+            "source acquisition v4 requires packed storage for its verified MIDX",
             exit_status=status,
         )
 
@@ -1239,6 +1240,20 @@ def _fetch_missing_commits(
     )
     started = time.monotonic()
 
+    def retry_repository_state_unchanged(
+        before: GitStorageSeal,
+        before_refs: Mapping[str, str],
+        after: GitStorageSeal,
+        after_refs: Mapping[str, str],
+    ) -> bool:
+        # Aggregate object counts cannot prove append-only growth: a concurrent
+        # replacement plus a larger new pack could otherwise look monotonic.
+        # Spend the single retry token only when the complete path-free storage
+        # seal and the independently parsed logical refs are byte-for-byte stable.
+        # A failed command that persisted any repository mutation is resumable by
+        # a later full invocation, but is never retried in place.
+        return before == after and dict(before_refs) == dict(after_refs)
+
     def verify_segment(
         *, verify_commit_objects: bool = False
     ) -> tuple[GitStorageSeal, dict[str, str]]:
@@ -1283,42 +1298,76 @@ def _fetch_missing_commits(
             )
         return seal, observed
 
-    def run_segment(arguments: tuple[str, ...]) -> None:
-        remaining = _MAX_TOTAL_NETWORK_SECONDS - (time.monotonic() - started)
-        if remaining <= 0:
-            raise SourceAcquisitionError(
-                "fetch_budget_exhausted",
-                "segmented fetch exceeded its total network time budget",
-                exit_status=3,
-            )
-        _assert_recovery_state_clean(repository_root, status=3)
-        try:
-            _run_git(
-                git_executable,
-                repository_root,
-                arguments,
-                github_transport=github_transport,
-                ssh_executable=ssh_executable,
-                timeout_seconds=min(_GIT_NETWORK_TIMEOUT_SECONDS, remaining),
-            )
-        except SourceAcquisitionError as error:
-            # The bounded runner has reaped the Git parent. If Git left any
-            # transaction name, portable conditional cleanup cannot prove the
-            # name still denotes that inode; report cleanup_required instead.
+    transient_retries_remaining = _MAX_TRANSIENT_FETCH_RETRIES_PER_REPOSITORY
+
+    def run_segment(
+        arguments: tuple[str, ...],
+        *,
+        before: GitStorageSeal,
+        before_refs: Mapping[str, str],
+    ) -> None:
+        nonlocal transient_retries_remaining
+        while True:
+            remaining = _MAX_TOTAL_NETWORK_SECONDS - (time.monotonic() - started)
+            if remaining <= 0:
+                raise SourceAcquisitionError(
+                    "fetch_budget_exhausted",
+                    "segmented fetch exceeded its total network time budget",
+                    exit_status=3,
+                )
+            _assert_recovery_state_clean(repository_root, status=3)
             try:
-                _assert_recovery_state_clean(repository_root, status=3)
-            except SourceAcquisitionError as cleanup_error:
-                raise cleanup_error from error
-            raise
-        if time.monotonic() - started > _MAX_TOTAL_NETWORK_SECONDS:
-            raise SourceAcquisitionError(
-                "fetch_budget_exhausted",
-                "segmented fetch exceeded its total network time budget",
-                exit_status=3,
-            )
-        _assert_recovery_state_clean(repository_root, status=3)
+                _run_git(
+                    git_executable,
+                    repository_root,
+                    arguments,
+                    github_transport=github_transport,
+                    ssh_executable=ssh_executable,
+                    timeout_seconds=min(_GIT_NETWORK_TIMEOUT_SECONDS, remaining),
+                )
+            except BaseException as error:
+                # The bounded runner has reaped the Git parent. If Git left any
+                # transaction name, portable conditional cleanup cannot prove
+                # the name still denotes that inode; cleanup_required therefore
+                # takes precedence even for an interrupt or non-retryable error.
+                try:
+                    _assert_recovery_state_clean(repository_root, status=3)
+                except SourceAcquisitionError as cleanup_error:
+                    raise cleanup_error from error
+                if (
+                    not isinstance(error, SourceAcquisitionError)
+                    or error.code != "git_command_failed"
+                    or transient_retries_remaining == 0
+                ):
+                    raise
+                failed, failed_refs = verify_segment()
+                if not retry_repository_state_unchanged(
+                    before, before_refs, failed, failed_refs
+                ):
+                    raise SourceAcquisitionError(
+                        "repository_changed",
+                        "a failed fetch changed the sealed repository state",
+                        exit_status=3,
+                    ) from error
+                transient_retries_remaining -= 1
+                continue
+            if time.monotonic() - started > _MAX_TOTAL_NETWORK_SECONDS:
+                raise SourceAcquisitionError(
+                    "fetch_budget_exhausted",
+                    "segmented fetch exceeded its total network time budget",
+                    exit_status=3,
+                )
+            _assert_recovery_state_clean(repository_root, status=3)
+            return
 
     if missing:
+        before, baseline_refs = verify_segment()
+        if dict(baseline_refs) != dict(refs):
+            raise SourceAcquisitionError(
+                "repository_changed",
+                "repository refs changed before the initial fetch",
+                exit_status=3,
+            )
         initial_refspecs = tuple(
             f"+{commit}:refs/vulngym/{commit}" for commit in missing
         )
@@ -1334,7 +1383,9 @@ def _fetch_missing_commits(
                 "--no-write-fetch-head",
                 fetch_url,
                 *initial_refspecs,
-            )
+            ),
+            before=before,
+            before_refs=baseline_refs,
         )
         _, refs = verify_segment()
         if any(
@@ -1375,7 +1426,9 @@ def _fetch_missing_commits(
                 "--no-write-fetch-head",
                 fetch_url,
                 *all_refspecs,
-            )
+            ),
+            before=before,
+            before_refs=refs,
         )
         after, after_refs = verify_segment()
         rounds += 1
@@ -1925,6 +1978,9 @@ def _acquisition_report_payload(
                 "initial_depth": _FETCH_DEPTH_STEP,
                 "max_deepen_rounds": _MAX_DEEPEN_ROUNDS,
                 "max_total_network_seconds": int(_MAX_TOTAL_NETWORK_SECONDS),
+                "max_transient_fetch_retries_per_repository": (
+                    _MAX_TRANSIENT_FETCH_RETRIES_PER_REPOSITORY
+                ),
                 "requires_exact_ref_closure": True,
                 "requires_final_full_fsck": True,
                 "requires_final_non_shallow": True,
@@ -1933,6 +1989,7 @@ def _acquisition_report_payload(
                 "requires_zero_prune_packable": True,
                 "requires_zero_unreachable_objects": True,
                 "requires_final_verified_multi_pack_index": True,
+                "retry_requires_unchanged_repository_seal": True,
                 "writes_verified_multi_pack_index": True,
             },
             "github_transport": github_transport,

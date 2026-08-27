@@ -533,7 +533,16 @@ identities only, creates one independent bare SHA-1 object store at
 `refs/vulngym/<commit>`. Acquisition may start with bounded shallow fetches and
 repeatedly deepen, but readiness and publication require a final non-shallow
 repository. Filter/promisor/alternate/worktree storage and interactive prompts
-remain forbidden. Final verification requires the observed ref set to equal the
+remain forbidden. Contract v4 permits at most one transient
+`git_command_failed` retry across all fetch segments for one repository. Before
+spending that token, acquisition requires recovery state to be clean and proves
+that the complete path-free repository storage seal plus the independently
+parsed logical refs still exactly match the caller-supplied pre-segment state.
+Any persisted object, ref, shallow-boundary, metadata, or identity change fails
+closed without an in-place retry; a later full invocation may resume it. Timeout,
+output-limit, unavailable-process, and interrupt also remain non-retryable. The
+retry repeats the exact argument tuple inside the original six-hour network
+budget. Final verification requires the observed ref set to equal the
 required refs exactly, verifies every commit with `cat-file`, rejects nonzero
 `count-objects` garbage or prune-packable counts, and runs
 `git fsck --full --strict --unreachable --no-reflogs --no-progress` to reject
@@ -543,7 +552,7 @@ Git's derived multi-pack index before final object checks. The operation must
 leave exact refs, object counts, non-shallow state, and the pack payload
 inventory unchanged. `verify` only verifies the existing index and never writes one.
 MIDX accelerates lookup in large multi-pack stores; it does not replace full
-fsck, exact-ref closure, or per-commit source auditing. The v3 contract requires
+fsck, exact-ref closure, or per-commit source auditing. The v4 contract requires
 at least one pack containing at least one object; loose-only stores are rejected
 instead of being silently exempted from MIDX verification.
 Each prepare or verify invocation is the complete authorization union for its

@@ -186,6 +186,7 @@ def _report_value() -> dict[str, object]:
             "initial_depth": 32,
             "max_deepen_rounds": 2_048,
             "max_total_network_seconds": 21_600,
+            "max_transient_fetch_retries_per_repository": 1,
             "requires_exact_ref_closure": True,
             "requires_final_full_fsck": True,
             "requires_final_non_shallow": True,
@@ -194,6 +195,7 @@ def _report_value() -> dict[str, object]:
             "requires_zero_garbage": True,
             "requires_zero_prune_packable": True,
             "requires_zero_unreachable_objects": True,
+            "retry_requires_unchanged_repository_seal": True,
             "writes_verified_multi_pack_index": True,
         },
         "github_transport": "https",
@@ -379,6 +381,33 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 protocol = raw["fetch_protocol"]
                 assert isinstance(protocol, dict)
                 protocol[field] = False
+                report, report_sha256 = _report_bytes(raw)
+                with self.assertRaisesRegex(
+                    SourceSealingClosureError, "fetch protocol"
+                ):
+                    SourceSealingClosureReceiptV1.from_verified_evidence(
+                        implementation_commit="a" * 40,
+                        acquisition_report_bytes=report,
+                        expected_acquisition_report_sha256=report_sha256,
+                        test_evidence=test_evidence,  # type: ignore[arg-type]
+                        train_evidence=train_evidence,  # type: ignore[arg-type]
+                    )
+
+    def test_bounded_fetch_retry_protocol_is_strictly_required(self) -> None:
+        self.assertEqual(
+            SOURCE_ACQUISITION_CONTRACT_VERSION,
+            "vulngym.source-acquisition.v4",
+        )
+        test_evidence, train_evidence = self._evidence()
+        for field, invalid in (
+            ("max_transient_fetch_retries_per_repository", 0),
+            ("retry_requires_unchanged_repository_seal", False),
+        ):
+            with self.subTest(field=field):
+                raw = _report_value()
+                protocol = raw["fetch_protocol"]
+                assert isinstance(protocol, dict)
+                protocol[field] = invalid
                 report, report_sha256 = _report_bytes(raw)
                 with self.assertRaisesRegex(
                     SourceSealingClosureError, "fetch protocol"
