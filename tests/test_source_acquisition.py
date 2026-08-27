@@ -1047,6 +1047,12 @@ class SourceAcquisitionContractTests(unittest.TestCase):
         self.assertIn("--deepen=32", runner.call_args_list[2].args[2])
 
     def test_transient_fetch_retry_uses_the_original_network_budget(self) -> None:
+        self.assertEqual(source_acquisition._GIT_NETWORK_TIMEOUT_SECONDS, 7_200.0)
+        self.assertEqual(source_acquisition._MAX_TOTAL_NETWORK_SECONDS, 21_600.0)
+        self.assertLessEqual(
+            source_acquisition._GIT_NETWORK_TIMEOUT_SECONDS,
+            source_acquisition._MAX_TOTAL_NETWORK_SECONDS,
+        )
         commit = "1" * 40
         refs = {f"refs/vulngym/{commit}": commit}
         seal = _fetch_storage_seal()
@@ -1213,6 +1219,7 @@ class SourceAcquisitionContractTests(unittest.TestCase):
             SourceAcquisitionError(
                 "git_command_failed", "simulated transient failure", exit_status=3
             ),
+            SourceAcquisitionError("git_timeout", "timeout", exit_status=3),
             KeyboardInterrupt(),
         ):
             with self.subTest(failure=type(failure).__name__):
