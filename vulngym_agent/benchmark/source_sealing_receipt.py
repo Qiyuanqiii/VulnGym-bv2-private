@@ -419,6 +419,9 @@ class _AcquisitionSplitPinV5:
 class _AcquisitionReportClosureV5:
     acquisition: SourceAcquisitionClosureV1
     split_pins: tuple[_AcquisitionSplitPinV5, _AcquisitionSplitPinV5]
+    audit_task_facts: tuple[
+        tuple[str, str, str, int, int, int, int, int], ...
+    ]
 
     def split_pin(self, split: Literal["test", "train"]) -> _AcquisitionSplitPinV5:
         for pin in self.split_pins:
@@ -513,7 +516,10 @@ def _parse_ready_commit_v4(value: object) -> str:
         or raw["unsupported_entry_count"] != 0
         or raw["regular_file_count"] < 1
         or raw["tree_entry_count"] > DEFAULT_SNAPSHOT_POLICY.max_files
-        or raw["total_regular_bytes"] > DEFAULT_SNAPSHOT_POLICY.max_total_bytes
+        or (
+            raw["total_regular_bytes"] + 49 * raw["gitlink_count"]
+            > DEFAULT_SNAPSHOT_POLICY.max_total_bytes
+        )
         or raw["tree_count"] != modes.get("40000", 0)
         or raw["symlink_count"] != modes.get("120000", 0)
         or raw["gitlink_count"] != modes.get("160000", 0)
@@ -775,7 +781,9 @@ def _parse_acquisition_report_v5(
             "invalid_closure", "source-acquisition report requires 22 repositories"
         )
     repository_urls: list[str] = []
-    audit_source_facts: dict[tuple[str, str], tuple[str, int]] = {}
+    audit_source_facts: dict[
+        tuple[str, str], tuple[str, int, int, int, int, int]
+    ] = {}
     commit_total = 0
     success_counts = {name: 0 for name in _OBJECT_HYGIENE_SUCCESS_FIELDS}
     residue_counts = {name: 0 for name in _OBJECT_HYGIENE_ZERO_FIELDS}
@@ -811,7 +819,16 @@ def _parse_acquisition_report_v5(
         for commit_value in commits_value:
             assert type(commit_value) is dict
             identity = (repo_url, commit_value["commit"])
-            fact = (commit_value["root_tree"], commit_value["gitlink_count"])
+            fact = (
+                commit_value["root_tree"],
+                commit_value["regular_file_count"]
+                + commit_value["gitlink_count"],
+                commit_value["regular_file_count"],
+                commit_value["gitlink_count"],
+                commit_value["total_regular_bytes"],
+                commit_value["total_regular_bytes"]
+                + 49 * commit_value["gitlink_count"],
+            )
             if identity in audit_source_facts and audit_source_facts[identity] != fact:
                 raise SourceSealingClosureError(
                     "invalid_binding", "repository audit source identity is contradictory"
@@ -864,6 +881,8 @@ def _parse_acquisition_report_v5(
     if (
         repository_urls != sorted(repository_urls, key=lambda value: value.encode("utf-8"))
         or len(set(repository_urls)) != len(repository_urls)
+        or len({value.casefold() for value in repository_urls})
+        != len(repository_urls)
     ):
         raise SourceSealingClosureError(
             "invalid_contract", "source repositories are not canonical and unique"
@@ -886,18 +905,26 @@ def _parse_acquisition_report_v5(
         )
     for pin in split_pins:
         for _, repo_url, commit, root_tree, gitlink_count in pin.task_source_facts:
-            if audit_source_facts.get((repo_url, commit)) != (root_tree, gitlink_count):
+            audit_fact = audit_source_facts.get((repo_url, commit))
+            if (
+                audit_fact is None
+                or audit_fact[0] != root_tree
+                or audit_fact[3] != gitlink_count
+            ):
                 raise SourceSealingClosureError(
                     "invalid_binding", "task source fact is detached from repository audit"
                 )
     exported_source_identities = tuple(
-        (repo_url, commit)
+        (repo_url.casefold(), commit)
         for pin in split_pins
         for _, repo_url, commit, _, _ in pin.task_source_facts
     )
+    audited_source_identities = {
+        (repo_url.casefold(), commit) for repo_url, commit in audit_source_facts
+    }
     if (
         len(set(exported_source_identities)) != SOURCE_SEALING_TASK_COUNT
-        or set(exported_source_identities) != set(audit_source_facts)
+        or set(exported_source_identities) != audited_source_identities
     ):
         raise SourceSealingClosureError(
             "invalid_binding",
@@ -919,6 +946,26 @@ def _parse_acquisition_report_v5(
             object_hygiene=hygiene_closure,
         ),
         split_pins=(split_pins[0], split_pins[1]),
+        audit_task_facts=tuple(
+            (
+                repo_url,
+                commit,
+                root_tree,
+                entry_count,
+                regular_file_count,
+                gitlink_count,
+                regular_file_bytes,
+                materialized_bytes,
+            )
+            for (repo_url, commit), (
+                root_tree,
+                entry_count,
+                regular_file_count,
+                gitlink_count,
+                regular_file_bytes,
+                materialized_bytes,
+            ) in sorted(audit_source_facts.items())
+        ),
     )
 
 
@@ -1146,6 +1193,9 @@ def _split_from_evidence(
     *,
     split: Literal["test", "train"],
     acquisition_pin: _AcquisitionSplitPinV5,
+    audit_task_facts: tuple[
+        tuple[str, str, str, int, int, int, int, int], ...
+    ],
     evidence: tuple[
         SnapshotBatchVerificationEvidenceV2,
         SnapshotBatchVerificationEvidenceV2,
@@ -1165,6 +1215,26 @@ def _split_from_evidence(
         raise SourceSealingClosureError(
             "invalid_argument", "each split requires two trusted evidence values"
         )
+    audit_facts_by_source = {
+        (repo_url, commit): (
+            root_tree,
+            entry_count,
+            regular_file_count,
+            gitlink_count,
+            regular_file_bytes,
+            materialized_bytes,
+        )
+        for (
+            repo_url,
+            commit,
+            root_tree,
+            entry_count,
+            regular_file_count,
+            gitlink_count,
+            regular_file_bytes,
+            materialized_bytes,
+        ) in audit_task_facts
+    }
     for item in evidence:
         try:
             item.to_dict()
@@ -1191,6 +1261,22 @@ def _split_from_evidence(
         if observed_source_facts != acquisition_pin.task_source_facts:
             raise SourceSealingClosureError(
                 "invalid_binding", "snapshot task source facts are detached from acquisition"
+            )
+        if any(
+            audit_facts_by_source.get((task.repo_url, task.commit))
+            != (
+                task.root_tree,
+                task.entry_count,
+                task.regular_file_count,
+                task.gitlink_count,
+                task.regular_file_bytes,
+                task.materialized_bytes,
+            )
+            for task in summary.tasks
+        ):
+            raise SourceSealingClosureError(
+                "invalid_binding",
+                "snapshot task materialization facts are detached from acquisition",
             )
     if (
         evidence[0].run_id == evidence[1].run_id
@@ -1483,11 +1569,13 @@ class SourceSealingClosureReceiptV2:
         test = _split_from_evidence(
             split="test",
             acquisition_pin=report.split_pin("test"),
+            audit_task_facts=report.audit_task_facts,
             evidence=test_evidence,
         )
         train = _split_from_evidence(
             split="train",
             acquisition_pin=report.split_pin("train"),
+            audit_task_facts=report.audit_task_facts,
             evidence=train_evidence,
         )
         test_ids = tuple(task.task_id for task in test_evidence[0].summary.tasks)

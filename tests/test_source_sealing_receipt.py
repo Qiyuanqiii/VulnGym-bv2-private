@@ -97,7 +97,11 @@ def _summary(
     )
 
 
-def _audit(commit: str, root_tree: str) -> dict[str, object]:
+def _audit(
+    commit: str,
+    root_tree: str,
+    total_regular_bytes: int,
+) -> dict[str, object]:
     return {
         "commit": commit,
         "gitlink_count": 0,
@@ -112,7 +116,7 @@ def _audit(commit: str, root_tree: str) -> dict[str, object]:
         "scan_complete": True,
         "status_codes": [],
         "symlink_count": 0,
-        "total_regular_bytes": 1,
+        "total_regular_bytes": total_regular_bytes,
         "tree_count": 0,
         "tree_entry_count": 1,
         "unsupported_entry_count": 0,
@@ -157,7 +161,10 @@ def _report_value() -> dict[str, object]:
     for repository_index in range(22):
         repo_url = f"https://github.com/example/repository-{repository_index:02d}"
         tasks = tuple(task for task in all_tasks if task.repo_url == repo_url)
-        commits = [_audit(task.commit, task.root_tree) for task in tasks]
+        commits = [
+            _audit(task.commit, task.root_tree, task.regular_file_bytes)
+            for task in tasks
+        ]
         count = len(commits)
         repositories.append(
             {
@@ -571,6 +578,148 @@ class SourceSealingReceiptTests(unittest.TestCase):
             train_evidence=train_evidence,  # type: ignore[arg-type]
         )
         self.assertEqual(receipt.test.task_count, 20)
+        self.assertEqual(receipt.test.gitlink_count, 1)
+        self.assertEqual(
+            receipt.test.regular_file_bytes,
+            sum(task.regular_file_bytes for task in test_tasks),
+        )
+        self.assertEqual(
+            receipt.test.materialized_bytes,
+            sum(task.materialized_bytes for task in test_tasks),
+        )
+
+    def test_gitlink_materialized_bytes_are_counted_against_ready_budget(
+        self,
+    ) -> None:
+        test_tasks = list(_batch_tasks("test"))
+        test_tasks[0] = replace(
+            test_tasks[0],
+            file_count=2,
+            node_count=2,
+            total_bytes=test_tasks[0].total_bytes + 49,
+            entry_count=2,
+            gitlink_count=1,
+            materialized_bytes=test_tasks[0].materialized_bytes + 49,
+        )
+        test_summary = _summary("test", self.test_root, tasks=tuple(test_tasks))
+        train_summary = _summary("train", self.train_root)
+        test_evidence = tuple(
+            _mint(self.test_root, test_summary, self.test_key) for _ in range(2)
+        )
+        train_evidence = tuple(
+            _mint(self.train_root, train_summary, self.train_key) for _ in range(2)
+        )
+
+        raw = _report_value()
+        raw["exports"][0]["task_source_facts"][0]["gitlink_count"] = 1  # type: ignore[index]
+        audit = raw["repositories"][0]["commits"][0]  # type: ignore[index]
+        audit["gitlink_count"] = 1  # type: ignore[index]
+        audit["mode_counts"] = {"100644": 1, "160000": 1}  # type: ignore[index]
+        audit["tree_entry_count"] = 2  # type: ignore[index]
+        audit["total_regular_bytes"] = (  # type: ignore[index]
+            DEFAULT_SNAPSHOT_POLICY.max_total_bytes
+        )
+        report, report_sha256 = _report_bytes(raw)
+
+        with self.assertRaisesRegex(
+            SourceSealingClosureError,
+            "ready commit facts are contradictory",
+        ) as raised:
+            SourceSealingClosureReceiptV2.from_verified_evidence(
+                implementation_commit="a" * 40,
+                acquisition_report_bytes=report,
+                expected_acquisition_report_sha256=report_sha256,
+                test_evidence=test_evidence,  # type: ignore[arg-type]
+                train_evidence=train_evidence,  # type: ignore[arg-type]
+            )
+        self.assertEqual(raised.exception.code, "invalid_closure")
+
+    def test_acquisition_regular_bytes_must_match_verifier_evidence(self) -> None:
+        raw = _report_value()
+        audit = raw["repositories"][0]["commits"][0]  # type: ignore[index]
+        audit["total_regular_bytes"] += 1  # type: ignore[index,operator]
+        report, report_sha256 = _report_bytes(raw)
+        test_evidence, train_evidence = self._evidence()
+
+        with self.assertRaisesRegex(
+            SourceSealingClosureError,
+            "materialization facts are detached",
+        ) as raised:
+            SourceSealingClosureReceiptV2.from_verified_evidence(
+                implementation_commit="a" * 40,
+                acquisition_report_bytes=report,
+                expected_acquisition_report_sha256=report_sha256,
+                test_evidence=test_evidence,  # type: ignore[arg-type]
+                train_evidence=train_evidence,  # type: ignore[arg-type]
+            )
+        self.assertEqual(raised.exception.code, "invalid_binding")
+
+    def test_acquisition_file_counts_must_match_verifier_evidence(self) -> None:
+        raw = _report_value()
+        audit = raw["repositories"][0]["commits"][0]  # type: ignore[index]
+        audit["mode_counts"] = {"100644": 2}  # type: ignore[index]
+        audit["regular_file_count"] = 2  # type: ignore[index]
+        audit["tree_entry_count"] = 2  # type: ignore[index]
+        report, report_sha256 = _report_bytes(raw)
+        test_evidence, train_evidence = self._evidence()
+
+        with self.assertRaisesRegex(
+            SourceSealingClosureError,
+            "materialization facts are detached",
+        ) as raised:
+            SourceSealingClosureReceiptV2.from_verified_evidence(
+                implementation_commit="a" * 40,
+                acquisition_report_bytes=report,
+                expected_acquisition_report_sha256=report_sha256,
+                test_evidence=test_evidence,  # type: ignore[arg-type]
+                train_evidence=train_evidence,  # type: ignore[arg-type]
+            )
+        self.assertEqual(raised.exception.code, "invalid_binding")
+
+    def test_gitlink_at_exact_materialized_budget_is_accepted(self) -> None:
+        maximum = DEFAULT_SNAPSHOT_POLICY.max_total_bytes
+        test_tasks = list(_batch_tasks("test"))
+        test_tasks[0] = replace(
+            test_tasks[0],
+            file_count=33,
+            node_count=33,
+            total_bytes=maximum,
+            entry_count=33,
+            regular_file_count=32,
+            gitlink_count=1,
+            regular_file_bytes=maximum - 49,
+            materialized_bytes=maximum,
+        )
+        test_summary = _summary("test", self.test_root, tasks=tuple(test_tasks))
+        train_summary = _summary("train", self.train_root)
+        test_evidence = tuple(
+            _mint(self.test_root, test_summary, self.test_key) for _ in range(2)
+        )
+        train_evidence = tuple(
+            _mint(self.train_root, train_summary, self.train_key) for _ in range(2)
+        )
+
+        raw = _report_value()
+        raw["exports"][0]["task_source_facts"][0]["gitlink_count"] = 1  # type: ignore[index]
+        audit = raw["repositories"][0]["commits"][0]  # type: ignore[index]
+        audit["gitlink_count"] = 1  # type: ignore[index]
+        audit["mode_counts"] = {"100644": 32, "160000": 1}  # type: ignore[index]
+        audit["regular_file_count"] = 32  # type: ignore[index]
+        audit["total_regular_bytes"] = maximum - 49  # type: ignore[index]
+        audit["tree_entry_count"] = 33  # type: ignore[index]
+        report, report_sha256 = _report_bytes(raw)
+
+        receipt = SourceSealingClosureReceiptV2.from_verified_evidence(
+            implementation_commit="a" * 40,
+            acquisition_report_bytes=report,
+            expected_acquisition_report_sha256=report_sha256,
+            test_evidence=test_evidence,  # type: ignore[arg-type]
+            train_evidence=train_evidence,  # type: ignore[arg-type]
+        )
+        self.assertEqual(
+            sum(task.materialized_bytes for task in test_tasks),
+            receipt.test.materialized_bytes,
+        )
 
     def test_task_source_root_tree_must_match_repository_audit_and_batch(self) -> None:
         test_evidence, train_evidence = self._evidence()
@@ -611,6 +760,34 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 test_evidence=test_evidence,  # type: ignore[arg-type]
                 train_evidence=train_evidence,  # type: ignore[arg-type]
             )
+
+    def test_repository_url_casefold_alias_is_rejected(self) -> None:
+        raw = _report_value()
+        repositories = raw["repositories"]
+        assert isinstance(repositories, list)
+        first = repositories[0]
+        second = repositories[1]
+        assert isinstance(first, dict)
+        assert isinstance(second, dict)
+        first_url = first["repo_url"]
+        assert isinstance(first_url, str)
+        second["repo_url"] = first_url.replace("/example/", "/EXAMPLE/")
+        repositories.sort(key=lambda item: item["repo_url"].encode("utf-8"))
+        report, report_sha256 = _report_bytes(raw)
+        test_evidence, train_evidence = self._evidence()
+
+        with self.assertRaisesRegex(
+            SourceSealingClosureError,
+            "canonical and unique",
+        ) as raised:
+            SourceSealingClosureReceiptV2.from_verified_evidence(
+                implementation_commit="a" * 40,
+                acquisition_report_bytes=report,
+                expected_acquisition_report_sha256=report_sha256,
+                test_evidence=test_evidence,  # type: ignore[arg-type]
+                train_evidence=train_evidence,  # type: ignore[arg-type]
+            )
+        self.assertEqual(raised.exception.code, "invalid_contract")
 
     def test_all_object_hygiene_contradictions_are_rejected(self) -> None:
         test_evidence, train_evidence = self._evidence()

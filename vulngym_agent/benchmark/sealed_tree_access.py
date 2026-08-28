@@ -1488,6 +1488,8 @@ def bind_sealed_tree(
         )
 
     if any(type(item) is SealedSnapshotGitlink for item in verified.files):
+        for index in range(len(key_material)):
+            key_material[index] = 0
         raise SealedTreeAccessError(
             "invalid_binding",
             "metadata-only gitlinks are sealed but not accessible to workers",

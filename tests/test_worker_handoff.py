@@ -10,6 +10,7 @@ from unittest import mock
 
 import vulngym_agent.benchmark as benchmark_api
 import vulngym_agent.benchmark.sealed_tree_access as sealed_tree_access_module
+import vulngym_agent.benchmark.worker_handoff as worker_handoff_module
 from vulngym_agent.benchmark.contracts import INSTRUCTION_ID
 from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskInputV1
 from vulngym_agent.benchmark.sealed_snapshot import (
@@ -151,11 +152,21 @@ class WorkerHandoffTests(unittest.TestCase):
             snapshot_manifest_sha256=prepared.manifest_sha256,
             snapshot_content_root=prepared.content_root,
         )
-        with self.assertRaises(WorkerHandoffError) as captured:
+        with (
+            mock.patch.object(
+                worker_handoff_module,
+                "WorkerHandoffV2",
+                side_effect=AssertionError(
+                    "worker handoff must not be constructed for gitlinks"
+                ),
+            ) as constructor,
+            self.assertRaises(WorkerHandoffError) as captured,
+        ):
             build_worker_handoff(
                 task, root, attestation_key=KEY, expected_key_id=KEY_ID
             )
         self.assertEqual("snapshot_verification_failed", captured.exception.code)
+        constructor.assert_not_called()
 
     def test_public_contract_is_canonical_nonsecret_and_exported(self) -> None:
         payload = self.handoff.to_bytes()

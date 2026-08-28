@@ -171,6 +171,70 @@ class SealedTreeAccessTests(unittest.TestCase):
                 )
             self.assertEqual("invalid_binding", captured.exception.code)
 
+    def test_gitlink_rejection_zeroes_key_before_authority_construction(self) -> None:
+        self._git(
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{self.commit},vendor/dependency",
+        )
+        self._git("commit", "-q", "-m", "metadata-only gitlink")
+        commit = self._git("rev-parse", "HEAD").stdout.strip()
+        snapshot_root = self.root / "sealed-gitlink"
+        prepared = prepare_sealed_snapshot(
+            GitRepository(self.repo_path),
+            task_id=TASK_ID,
+            repo_url=REPO_URL,
+            commit=commit,
+            output_dir=snapshot_root,
+            attestation_key=KEY,
+            key_id=KEY_ID,
+        )
+        task = DiscoveryTaskInputV1(
+            task_id=TASK_ID,
+            repo_url=REPO_URL,
+            commit=commit,
+            instruction_id=INSTRUCTION_ID,
+            snapshot_manifest_sha256=prepared.manifest_sha256,
+            snapshot_content_root=prepared.content_root,
+        )
+        observed_keys: list[bytearray] = []
+        real_verify = access_module.verify_sealed_snapshot
+
+        def capture_key(*args: object, **kwargs: object):
+            key_material = kwargs["attestation_key"]
+            self.assertIsInstance(key_material, bytearray)
+            observed_keys.append(key_material)  # type: ignore[arg-type]
+            return real_verify(*args, **kwargs)  # type: ignore[arg-type]
+
+        with (
+            mock.patch.object(
+                access_module,
+                "verify_sealed_snapshot",
+                side_effect=capture_key,
+            ),
+            mock.patch.object(
+                access_module,
+                "_TrustedTreeAuthority",
+                side_effect=AssertionError("worker authority must not be constructed"),
+            ) as authority,
+            self.assertRaises(SealedTreeAccessError) as captured,
+        ):
+            bind_sealed_tree(
+                task,
+                snapshot_root,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+            )
+
+        self.assertEqual("invalid_binding", captured.exception.code)
+        authority.assert_not_called()
+        self.assertEqual(1, len(observed_keys))
+        self.assertTrue(all(value == 0 for value in observed_keys[0]))
+        message = str(captured.exception)
+        self.assertNotIn(str(self.root), message)
+        self.assertNotIn(KEY.decode("ascii"), message)
+
     def test_attestation_material_is_strictly_bytes_like_and_bounded(self) -> None:
         released = memoryview(KEY)
         released.release()
