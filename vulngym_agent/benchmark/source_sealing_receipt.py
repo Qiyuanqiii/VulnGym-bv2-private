@@ -23,7 +23,7 @@ from vulngym_agent.benchmark.snapshot_batch import (
     PROFILE_ID,
     PROFILE_MANIFEST_SHA256,
     SnapshotBatchError,
-    SnapshotBatchVerificationEvidenceV1,
+    SnapshotBatchVerificationEvidenceV2,
     _claim_snapshot_batch_verification_evidence_batch,
 )
 from vulngym_agent.benchmark.source_acquisition import (
@@ -31,14 +31,15 @@ from vulngym_agent.benchmark.source_acquisition import (
 )
 
 
-SOURCE_SEALING_CLOSURE_CONTRACT_VERSION: Final[int] = 1
+SOURCE_SEALING_CLOSURE_CONTRACT_VERSION: Final[int] = 2
 SOURCE_SEALING_CLOSURE_KIND: Final[str] = (
-    "vulngym.source-sealing-closure-receipt.v1"
+    "vulngym.source-sealing-closure-receipt.v2"
 )
 SOURCE_SEALING_CLOSURE_STATUS: Final[str] = "closed"
 SOURCE_SEALING_CLOSURE_DIGEST_DOMAIN: Final[bytes] = (
-    b"VulnGym source sealing closure receipt v1\0"
+    b"VulnGym source sealing closure receipt v2\0"
 )
+SOURCE_SEALING_TASK_CLOSURE_DOMAIN: Final[bytes] = b"vulngym.source-sealing.task-closure.v2\0"
 SOURCE_SEALING_CLOSURE_MAX_WIRE_BYTES: Final[int] = 64 * 1024
 SOURCE_SEALING_CLOSURE_MAX_JSON_NODES: Final[int] = 512
 SOURCE_SEALING_CLOSURE_MAX_JSON_DEPTH: Final[int] = 12
@@ -406,19 +407,20 @@ def _freeze_acquisition(value: object) -> SourceAcquisitionClosureV1:
 
 
 @dataclass(frozen=True, slots=True)
-class _AcquisitionSplitPinV4:
+class _AcquisitionSplitPinV5:
     split: Literal["test", "train"]
     task_count: int
     task_export_sha256: str
     source_map_sha256: str
+    task_source_facts: tuple[tuple[str, str, str, str, int], ...]
 
 
 @dataclass(frozen=True, slots=True)
-class _AcquisitionReportClosureV4:
+class _AcquisitionReportClosureV5:
     acquisition: SourceAcquisitionClosureV1
-    split_pins: tuple[_AcquisitionSplitPinV4, _AcquisitionSplitPinV4]
+    split_pins: tuple[_AcquisitionSplitPinV5, _AcquisitionSplitPinV5]
 
-    def split_pin(self, split: Literal["test", "train"]) -> _AcquisitionSplitPinV4:
+    def split_pin(self, split: Literal["test", "train"]) -> _AcquisitionSplitPinV5:
         for pin in self.split_pins:
             if pin.split == split:
                 return pin
@@ -487,7 +489,7 @@ def _parse_ready_commit_v4(value: object) -> str:
             "invalid_contract", "source-acquisition commit counters are invalid"
         )
     modes = raw["mode_counts"]
-    allowed_modes = frozenset({"100644", "100755", "120000", "40000"})
+    allowed_modes = frozenset({"100644", "100755", "120000", "160000", "40000"})
     if (
         type(modes) is not dict
         or any(
@@ -506,8 +508,7 @@ def _parse_ready_commit_v4(value: object) -> str:
         modes.get(mode, 0) for mode in ("100644", "100755", "120000")
     )
     if (
-        raw["gitlink_count"] != 0
-        or raw["lfs_pointer_count"] != 0
+        raw["lfs_pointer_count"] != 0
         or raw["oversized_blob_count"] != 0
         or raw["unsupported_entry_count"] != 0
         or raw["regular_file_count"] < 1
@@ -515,9 +516,10 @@ def _parse_ready_commit_v4(value: object) -> str:
         or raw["total_regular_bytes"] > DEFAULT_SNAPSHOT_POLICY.max_total_bytes
         or raw["tree_count"] != modes.get("40000", 0)
         or raw["symlink_count"] != modes.get("120000", 0)
+        or raw["gitlink_count"] != modes.get("160000", 0)
         or raw["regular_file_count"] != regular_mode_count
         or raw["tree_entry_count"]
-        != raw["tree_count"] + raw["regular_file_count"]
+        != raw["tree_count"] + raw["regular_file_count"] + raw["gitlink_count"]
     ):
         raise SourceSealingClosureError(
             "invalid_closure",
@@ -640,11 +642,11 @@ def _parse_repository_hygiene_v4(
     return raw, True
 
 
-def _parse_acquisition_report_v4(
+def _parse_acquisition_report_v5(
     payload: bytes,
     *,
     expected_acquisition_report_sha256: str,
-) -> _AcquisitionReportClosureV4:
+) -> _AcquisitionReportClosureV5:
     report_sha256 = _require_expected_sha256(
         expected_acquisition_report_sha256,
         name="expected_acquisition_report_sha256",
@@ -675,7 +677,7 @@ def _parse_acquisition_report_v4(
                 "task_count",
             }
         ),
-        name="source-acquisition report v4",
+        name="source-acquisition report v5",
     )
     if (
         raw["contract_version"] != SOURCE_ACQUISITION_CONTRACT_VERSION
@@ -715,7 +717,7 @@ def _parse_acquisition_report_v4(
         raise SourceSealingClosureError(
             "invalid_closure", "source-acquisition report requires two exports"
         )
-    split_pins: list[_AcquisitionSplitPinV4] = []
+    split_pins: list[_AcquisitionSplitPinV5] = []
     for expected_split, export_value in zip(("test", "train"), exports):
         export = _strict_object(
             export_value,
@@ -724,6 +726,7 @@ def _parse_acquisition_report_v4(
                     "source_map_sha256",
                     "split",
                     "task_count",
+                    "task_source_facts",
                     "tasks_sha256",
                 }
             ),
@@ -737,8 +740,24 @@ def _parse_acquisition_report_v4(
             raise SourceSealingClosureError(
                 "invalid_closure", "source-acquisition export split/count is invalid"
             )
+        task_source_facts_value = export["task_source_facts"]
+        if type(task_source_facts_value) is not list or len(task_source_facts_value) != export["task_count"]:
+            raise SourceSealingClosureError("invalid_closure", "task source facts are incomplete")
+        task_source_facts: list[tuple[str, str, str, str, int]] = []
+        for fact_value in task_source_facts_value:
+            fact = _strict_object(fact_value, keys=frozenset({"task_id", "repo_url", "commit", "root_tree", "gitlink_count"}), name="task source fact")
+            try:
+                task = BenchmarkTask(task_id=fact["task_id"], repo_url=fact["repo_url"], commit=fact["commit"], split=expected_split)
+            except (BenchmarkContractError, TypeError, ValueError) as error:
+                raise SourceSealingClosureError("invalid_contract", "task source identity is invalid") from error
+            if (type(fact["root_tree"]) is not str or _SHA1_RE.fullmatch(fact["root_tree"]) is None
+                or type(fact["gitlink_count"]) is not int or fact["gitlink_count"] < 0):
+                raise SourceSealingClosureError("invalid_contract", "task source fact is invalid")
+            task_source_facts.append((task.task_id, task.repo_url, task.commit, fact["root_tree"], fact["gitlink_count"]))
+        if tuple(task_source_facts) != tuple(sorted(task_source_facts)) or len({item[0] for item in task_source_facts}) != len(task_source_facts):
+            raise SourceSealingClosureError("invalid_contract", "task source facts are not canonical")
         split_pins.append(
-            _AcquisitionSplitPinV4(
+            _AcquisitionSplitPinV5(
                 split=expected_split,  # type: ignore[arg-type]
                 task_count=export["task_count"],  # type: ignore[arg-type]
                 task_export_sha256=_require_sha256(
@@ -747,6 +766,7 @@ def _parse_acquisition_report_v4(
                 source_map_sha256=_require_sha256(
                     export["source_map_sha256"], name="source_map_sha256"
                 ),
+                task_source_facts=tuple(task_source_facts),
             )
         )
     repositories = raw["repositories"]
@@ -755,6 +775,7 @@ def _parse_acquisition_report_v4(
             "invalid_closure", "source-acquisition report requires 22 repositories"
         )
     repository_urls: list[str] = []
+    audit_source_facts: dict[tuple[str, str], tuple[str, int]] = {}
     commit_total = 0
     success_counts = {name: 0 for name in _OBJECT_HYGIENE_SUCCESS_FIELDS}
     residue_counts = {name: 0 for name in _OBJECT_HYGIENE_ZERO_FIELDS}
@@ -787,6 +808,15 @@ def _parse_acquisition_report_v4(
                 "invalid_contract", "repository URL is not canonical"
             ) from error
         repository_urls.append(repo_url)  # type: ignore[arg-type]
+        for commit_value in commits_value:
+            assert type(commit_value) is dict
+            identity = (repo_url, commit_value["commit"])
+            fact = (commit_value["root_tree"], commit_value["gitlink_count"])
+            if identity in audit_source_facts and audit_source_facts[identity] != fact:
+                raise SourceSealingClosureError(
+                    "invalid_binding", "repository audit source identity is contradictory"
+                )
+            audit_source_facts[identity] = fact  # type: ignore[index]
         hygiene, exact_object_closure = _parse_repository_hygiene_v4(
             repository["object_hygiene"], commit_count=len(commits)
         )
@@ -854,12 +884,31 @@ def _parse_acquisition_report_v4(
         raise SourceSealingClosureError(
             "invalid_closure", "source-acquisition report does not close 22/70 ready"
         )
+    for pin in split_pins:
+        for _, repo_url, commit, root_tree, gitlink_count in pin.task_source_facts:
+            if audit_source_facts.get((repo_url, commit)) != (root_tree, gitlink_count):
+                raise SourceSealingClosureError(
+                    "invalid_binding", "task source fact is detached from repository audit"
+                )
+    exported_source_identities = tuple(
+        (repo_url, commit)
+        for pin in split_pins
+        for _, repo_url, commit, _, _ in pin.task_source_facts
+    )
+    if (
+        len(set(exported_source_identities)) != SOURCE_SEALING_TASK_COUNT
+        or set(exported_source_identities) != set(audit_source_facts)
+    ):
+        raise SourceSealingClosureError(
+            "invalid_binding",
+            "task source identities do not exactly close the repository audit",
+        )
     hygiene_closure = SourceObjectHygieneClosureV1(
         repository_count=len(repositories),
         **success_counts,
         **residue_counts,
     )
-    return _AcquisitionReportClosureV4(
+    return _AcquisitionReportClosureV5(
         acquisition=SourceAcquisitionClosureV1(
             acquisition_report_sha256=report_sha256,
             repository_count=len(repositories),
@@ -922,7 +971,7 @@ def _freeze_round(value: object) -> SourceSealingVerifyRoundV1:
 
 
 @dataclass(frozen=True, slots=True)
-class SourceSealingSplitClosureV1:
+class SourceSealingSplitClosureV2:
     """Fixed split pins and exactly two content-identical verification runs."""
 
     split: Literal["test", "train"]
@@ -935,6 +984,12 @@ class SourceSealingSplitClosureV1:
     key_equality_tag_sha256: str
     output_identity_sha256: str
     task_records_sha256: str
+    task_closure_sha256: str
+    entry_count: int
+    regular_file_count: int
+    gitlink_count: int
+    regular_file_bytes: int
+    materialized_bytes: int
     verify_rounds: tuple[
         SourceSealingVerifyRoundV1, SourceSealingVerifyRoundV1
     ]
@@ -959,8 +1014,18 @@ class SourceSealingSplitClosureV1:
             (self.key_equality_tag_sha256, "key_equality_tag_sha256"),
             (self.output_identity_sha256, "output_identity_sha256"),
             (self.task_records_sha256, "task_records_sha256"),
+            (self.task_closure_sha256, "task_closure_sha256"),
         ):
             _require_sha256(value, name=name)
+        counters = (
+            self.entry_count, self.regular_file_count, self.gitlink_count,
+            self.regular_file_bytes, self.materialized_bytes,
+        )
+        if any(type(value) is not int or value < 0 for value in counters):
+            raise SourceSealingClosureError("invalid_contract", "split aggregate counters are invalid")
+        if (self.entry_count != self.regular_file_count + self.gitlink_count
+            or self.materialized_bytes != self.regular_file_bytes + 49 * self.gitlink_count):
+            raise SourceSealingClosureError("invalid_closure", "split aggregate counters do not close")
         _require_id(self.key_id, name="key_id")
         if (
             type(self.verify_rounds) is not tuple
@@ -996,11 +1061,17 @@ class SourceSealingSplitClosureV1:
             "task_count": self.task_count,
             "task_export_sha256": self.task_export_sha256,
             "task_records_sha256": self.task_records_sha256,
+            "task_closure_sha256": self.task_closure_sha256,
+            "entry_count": self.entry_count,
+            "regular_file_count": self.regular_file_count,
+            "gitlink_count": self.gitlink_count,
+            "regular_file_bytes": self.regular_file_bytes,
+            "materialized_bytes": self.materialized_bytes,
             "verify_rounds": [item.to_dict() for item in self.verify_rounds],
         }
 
     @classmethod
-    def from_dict(cls, value: object) -> "SourceSealingSplitClosureV1":
+    def from_dict(cls, value: object) -> "SourceSealingSplitClosureV2":
         raw = _strict_object(
             value,
             keys=frozenset(
@@ -1015,6 +1086,12 @@ class SourceSealingSplitClosureV1:
                     "task_count",
                     "task_export_sha256",
                     "task_records_sha256",
+                    "task_closure_sha256",
+                    "entry_count",
+                    "regular_file_count",
+                    "gitlink_count",
+                    "regular_file_bytes",
+                    "materialized_bytes",
                     "verify_rounds",
                 }
             ),
@@ -1044,6 +1121,12 @@ class SourceSealingSplitClosureV1:
             task_records_sha256=raw[
                 "task_records_sha256"
             ],  # type: ignore[arg-type]
+            task_closure_sha256=raw["task_closure_sha256"],  # type: ignore[arg-type]
+            entry_count=raw["entry_count"],  # type: ignore[arg-type]
+            regular_file_count=raw["regular_file_count"],  # type: ignore[arg-type]
+            gitlink_count=raw["gitlink_count"],  # type: ignore[arg-type]
+            regular_file_bytes=raw["regular_file_bytes"],  # type: ignore[arg-type]
+            materialized_bytes=raw["materialized_bytes"],  # type: ignore[arg-type]
             verify_rounds=(
                 SourceSealingVerifyRoundV1.from_dict(raw_rounds[0]),
                 SourceSealingVerifyRoundV1.from_dict(raw_rounds[1]),
@@ -1051,25 +1134,25 @@ class SourceSealingSplitClosureV1:
         )
 
 
-def _freeze_split(value: object) -> SourceSealingSplitClosureV1:
-    if type(value) is not SourceSealingSplitClosureV1:
+def _freeze_split(value: object) -> SourceSealingSplitClosureV2:
+    if type(value) is not SourceSealingSplitClosureV2:
         raise SourceSealingClosureError(
             "invalid_argument", "split closure must have an exact contract type"
         )
-    return SourceSealingSplitClosureV1.from_dict(value.to_dict())
+    return SourceSealingSplitClosureV2.from_dict(value.to_dict())
 
 
 def _split_from_evidence(
     *,
     split: Literal["test", "train"],
-    acquisition_pin: _AcquisitionSplitPinV4,
+    acquisition_pin: _AcquisitionSplitPinV5,
     evidence: tuple[
-        SnapshotBatchVerificationEvidenceV1,
-        SnapshotBatchVerificationEvidenceV1,
+        SnapshotBatchVerificationEvidenceV2,
+        SnapshotBatchVerificationEvidenceV2,
     ],
-) -> SourceSealingSplitClosureV1:
+) -> SourceSealingSplitClosureV2:
     if (
-        type(acquisition_pin) is not _AcquisitionSplitPinV4
+        type(acquisition_pin) is not _AcquisitionSplitPinV5
         or acquisition_pin.split != split
         or acquisition_pin.task_count != _SPLIT_COUNTS[split]
     ):
@@ -1077,7 +1160,7 @@ def _split_from_evidence(
             "invalid_binding", "acquisition pin is detached from its fixed split"
         )
     if type(evidence) is not tuple or len(evidence) != 2 or any(
-        type(item) is not SnapshotBatchVerificationEvidenceV1 for item in evidence
+        type(item) is not SnapshotBatchVerificationEvidenceV2 for item in evidence
     ):
         raise SourceSealingClosureError(
             "invalid_argument", "each split requires two trusted evidence values"
@@ -1102,6 +1185,13 @@ def _split_from_evidence(
             raise SourceSealingClosureError(
                 "invalid_binding", "verification evidence is detached from acquisition"
             )
+        observed_source_facts = tuple(
+            sorted((task.task_id, task.repo_url, task.commit, task.root_tree, task.gitlink_count) for task in summary.tasks)
+        )
+        if observed_source_facts != acquisition_pin.task_source_facts:
+            raise SourceSealingClosureError(
+                "invalid_binding", "snapshot task source facts are detached from acquisition"
+            )
     if (
         evidence[0].run_id == evidence[1].run_id
         or evidence[0].semantic_sha256 != evidence[1].semantic_sha256
@@ -1118,7 +1208,23 @@ def _split_from_evidence(
             "invalid_binding", "independent verification evidence does not agree"
         )
     summary = evidence[0].summary
-    return SourceSealingSplitClosureV1(
+    task_closure_records = [
+        {
+            "task_id": task.task_id, "repo_url": task.repo_url, "commit": task.commit,
+            "root_tree": task.root_tree,
+            "snapshot_manifest_sha256": task.snapshot_manifest_sha256,
+            "snapshot_content_root": task.snapshot_content_root,
+            "entry_count": task.entry_count, "regular_file_count": task.regular_file_count,
+            "gitlink_count": task.gitlink_count, "regular_file_bytes": task.regular_file_bytes,
+            "materialized_bytes": task.materialized_bytes,
+        }
+        for task in summary.tasks
+    ]
+    task_closure_sha256 = hashlib.sha256(
+        SOURCE_SEALING_TASK_CLOSURE_DOMAIN
+        + _canonical_json({"split": split, "tasks": task_closure_records})
+    ).hexdigest()
+    return SourceSealingSplitClosureV2(
         split=split,
         task_count=summary.task_count,
         task_export_sha256=summary.tasks_sha256,
@@ -1129,6 +1235,12 @@ def _split_from_evidence(
         key_equality_tag_sha256=evidence[0].key_equality_tag_sha256,
         output_identity_sha256=evidence[0].output_identity_sha256,
         task_records_sha256=evidence[0].task_records_sha256,
+        task_closure_sha256=task_closure_sha256,
+        entry_count=sum(task.entry_count for task in summary.tasks),
+        regular_file_count=sum(task.regular_file_count for task in summary.tasks),
+        gitlink_count=sum(task.gitlink_count for task in summary.tasks),
+        regular_file_bytes=sum(task.regular_file_bytes for task in summary.tasks),
+        materialized_bytes=sum(task.materialized_bytes for task in summary.tasks),
         verify_rounds=(
             SourceSealingVerifyRoundV1(
                 run_id=evidence[0].run_id,
@@ -1145,13 +1257,13 @@ def _split_from_evidence(
 
 
 @dataclass(frozen=True, slots=True)
-class SourceSealingClosureReceiptV1:
+class SourceSealingClosureReceiptV2:
     """Exact source-acquisition and two-split sealed-snapshot closure."""
 
     implementation_commit: str
     acquisition: SourceAcquisitionClosureV1
-    test: SourceSealingSplitClosureV1
-    train: SourceSealingSplitClosureV1
+    test: SourceSealingSplitClosureV2
+    train: SourceSealingSplitClosureV2
     _mint: InitVar[object | None] = None
     profile_id: str = PROFILE_ID
     public_manifest_sha256: str = PROFILE_MANIFEST_SHA256
@@ -1210,6 +1322,7 @@ class SourceSealingClosureReceiptV1:
             (test.output_identity_sha256, train.output_identity_sha256),
             (test.task_export_sha256, train.task_export_sha256),
             (test.task_records_sha256, train.task_records_sha256),
+            (test.task_closure_sha256, train.task_closure_sha256),
             (test.source_map_sha256, train.source_map_sha256),
             (test.sealed_manifest_sha256, train.sealed_manifest_sha256),
             (test.batch_content_root, train.batch_content_root),
@@ -1277,7 +1390,7 @@ class SourceSealingClosureReceiptV1:
         return hashlib.sha256(self.to_bytes()).hexdigest()
 
     @classmethod
-    def _from_pinned_dict(cls, value: object) -> "SourceSealingClosureReceiptV1":
+    def _from_pinned_dict(cls, value: object) -> "SourceSealingClosureReceiptV2":
         raw = _strict_object(
             value,
             keys=frozenset(
@@ -1304,8 +1417,8 @@ class SourceSealingClosureReceiptV1:
                 "implementation_commit"
             ],  # type: ignore[arg-type]
             acquisition=SourceAcquisitionClosureV1.from_dict(raw["acquisition"]),
-            test=SourceSealingSplitClosureV1.from_dict(raw["test"]),
-            train=SourceSealingSplitClosureV1.from_dict(raw["train"]),
+            test=SourceSealingSplitClosureV2.from_dict(raw["test"]),
+            train=SourceSealingSplitClosureV2.from_dict(raw["train"]),
             profile_id=raw["profile_id"],  # type: ignore[arg-type]
             public_manifest_sha256=raw[
                 "public_manifest_sha256"
@@ -1328,7 +1441,7 @@ class SourceSealingClosureReceiptV1:
         *,
         expected_receipt_sha256: str,
         expected_wire_sha256: str,
-    ) -> "SourceSealingClosureReceiptV1":
+    ) -> "SourceSealingClosureReceiptV2":
         semantic = _require_expected_sha256(
             expected_receipt_sha256, name="expected_receipt_sha256"
         )
@@ -1351,17 +1464,17 @@ class SourceSealingClosureReceiptV1:
         acquisition_report_bytes: bytes,
         expected_acquisition_report_sha256: str,
         test_evidence: tuple[
-            SnapshotBatchVerificationEvidenceV1,
-            SnapshotBatchVerificationEvidenceV1,
+            SnapshotBatchVerificationEvidenceV2,
+            SnapshotBatchVerificationEvidenceV2,
         ],
         train_evidence: tuple[
-            SnapshotBatchVerificationEvidenceV1,
-            SnapshotBatchVerificationEvidenceV1,
+            SnapshotBatchVerificationEvidenceV2,
+            SnapshotBatchVerificationEvidenceV2,
         ],
-    ) -> "SourceSealingClosureReceiptV1":
-        """Bind a pinned v4 acquisition report and trusted verifier evidence."""
+    ) -> "SourceSealingClosureReceiptV2":
+        """Bind a pinned v5 acquisition report and trusted verifier evidence."""
 
-        report = _parse_acquisition_report_v4(
+        report = _parse_acquisition_report_v5(
             acquisition_report_bytes,
             expected_acquisition_report_sha256=(
                 expected_acquisition_report_sha256
@@ -1377,6 +1490,14 @@ class SourceSealingClosureReceiptV1:
             acquisition_pin=report.split_pin("train"),
             evidence=train_evidence,
         )
+        test_ids = tuple(task.task_id for task in test_evidence[0].summary.tasks)
+        train_ids = tuple(task.task_id for task in train_evidence[0].summary.tasks)
+        if (len(set(test_ids)) != 20 or len(set(train_ids)) != 50
+            or set(test_ids).intersection(train_ids)
+            or len(set(test_ids).union(train_ids)) != SOURCE_SEALING_TASK_COUNT):
+            raise SourceSealingClosureError(
+                "invalid_binding", "test/train task identities do not form an exact disjoint 70-task set"
+            )
         if test_evidence[0].summary.batch_root == train_evidence[0].summary.batch_root:
             raise SourceSealingClosureError(
                 "invalid_binding", "test and train reuse an output root"
@@ -1404,6 +1525,7 @@ class SourceSealingClosureReceiptV1:
 __all__ = [
     "SOURCE_SEALING_CLOSURE_CONTRACT_VERSION",
     "SOURCE_SEALING_CLOSURE_DIGEST_DOMAIN",
+    "SOURCE_SEALING_TASK_CLOSURE_DOMAIN",
     "SOURCE_SEALING_CLOSURE_KIND",
     "SOURCE_SEALING_CLOSURE_MAX_JSON_DEPTH",
     "SOURCE_SEALING_CLOSURE_MAX_JSON_NODES",
@@ -1418,7 +1540,7 @@ __all__ = [
     "SourceAcquisitionClosureV1",
     "SourceObjectHygieneClosureV1",
     "SourceSealingClosureError",
-    "SourceSealingClosureReceiptV1",
-    "SourceSealingSplitClosureV1",
+    "SourceSealingClosureReceiptV2",
+    "SourceSealingSplitClosureV2",
     "SourceSealingVerifyRoundV1",
 ]

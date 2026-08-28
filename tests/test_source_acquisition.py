@@ -237,7 +237,7 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
             report["contract_version"], SOURCE_ACQUISITION_CONTRACT_VERSION
         )
         self.assertEqual(
-            report["contract_version"], "vulngym.source-acquisition.v4"
+            report["contract_version"], "vulngym.source-acquisition.v5"
         )
         self.assertEqual(report["github_transport"], "https")
         self.assertEqual(report["task_count"], 70)

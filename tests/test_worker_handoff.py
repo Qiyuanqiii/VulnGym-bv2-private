@@ -14,6 +14,7 @@ from vulngym_agent.benchmark.contracts import INSTRUCTION_ID
 from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskInputV1
 from vulngym_agent.benchmark.sealed_snapshot import (
     SealedSnapshotFile,
+    SealedSnapshotGitlink,
     SnapshotPolicy,
     prepare_sealed_snapshot,
 )
@@ -121,6 +122,40 @@ class WorkerHandoffTests(unittest.TestCase):
             expected_handoff_sha256=self.handoff.handoff_sha256,
             expected_handoff_wire_sha256=self.handoff.wire_sha256,
         )
+
+    def test_gitlink_snapshot_fails_closed_before_worker_handoff(self) -> None:
+        target = self.commit
+        self._git(
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            f"160000,{target},vendor/dependency",
+        )
+        self._git("commit", "-q", "-m", "metadata-only gitlink")
+        commit = self._git("rev-parse", "HEAD").stdout.strip()
+        root = self.root / "sealed-gitlink"
+        prepared = prepare_sealed_snapshot(
+            GitRepository(self.repository),
+            task_id=TASK_ID,
+            repo_url=REPO_URL,
+            commit=commit,
+            output_dir=root,
+            attestation_key=KEY,
+            key_id=KEY_ID,
+        )
+        task = DiscoveryTaskInputV1(
+            task_id=TASK_ID,
+            repo_url=REPO_URL,
+            commit=commit,
+            instruction_id=INSTRUCTION_ID,
+            snapshot_manifest_sha256=prepared.manifest_sha256,
+            snapshot_content_root=prepared.content_root,
+        )
+        with self.assertRaises(WorkerHandoffError) as captured:
+            build_worker_handoff(
+                task, root, attestation_key=KEY, expected_key_id=KEY_ID
+            )
+        self.assertEqual("snapshot_verification_failed", captured.exception.code)
 
     def test_public_contract_is_canonical_nonsecret_and_exported(self) -> None:
         payload = self.handoff.to_bytes()

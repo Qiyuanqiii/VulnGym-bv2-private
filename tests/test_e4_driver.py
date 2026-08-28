@@ -185,9 +185,15 @@ class E4DriverTests(unittest.TestCase):
                     instruction_id=task.instruction_id,
                     snapshot_manifest_sha256=_sha(f"{split}:{index}:manifest"),
                     snapshot_content_root=_sha(f"{split}:{index}:content"),
+                    root_tree=f"{index + 1:040x}",
                     file_count=1,
                     node_count=1,
                     total_bytes=1,
+                    entry_count=1,
+                    regular_file_count=1,
+                    gitlink_count=0,
+                    regular_file_bytes=1,
+                    materialized_bytes=1,
                 )
             )
             configs.append(

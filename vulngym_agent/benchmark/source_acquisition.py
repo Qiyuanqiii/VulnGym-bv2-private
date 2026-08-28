@@ -63,7 +63,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 
 
 SOURCE_ACQUISITION_CONTRACT_VERSION: Final[str] = (
-    "vulngym.source-acquisition.v4"
+    "vulngym.source-acquisition.v5"
 )
 SOURCE_ACQUISITION_REPORT_NAME: Final[str] = "acquisition-report.json"
 SOURCE_NOT_READY_EXIT_STATUS: Final[int] = 10
@@ -1944,6 +1944,16 @@ def _acquisition_report_payload(
             "source_map_sha256": source_maps_by_split[export.split].sha256,
             "split": export.split,
             "task_count": len(export.tasks),
+            "task_source_facts": [
+                {
+                    "commit": task.commit,
+                    "gitlink_count": repository_audits[task.repo_url][task.commit].gitlink_count,
+                    "repo_url": task.repo_url,
+                    "root_tree": repository_audits[task.repo_url][task.commit].root_tree,
+                    "task_id": task.task_id,
+                }
+                for task in export.tasks
+            ],
             "tasks_sha256": export.tasks_sha256,
         }
         for export in exports

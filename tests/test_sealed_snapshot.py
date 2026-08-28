@@ -15,6 +15,7 @@ from unittest import mock
 from vulngym_agent.benchmark import sealed_snapshot as sealed_snapshot_module
 from vulngym_agent.benchmark.sealed_snapshot import (
     GIT_SYMLINK_REPRESENTATION,
+    GITLINK_REPRESENTATION,
     SealedSnapshotError,
     SnapshotPolicy,
     audit_sealed_snapshot_source,
@@ -178,26 +179,29 @@ class SealedSnapshotTests(unittest.TestCase):
         )
         policy = SnapshotPolicy().to_dict()
         self.assertEqual(
-            "vulngym.sealed-source-snapshot.v2",
+            "vulngym.sealed-source-snapshot.v3",
             sealed_snapshot_module.SNAPSHOT_CONTRACT_VERSION,
         )
-        self.assertEqual("vulngym.portable-source-tree.v2", policy["policy_version"])
+        self.assertEqual("vulngym.portable-source-tree.v3", policy["policy_version"])
         self.assertEqual(
             GIT_SYMLINK_REPRESENTATION,
             policy["git_symlink_representation"],
         )
+        self.assertEqual(GITLINK_REPRESENTATION, policy["gitlink_representation"])
         self.assertEqual(
-            b"VulnGym sealed source content root v2\0",
+            b"VulnGym sealed source content root v3\0",
             sealed_snapshot_module._CONTENT_DOMAIN,
         )
         self.assertEqual(
-            b"VulnGym sealed source attestation v2\0",
+            b"VulnGym sealed source attestation v3\0",
             sealed_snapshot_module._ATTESTATION_DOMAIN,
         )
         with self.assertRaises(ValueError):
             SnapshotPolicy(git_symlink_representation="host-symlink")
+        with self.assertRaises(ValueError):
+            SnapshotPolicy(gitlink_representation="recursive-checkout")
 
-    def test_v2_verifier_rejects_a_self_consistent_legacy_v1_bundle(self) -> None:
+    def test_v3_verifier_rejects_a_self_consistent_legacy_v1_bundle(self) -> None:
         prepared = self._prepare("legacy-v1")
         manifest_path = prepared.snapshot_root / "control" / "manifest.jsonl"
         records = [json.loads(line) for line in manifest_path.read_bytes().splitlines()]
@@ -347,6 +351,38 @@ class SealedSnapshotTests(unittest.TestCase):
                 policy=policy,
             )
 
+    def test_manifest_footer_rejects_each_detached_count(self) -> None:
+        prepared = self._prepare("footer-counts")
+        manifest_path = prepared.snapshot_root / "control" / "manifest.jsonl"
+        records = [json.loads(line) for line in manifest_path.read_bytes().splitlines()]
+        expected = {
+            "entry_count": 3,
+            "file_count": 3,
+            "gitlink_count": 0,
+            "materialized_bytes": prepared.total_bytes,
+            "regular_file_bytes": prepared.total_bytes,
+            "regular_file_count": 3,
+            "total_bytes": prepared.total_bytes,
+        }
+        for field, value in expected.items():
+            self.assertEqual(value, records[-1][field])
+            changed = [dict(record) for record in records]
+            changed[-1][field] = value + 1
+            payload = b"".join(
+                sealed_snapshot_module._canonical_json(record) + b"\n"
+                for record in changed
+            )
+            with self.subTest(field=field), self.assertRaisesRegex(
+                SealedSnapshotError, "footer"
+            ):
+                sealed_snapshot_module._parse_manifest(
+                    payload,
+                    expected_task_id=TASK_ID,
+                    expected_repo_url=REPO_URL,
+                    expected_commit=self.commit,
+                    policy=SnapshotPolicy(),
+                )
+
     def test_canonical_json_rejects_lone_surrogate_as_structured_error(self) -> None:
         with self.assertRaisesRegex(SealedSnapshotError, "malformed"):
             sealed_snapshot_module._parse_canonical_json(
@@ -475,9 +511,9 @@ class SealedSnapshotTests(unittest.TestCase):
         blocked_gitlink = audit_sealed_snapshot_source(
             self.repository, gitlink_commit
         )
-        self.assertFalse(blocked_gitlink.ready)
+        self.assertTrue(blocked_gitlink.ready)
         self.assertEqual(1, blocked_gitlink.gitlink_count)
-        self.assertIn("source_gitlink_rejected", blocked_gitlink.status_codes)
+        self.assertEqual((), blocked_gitlink.status_codes)
 
         self._git("rm", "-q", "--cached", "submodule")
         lfs_pointer = (
@@ -495,15 +531,25 @@ class SealedSnapshotTests(unittest.TestCase):
         with self.assertRaisesRegex(SealedSnapshotError, "LFS"):
             self._prepare("symlink-lfs", commit=lfs_commit)
 
-    def test_prepare_still_rejects_gitlink_and_lfs_pointer(self) -> None:
+    def test_prepare_materializes_gitlink_marker_and_still_rejects_lfs_pointer(self) -> None:
         parent = self._git("rev-parse", "HEAD").stdout.strip()
         self._git(
             "update-index", "--add", "--cacheinfo", f"160000,{parent},submodule"
         )
         self._git("commit", "-q", "-m", "gitlink entry")
         gitlink_commit = self._git("rev-parse", "HEAD").stdout.strip()
-        with self.assertRaisesRegex(SealedSnapshotError, "Git links"):
-            self._prepare("gitlink", commit=gitlink_commit)
+        prepared = self._prepare("gitlink", commit=gitlink_commit)
+        marker = prepared.agent_tree / "submodule"
+        self.assertEqual(b"gitlink " + parent.encode("ascii") + b"\n", marker.read_bytes())
+        record = next(item for item in prepared.files if item.path == "submodule")
+        self.assertEqual("gitlink", record.to_dict()["record_type"])
+        self.assertEqual(parent, record.target_commit_oid)
+        verified = self._verify("gitlink", expected_commit=gitlink_commit)
+        self.assertEqual(prepared.files, verified.files)
+
+        marker.write_bytes(b"gitlink " + ("f" * 40).encode("ascii") + b"\n")
+        with self.assertRaises(SealedSnapshotError):
+            self._verify("gitlink", expected_commit=gitlink_commit)
 
         self._git("rm", "-q", "--cached", "submodule")
         (self.repo_path / "large.bin").write_bytes(
@@ -515,6 +561,59 @@ class SealedSnapshotTests(unittest.TestCase):
         lfs_commit = self._git("rev-parse", "HEAD").stdout.strip()
         with self.assertRaisesRegex(SealedSnapshotError, "LFS"):
             self._prepare("lfs", commit=lfs_commit)
+
+    def test_gitlink_materialization_never_reads_child_as_blob(self) -> None:
+        child = self._git("rev-parse", "HEAD").stdout.strip()
+        self._git("update-index", "--add", "--cacheinfo", f"160000,{child},Peekaboo")
+        self._git("commit", "-q", "-m", "metadata-only gitlink")
+        commit = self._git("rev-parse", "HEAD").stdout.strip()
+        with mock.patch.object(
+            self.repository, "read_blob_object", wraps=self.repository.read_blob_object
+        ) as reader:
+            prepared = self._prepare("gitlink-no-child-read", commit=commit)
+        self.assertNotIn(child, [call.args[0] for call in reader.call_args_list])
+        self.assertEqual(
+            b"gitlink " + child.encode("ascii") + b"\n",
+            (prepared.agent_tree / "Peekaboo").read_bytes(),
+        )
+
+    def test_gitlink_marker_is_subject_to_file_and_materialized_budgets(self) -> None:
+        child = self._git("rev-parse", "HEAD").stdout.strip()
+        gitlink_tree = b"160000 submodule\0" + bytes.fromhex(child)
+        gitlink_only = self._raw_commit(gitlink_tree)
+        tight_file = SnapshotPolicy(max_file_bytes=48, max_total_bytes=48)
+        audited = audit_sealed_snapshot_source(
+            self.repository, gitlink_only, policy=tight_file
+        )
+        self.assertIn("source_limit_exceeded", audited.status_codes)
+        with self.assertRaisesRegex(SealedSnapshotError, "byte budget"):
+            self._prepare("gitlink-file-budget", commit=gitlink_only, policy=tight_file)
+
+        blob = self._hash_object(b"x")
+        mixed_tree = (
+            b"100644 one.txt\0"
+            + bytes.fromhex(blob)
+            + b"160000 submodule\0"
+            + bytes.fromhex(child)
+        )
+        mixed_commit = self._raw_commit(mixed_tree)
+        tight_total = SnapshotPolicy(max_file_bytes=49, max_total_bytes=49)
+        audited = audit_sealed_snapshot_source(
+            self.repository, mixed_commit, policy=tight_total
+        )
+        self.assertIn("source_limit_exceeded", audited.status_codes)
+        with self.assertRaisesRegex(SealedSnapshotError, "total byte budget"):
+            self._prepare("gitlink-total-budget", commit=mixed_commit, policy=tight_total)
+
+    def test_regular_blob_that_looks_like_gitlink_marker_remains_a_file(self) -> None:
+        child = self._git("rev-parse", "HEAD").stdout.strip()
+        marker = b"gitlink " + child.encode("ascii") + b"\n"
+        blob = self._hash_object(marker)
+        commit = self._raw_commit(b"100644 marker.txt\0" + bytes.fromhex(blob))
+        prepared = self._prepare("marker-like-file", commit=commit)
+        record = prepared.files[0]
+        self.assertEqual("file", record.to_dict()["record_type"])
+        self.assertEqual(marker, (prepared.agent_tree / "marker.txt").read_bytes())
 
     def test_prepare_rejects_non_nfc_reserved_and_casefold_collisions(self) -> None:
         blob = self._hash_object(b"unsafe")

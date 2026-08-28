@@ -172,14 +172,15 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
             value.git_symlink_representation,
+            value.gitlink_representation,
         )
     except (AttributeError, TypeError):
         raise EvaluatorSupervisorError(
             "invalid_argument", "snapshot policy fields are incomplete"
         ) from None
     if (
-        any(type(item) is not int for item in fields[:-1])
-        or type(fields[-1]) is not str
+        any(type(item) is not int for item in fields[:-2])
+        or any(type(item) is not str for item in fields[-2:])
     ):
         raise EvaluatorSupervisorError(
             "invalid_argument", "snapshot policy fields have invalid exact types"
@@ -195,6 +196,7 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
             git_symlink_representation=fields[8],
+            gitlink_representation=fields[9],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorSupervisorError(

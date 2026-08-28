@@ -38,13 +38,14 @@ from vulngym_agent.tools.git.repository import (
 )
 
 
-SNAPSHOT_CONTRACT_VERSION: Final[str] = "vulngym.sealed-source-snapshot.v2"
-SNAPSHOT_POLICY_VERSION: Final[str] = "vulngym.portable-source-tree.v2"
+SNAPSHOT_CONTRACT_VERSION: Final[str] = "vulngym.sealed-source-snapshot.v3"
+SNAPSHOT_POLICY_VERSION: Final[str] = "vulngym.portable-source-tree.v3"
 GIT_SYMLINK_REPRESENTATION: Final[str] = "regular-file-raw-target-bytes"
+GITLINK_REPRESENTATION: Final[str] = "regular-file-gitlink-commit-oid-lf"
 ATTESTATION_ALGORITHM: Final[str] = "HMAC-SHA256"
 
-_CONTENT_DOMAIN: Final[bytes] = b"VulnGym sealed source content root v2\0"
-_ATTESTATION_DOMAIN: Final[bytes] = b"VulnGym sealed source attestation v2\0"
+_CONTENT_DOMAIN: Final[bytes] = b"VulnGym sealed source content root v3\0"
+_ATTESTATION_DOMAIN: Final[bytes] = b"VulnGym sealed source attestation v3\0"
 _TASK_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"VG-(?:TRAIN|TEST)-[0-9A-F]{20}\Z"
 )
@@ -97,6 +98,7 @@ class SnapshotPolicy:
     max_tree_object_bytes: int = 16 * 1024 * 1024
     max_manifest_bytes: int = 64 * 1024 * 1024
     git_symlink_representation: str = GIT_SYMLINK_REPRESENTATION
+    gitlink_representation: str = GITLINK_REPRESENTATION
 
     def __post_init__(self) -> None:
         limits = (
@@ -141,6 +143,13 @@ class SnapshotPolicy:
             raise ValueError(
                 "git_symlink_representation must name the fixed safe representation"
             )
+        if (
+            type(self.gitlink_representation) is not str
+            or self.gitlink_representation != GITLINK_REPRESENTATION
+        ):
+            raise ValueError(
+                "gitlink_representation must name the fixed safe representation"
+            )
 
     def to_dict(self) -> dict[str, int | str]:
         return {
@@ -153,6 +162,7 @@ class SnapshotPolicy:
             "max_total_bytes": self.max_total_bytes,
             "max_tree_object_bytes": self.max_tree_object_bytes,
             "git_symlink_representation": self.git_symlink_representation,
+            "gitlink_representation": self.gitlink_representation,
             "policy_version": SNAPSHOT_POLICY_VERSION,
         }
 
@@ -280,6 +290,53 @@ class SealedSnapshotFile:
 
 
 @dataclass(frozen=True, slots=True)
+class SealedSnapshotGitlink:
+    """One metadata-only Git link; no child repository content is included."""
+
+    path: str
+    target_commit_oid: str
+    materialized_sha256: str
+    size: int = 49
+    git_mode: str = "160000"
+    representation: str = GITLINK_REPRESENTATION
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.path) is not str
+            or type(self.target_commit_oid) is not str
+            or _SHA1_RE.fullmatch(self.target_commit_oid) is None
+            or type(self.materialized_sha256) is not str
+            or _SHA256_RE.fullmatch(self.materialized_sha256) is None
+            or type(self.size) is not int
+            or self.size != 49
+            or self.git_mode != "160000"
+            or self.representation != GITLINK_REPRESENTATION
+        ):
+            raise ValueError("gitlink metadata is invalid")
+        marker = b"gitlink " + self.target_commit_oid.encode("ascii") + b"\n"
+        if hashlib.sha256(marker).hexdigest() != self.materialized_sha256:
+            raise ValueError("gitlink marker digest is detached")
+
+    @property
+    def sha256(self) -> str:
+        return self.materialized_sha256
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "git_mode": self.git_mode,
+            "materialized_sha256": self.materialized_sha256,
+            "path": self.path,
+            "record_type": "gitlink",
+            "representation": self.representation,
+            "size": self.size,
+            "target_commit_oid": self.target_commit_oid,
+        }
+
+
+SealedSnapshotEntry = SealedSnapshotFile | SealedSnapshotGitlink
+
+
+@dataclass(frozen=True, slots=True)
 class SealedSnapshotSummary:
     """Immutable result returned by the trusted snapshot preparer."""
 
@@ -292,7 +349,12 @@ class SealedSnapshotSummary:
     manifest_sha256: str
     file_count: int
     total_bytes: int
-    files: tuple[SealedSnapshotFile, ...]
+    entry_count: int
+    regular_file_count: int
+    gitlink_count: int
+    regular_file_bytes: int
+    materialized_bytes: int
+    files: tuple[SealedSnapshotEntry, ...]
 
     @property
     def agent_tree(self) -> Path:
@@ -315,7 +377,12 @@ class VerifiedSealedSnapshot:
     key_id: str
     file_count: int
     total_bytes: int
-    files: tuple[SealedSnapshotFile, ...]
+    entry_count: int
+    regular_file_count: int
+    gitlink_count: int
+    regular_file_bytes: int
+    materialized_bytes: int
+    files: tuple[SealedSnapshotEntry, ...]
 
     @property
     def agent_tree(self) -> Path:
@@ -762,9 +829,17 @@ def _validate_entries(
             all_paths.append((raw_path, True))
             continue
         if entry.mode == "160000" or entry.object_type == "commit":
-            raise SealedSnapshotError(
-                "source_gitlink_rejected", "Git links are forbidden"
-            )
+            if (
+                entry.mode != "160000"
+                or entry.object_type != "commit"
+                or _SHA1_RE.fullmatch(entry.object_id) is None
+            ):
+                raise SealedSnapshotError(
+                    "invalid_source_tree", "Git link metadata is invalid"
+                )
+            validated.append((entry, components, raw_path, collision_key))
+            all_paths.append((raw_path, False))
+            continue
         if (
             entry.mode not in {"100644", "100755", "120000"}
             or entry.object_type != "blob"
@@ -935,8 +1010,17 @@ def audit_sealed_snapshot_source(
                 statuses.add("invalid_source_tree")
                 continue
         if entry.mode == "160000" or entry.object_type == "commit":
+            if (
+                entry.mode != "160000"
+                or entry.object_type != "commit"
+                or _SHA1_RE.fullmatch(entry.object_id) is None
+            ):
+                unsupported_entry_count += 1
+                statuses.add("invalid_source_tree")
+                continue
             gitlink_count += 1
-            statuses.add("source_gitlink_rejected")
+            if 49 > policy.max_file_bytes:
+                statuses.add("source_limit_exceeded")
             continue
         if (
             entry.mode not in {"100644", "100755", "120000"}
@@ -993,7 +1077,8 @@ def audit_sealed_snapshot_source(
             lfs_pointer_count += 1
             statuses.add("source_lfs_rejected")
 
-    if total_regular_bytes > policy.max_total_bytes:
+    materialized_bytes = total_regular_bytes + (gitlink_count * 49)
+    if materialized_bytes > policy.max_total_bytes:
         statuses.add("source_limit_exceeded")
     if not regular_file_count:
         statuses.add("invalid_source_tree")
@@ -1518,7 +1603,7 @@ def _manifest_bytes(
     repo_url: str,
     commit: str,
     root_tree: str,
-    files: Sequence[SealedSnapshotFile],
+    files: Sequence[SealedSnapshotEntry],
     total_bytes: int,
     policy: SnapshotPolicy,
 ) -> tuple[bytes, str]:
@@ -1533,10 +1618,20 @@ def _manifest_bytes(
     }
     file_lines = tuple(_canonical_json(value.to_dict()) + b"\n" for value in files)
     content_root = _content_root(file_lines)
+    regular_file_count = sum(type(value) is SealedSnapshotFile for value in files)
+    gitlink_count = sum(type(value) is SealedSnapshotGitlink for value in files)
+    regular_file_bytes = sum(
+        value.size for value in files if type(value) is SealedSnapshotFile
+    )
     footer = {
         "content_root": content_root,
+        "entry_count": len(files),
         "file_count": len(files),
+        "gitlink_count": gitlink_count,
+        "materialized_bytes": total_bytes,
         "record_type": "footer",
+        "regular_file_bytes": regular_file_bytes,
+        "regular_file_count": regular_file_count,
         "total_bytes": total_bytes,
     }
     payload = (
@@ -1568,9 +1663,9 @@ def prepare_sealed_snapshot(
 
     The output directory must not already exist and is never overwritten.  Git
     content is read only by raw object ID; checkout, attributes, filters,
-    hooks, submodules, and Git LFS hydration are deliberately absent. Git mode
+    hooks, submodule recursion, and Git LFS hydration are deliberately absent. Git mode
     ``120000`` blobs are never resolved or created as host links: their target
-    bytes are materialized as ordinary files under the fixed v2 policy.
+    bytes are materialized as ordinary files under the fixed v3 policy.
     """
 
     if not isinstance(repository, GitRepository):
@@ -1601,36 +1696,54 @@ def prepare_sealed_snapshot(
         ) from error
     entries = _validate_entries(raw_entries, policy)
     staging = _begin_staging(output_dir, repository)
-    file_records: list[SealedSnapshotFile] = []
+    file_records: list[SealedSnapshotEntry] = []
     total_bytes = 0
+    regular_file_bytes = 0
     try:
         _create_staging_dir(staging, "tree")
         _create_staging_dir(staging, "control")
         for entry, components, _ in entries:
-            try:
-                data = repository.read_blob_object(
-                    entry.object_id, max_bytes=policy.max_file_bytes
-                )
-            except GitBlobTooLarge as error:
-                raise SealedSnapshotError(
-                    "source_limit_exceeded", "a source blob exceeds its byte budget"
-                ) from error
+            if entry.mode == "160000":
+                data = b"gitlink " + entry.object_id.encode("ascii") + b"\n"
+                if len(data) > policy.max_file_bytes:
+                    raise SealedSnapshotError(
+                        "source_limit_exceeded",
+                        "a materialized gitlink marker exceeds its byte budget",
+                    )
+            else:
+                try:
+                    data = repository.read_blob_object(
+                        entry.object_id, max_bytes=policy.max_file_bytes
+                    )
+                except GitBlobTooLarge as error:
+                    raise SealedSnapshotError(
+                        "source_limit_exceeded", "a source blob exceeds its byte budget"
+                    ) from error
             total_bytes += len(data)
+            if entry.mode != "160000":
+                regular_file_bytes += len(data)
             if total_bytes > policy.max_total_bytes:
                 raise SealedSnapshotError(
                     "source_limit_exceeded", "source tree exceeds its total byte budget"
                 )
-            if _is_lfs_pointer(data):
+            if entry.mode != "160000" and _is_lfs_pointer(data):
                 raise SealedSnapshotError(
                     "source_lfs_rejected", "Git LFS pointer blobs are forbidden"
                 )
-            record = SealedSnapshotFile(
-                path=entry.path,
-                git_mode=entry.mode,
-                blob_oid=entry.object_id,
-                size=len(data),
-                sha256=hashlib.sha256(data).hexdigest(),
-            )
+            if entry.mode == "160000":
+                record: SealedSnapshotEntry = SealedSnapshotGitlink(
+                    path=entry.path,
+                    target_commit_oid=entry.object_id,
+                    materialized_sha256=hashlib.sha256(data).hexdigest(),
+                )
+            else:
+                record = SealedSnapshotFile(
+                    path=entry.path,
+                    git_mode=entry.mode,
+                    blob_oid=entry.object_id,
+                    size=len(data),
+                    sha256=hashlib.sha256(data).hexdigest(),
+                )
             # `_write_staging_file` always creates a no-follow regular 0600
             # node. This is intentional for every entry and is the complete
             # representation transform for Git mode 120000: `data` remains
@@ -1683,6 +1796,11 @@ def prepare_sealed_snapshot(
             manifest_sha256=manifest_sha256,
             file_count=len(files),
             total_bytes=total_bytes,
+            entry_count=len(files),
+            regular_file_count=sum(type(item) is SealedSnapshotFile for item in files),
+            gitlink_count=sum(type(item) is SealedSnapshotGitlink for item in files),
+            regular_file_bytes=regular_file_bytes,
+            materialized_bytes=total_bytes,
             files=files,
         )
     except FileExistsError as error:
@@ -1854,7 +1972,7 @@ def _parse_manifest(
     expected_repo_url: str,
     expected_commit: str,
     policy: SnapshotPolicy,
-) -> tuple[str, tuple[SealedSnapshotFile, ...], int, str]:
+) -> tuple[str, tuple[SealedSnapshotEntry, ...], int, str]:
     if not payload.endswith(b"\n") or len(payload) > policy.max_manifest_bytes:
         raise SealedSnapshotError(
             "manifest_invalid", "sealed manifest violates its byte framing"
@@ -1892,15 +2010,23 @@ def _parse_manifest(
             "manifest_binding_mismatch", "manifest trusted binding does not match"
         )
 
-    files: list[SealedSnapshotFile] = []
+    files: list[SealedSnapshotEntry] = []
     seen_exact: set[bytes] = set()
     seen_portable: set[str] = set()
     previous_path: bytes | None = None
     total_bytes = 0
+    regular_file_bytes = 0
+    regular_file_count = 0
+    gitlink_count = 0
     file_lines: list[bytes] = []
     file_keys = {"blob_oid", "git_mode", "path", "record_type", "sha256", "size"}
+    gitlink_keys = {"git_mode", "materialized_sha256", "path", "record_type", "representation", "size", "target_commit_oid"}
     for record, raw_line in zip(records[1:-1], raw_lines[1:-1]):
-        if set(record) != file_keys or record.get("record_type") != "file":
+        record_type = record.get("record_type")
+        if not (
+            (record_type == "file" and set(record) == file_keys)
+            or (record_type == "gitlink" and set(record) == gitlink_keys)
+        ):
             raise SealedSnapshotError("manifest_invalid", "manifest file record is invalid")
         components, raw_path, collision = _validate_portable_path(
             record.get("path"), policy
@@ -1922,18 +2048,30 @@ def _parse_manifest(
         seen_exact.add(raw_path)
         seen_portable.add(collision)
         size = record.get("size")
+        digest_field = "sha256" if record_type == "file" else "materialized_sha256"
+        oid_field = "blob_oid" if record_type == "file" else "target_commit_oid"
         if (
-            record.get("git_mode") not in {"100644", "100755", "120000"}
-            or not isinstance(record.get("blob_oid"), str)
-            or _SHA1_RE.fullmatch(record["blob_oid"]) is None
-            or not isinstance(record.get("sha256"), str)
-            or _SHA256_RE.fullmatch(record["sha256"]) is None
+            (record_type == "file" and record.get("git_mode") not in {"100644", "100755", "120000"})
+            or (record_type == "gitlink" and (
+                record.get("git_mode") != "160000"
+                or record.get("representation") != GITLINK_REPRESENTATION
+                or size != 49
+            ))
+            or not isinstance(record.get(oid_field), str)
+            or _SHA1_RE.fullmatch(record[oid_field]) is None
+            or not isinstance(record.get(digest_field), str)
+            or _SHA256_RE.fullmatch(record[digest_field]) is None
             or isinstance(size, bool)
             or not isinstance(size, int)
             or not 0 <= size <= policy.max_file_bytes
         ):
             raise SealedSnapshotError("manifest_invalid", "manifest file metadata is invalid")
         total_bytes += size
+        if record_type == "file":
+            regular_file_count += 1
+            regular_file_bytes += size
+        else:
+            gitlink_count += 1
         if total_bytes > policy.max_total_bytes:
             raise SealedSnapshotError(
                 "manifest_invalid", "manifest exceeds the total byte budget"
@@ -1946,6 +2084,15 @@ def _parse_manifest(
                 size=size,
                 sha256=record["sha256"],
             )
+            if record_type == "file"
+            else SealedSnapshotGitlink(
+                path=record["path"],
+                target_commit_oid=record["target_commit_oid"],
+                materialized_sha256=record["materialized_sha256"],
+                size=size,
+                git_mode=record["git_mode"],
+                representation=record["representation"],
+            )
         )
         file_lines.append(raw_line)
 
@@ -1955,19 +2102,37 @@ def _parse_manifest(
         )
 
     footer = records[-1]
-    footer_file_count = footer.get("file_count")
-    footer_total_bytes = footer.get("total_bytes")
-    if set(footer) != {"content_root", "file_count", "record_type", "total_bytes"}:
+    footer_keys = {
+        "content_root",
+        "entry_count",
+        "file_count",
+        "gitlink_count",
+        "materialized_bytes",
+        "record_type",
+        "regular_file_bytes",
+        "regular_file_count",
+        "total_bytes",
+    }
+    if set(footer) != footer_keys:
         raise SealedSnapshotError("manifest_invalid", "manifest footer is invalid")
     content_root = _content_root(file_lines)
+    integer_totals = {
+        "entry_count": len(files),
+        "file_count": len(files),
+        "gitlink_count": gitlink_count,
+        "materialized_bytes": total_bytes,
+        "regular_file_bytes": regular_file_bytes,
+        "regular_file_count": regular_file_count,
+        "total_bytes": total_bytes,
+    }
     if (
         footer.get("record_type") != "footer"
-        or isinstance(footer_file_count, bool)
-        or not isinstance(footer_file_count, int)
-        or footer_file_count != len(files)
-        or isinstance(footer_total_bytes, bool)
-        or not isinstance(footer_total_bytes, int)
-        or footer_total_bytes != total_bytes
+        or any(
+            isinstance(footer.get(name), bool)
+            or not isinstance(footer.get(name), int)
+            or footer.get(name) != expected
+            for name, expected in integer_totals.items()
+        )
         or footer.get("content_root") != content_root
     ):
         raise SealedSnapshotError("manifest_invalid", "manifest footer does not match")
@@ -2182,15 +2347,19 @@ def verify_sealed_snapshot(
             raise SealedSnapshotError(
                 "snapshot_changed", "snapshot tree changed during verification"
             )
-        git_header = f"blob {len(data)}\0".encode("ascii")
-        git_oid = hashlib.sha1(
-            git_header + data, usedforsecurity=False
-        ).hexdigest()
+        if type(record) is SealedSnapshotGitlink:
+            expected_marker = b"gitlink " + record.target_commit_oid.encode("ascii") + b"\n"
+            object_matches = data == expected_marker
+        else:
+            object_matches = hashlib.sha1(
+                f"blob {len(data)}\0".encode("ascii") + data,
+                usedforsecurity=False,
+            ).hexdigest() == record.blob_oid
         if (
             len(data) != record.size
             or hashlib.sha256(data).hexdigest() != record.sha256
-            or git_oid != record.blob_oid
-            or _is_lfs_pointer(data)
+            or not object_matches
+            or (type(record) is SealedSnapshotFile and _is_lfs_pointer(data))
         ):
             raise SealedSnapshotError(
                 "snapshot_tree_mismatch", "snapshot bytes differ from the manifest"
@@ -2231,6 +2400,11 @@ def verify_sealed_snapshot(
         key_id=expected_key_id,
         file_count=len(files),
         total_bytes=total_bytes,
+        entry_count=len(files),
+        regular_file_count=sum(type(item) is SealedSnapshotFile for item in files),
+        gitlink_count=sum(type(item) is SealedSnapshotGitlink for item in files),
+        regular_file_bytes=sum(item.size for item in files if type(item) is SealedSnapshotFile),
+        materialized_bytes=total_bytes,
         files=files,
     )
 
@@ -2239,10 +2413,13 @@ __all__ = [
     "ATTESTATION_ALGORITHM",
     "DEFAULT_SNAPSHOT_POLICY",
     "GIT_SYMLINK_REPRESENTATION",
+    "GITLINK_REPRESENTATION",
     "SNAPSHOT_CONTRACT_VERSION",
     "SNAPSHOT_POLICY_VERSION",
     "SealedSnapshotError",
     "SealedSnapshotFile",
+    "SealedSnapshotGitlink",
+    "SealedSnapshotEntry",
     "SealedSnapshotSourceAudit",
     "SealedSnapshotSummary",
     "SnapshotPolicy",

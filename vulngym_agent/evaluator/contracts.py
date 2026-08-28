@@ -110,6 +110,7 @@ _POLICY_KEYS: Final[frozenset[str]] = frozenset(
         "max_total_bytes",
         "max_tree_object_bytes",
         "git_symlink_representation",
+        "gitlink_representation",
         "policy_version",
     }
 )
@@ -117,11 +118,17 @@ _BATCH_TASK_KEYS: Final[frozenset[str]] = frozenset(
     {
         "bundle_path",
         "commit",
+        "entry_count",
         "file_count",
+        "gitlink_count",
         "instruction_id",
+        "materialized_bytes",
         "node_count",
         "record_type",
+        "regular_file_bytes",
+        "regular_file_count",
         "repo_url",
+        "root_tree",
         "snapshot_content_root",
         "snapshot_manifest_sha256",
         "split",
@@ -336,14 +343,15 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
             value.git_symlink_representation,
+            value.gitlink_representation,
         )
     except (AttributeError, TypeError):
         raise EvaluatorContractError(
             "invalid_contract", "snapshot policy fields are incomplete"
         ) from None
     if (
-        any(type(item) is not int for item in fields[:-1])
-        or type(fields[-1]) is not str
+        any(type(item) is not int for item in fields[:-2])
+        or any(type(item) is not str for item in fields[-2:])
     ):
         raise EvaluatorContractError(
             "invalid_contract", "snapshot policy fields have invalid exact types"
@@ -359,6 +367,7 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
             git_symlink_representation=fields[8],
+            gitlink_representation=fields[9],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorContractError(
@@ -388,6 +397,7 @@ def _policy_from_dict(value: object) -> SnapshotPolicy:
             max_tree_object_bytes=raw["max_tree_object_bytes"],
             max_manifest_bytes=raw["max_manifest_bytes"],
             git_symlink_representation=raw["git_symlink_representation"],
+            gitlink_representation=raw["gitlink_representation"],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorContractError(
@@ -414,18 +424,24 @@ def _canonical_batch_task(value: object) -> SnapshotBatchTask:
             value.instruction_id,
             value.snapshot_manifest_sha256,
             value.snapshot_content_root,
+            value.root_tree,
             value.file_count,
             value.node_count,
             value.total_bytes,
+            value.entry_count,
+            value.regular_file_count,
+            value.gitlink_count,
+            value.regular_file_bytes,
+            value.materialized_bytes,
             value.bundle_path,
         )
     except (AttributeError, TypeError):
         raise EvaluatorContractError(
             "invalid_contract", "batch task fields are incomplete"
         ) from None
-    if any(type(item) is not str for item in fields[:7]) or any(
-        type(item) is not int for item in fields[7:10]
-    ) or type(fields[10]) is not str:
+    if any(type(item) is not str for item in fields[:8]) or any(
+        type(item) is not int for item in fields[8:16]
+    ) or type(fields[16]) is not str:
         raise EvaluatorContractError(
             "invalid_contract", "batch task fields have invalid exact types"
         )
@@ -438,15 +454,21 @@ def _canonical_batch_task(value: object) -> SnapshotBatchTask:
             instruction_id=fields[4],
             snapshot_manifest_sha256=fields[5],
             snapshot_content_root=fields[6],
-            file_count=fields[7],
-            node_count=fields[8],
-            total_bytes=fields[9],
+            root_tree=fields[7],
+            file_count=fields[8],
+            node_count=fields[9],
+            total_bytes=fields[10],
+            entry_count=fields[11],
+            regular_file_count=fields[12],
+            gitlink_count=fields[13],
+            regular_file_bytes=fields[14],
+            materialized_bytes=fields[15],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorContractError(
             "invalid_contract", "batch task is invalid"
         ) from None
-    if result.bundle_path != fields[10]:
+    if result.bundle_path != fields[16]:
         raise EvaluatorContractError(
             "invalid_binding", "batch task bundle identity is invalid"
         )
@@ -468,9 +490,15 @@ def _batch_task_from_record(value: object) -> SnapshotBatchTask:
             instruction_id=raw["instruction_id"],
             snapshot_manifest_sha256=raw["snapshot_manifest_sha256"],
             snapshot_content_root=raw["snapshot_content_root"],
+            root_tree=raw["root_tree"],
             file_count=raw["file_count"],
             node_count=raw["node_count"],
             total_bytes=raw["total_bytes"],
+            entry_count=raw["entry_count"],
+            regular_file_count=raw["regular_file_count"],
+            gitlink_count=raw["gitlink_count"],
+            regular_file_bytes=raw["regular_file_bytes"],
+            materialized_bytes=raw["materialized_bytes"],
         )
     except (AttributeError, TypeError, ValueError):
         raise EvaluatorContractError(

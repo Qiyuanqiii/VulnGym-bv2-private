@@ -121,9 +121,15 @@ class EvaluatorSupervisorTests(unittest.TestCase):
                 instruction_id=INSTRUCTION_ID,
                 snapshot_manifest_sha256=prepared.manifest_sha256,
                 snapshot_content_root=prepared.content_root,
+                root_tree=prepared.root_tree,
                 file_count=prepared.file_count,
                 node_count=prepared.file_count + len(directories),
                 total_bytes=prepared.total_bytes,
+                entry_count=prepared.entry_count,
+                regular_file_count=prepared.regular_file_count,
+                gitlink_count=prepared.gitlink_count,
+                regular_file_bytes=prepared.regular_file_bytes,
+                materialized_bytes=prepared.materialized_bytes,
             )
             members.append(member)
             from vulngym_agent.benchmark.discovery_contracts import DiscoveryTaskInputV1

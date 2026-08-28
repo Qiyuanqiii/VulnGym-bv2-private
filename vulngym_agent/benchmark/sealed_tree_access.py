@@ -29,6 +29,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     DEFAULT_SNAPSHOT_POLICY,
     SealedSnapshotError,
     SealedSnapshotFile,
+    SealedSnapshotGitlink,
     SnapshotPolicy,
     VerifiedSealedSnapshot,
     _scan_tree,
@@ -166,14 +167,15 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
             value.git_symlink_representation,
+            value.gitlink_representation,
         )
     except (AttributeError, TypeError):
         raise SealedTreeAccessError(
             "invalid_argument", "snapshot policy is incomplete"
         ) from None
     if (
-        any(type(item) is not int for item in fields[:-1])
-        or type(fields[-1]) is not str
+        any(type(item) is not int for item in fields[:-2])
+        or any(type(item) is not str for item in fields[-2:])
     ):
         raise SealedTreeAccessError(
             "invalid_argument", "snapshot policy fields have invalid exact types"
@@ -189,6 +191,7 @@ def _canonical_snapshot_policy(value: object) -> SnapshotPolicy:
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
             git_symlink_representation=fields[8],
+            gitlink_representation=fields[9],
         )
     except (AttributeError, TypeError, ValueError):
         raise SealedTreeAccessError(
@@ -1484,6 +1487,11 @@ def bind_sealed_tree(
             "invalid_binding", "snapshot metadata does not match the discovery task"
         )
 
+    if any(type(item) is SealedSnapshotGitlink for item in verified.files):
+        raise SealedTreeAccessError(
+            "invalid_binding",
+            "metadata-only gitlinks are sealed but not accessible to workers",
+        )
     files = tuple(SealedTreeFile._from_verified(item) for item in verified.files)
     authority: _TrustedTreeAuthority | None = None
     try:

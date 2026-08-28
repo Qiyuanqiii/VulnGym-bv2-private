@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import hmac
@@ -378,7 +379,7 @@ class SnapshotBatchTests(unittest.TestCase):
                     json.loads(verify_output.getvalue())["manifest_sha256"],
                 )
 
-    def test_v2_verifier_rejects_a_self_consistent_legacy_v1_batch(self) -> None:
+    def test_v3_verifier_rejects_a_self_consistent_legacy_v1_batch(self) -> None:
         prepared = self._prepare("legacy-v1-batch")
         legacy_snapshot_bindings: dict[str, tuple[str, str]] = {}
 
@@ -653,6 +654,27 @@ class SnapshotBatchTests(unittest.TestCase):
         ), self.assertRaises(SnapshotBatchError) as caught:
             snapshot_batch._parse_batch_manifest(tampered, policy=policy)
         self.assertEqual("batch_manifest_invalid", caught.exception.code)
+
+    def test_v3_task_identity_and_counter_errors_are_stable_batch_errors(self) -> None:
+        prepared = self._prepare("v3-invalid-task")
+        manifest = prepared.batch_root / "control" / "manifest.jsonl"
+        original = [json.loads(line) for line in manifest.read_bytes().splitlines()]
+        cases = (
+            ("root_tree", "x" * 40),
+            ("gitlink_count", -1),
+            ("materialized_bytes", original[1]["materialized_bytes"] + 1),
+        )
+        for field, value in cases:
+            with self.subTest(field=field):
+                records = copy.deepcopy(original)
+                records[1][field] = value
+                task_lines = tuple(_canonical(item) + b"\n" for item in records[1:-1])
+                records[-1]["batch_content_root"] = snapshot_batch._batch_content_root(task_lines)
+                payload = _canonical(records[0]) + b"\n" + b"".join(task_lines) + _canonical(records[-1]) + b"\n"
+                with mock.patch.object(snapshot_batch, "_OFFICIAL_SPLIT_COUNTS", {"train": 2, "test": 1}), self.assertRaises(SnapshotBatchError) as caught:
+                    snapshot_batch._parse_batch_manifest(payload, policy=snapshot_batch.DEFAULT_SNAPSHOT_POLICY)
+                self.assertEqual(caught.exception.code, "batch_manifest_invalid")
+                self.assertEqual(caught.exception.exit_status, 4)
 
     def test_cross_bundle_mutation_during_final_pass_is_rejected(self) -> None:
         real_verify = snapshot_batch.verify_sealed_snapshot

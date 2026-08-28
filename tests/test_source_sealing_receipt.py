@@ -18,7 +18,7 @@ from vulngym_agent.benchmark.snapshot_batch import (
     SnapshotBatchError,
     SnapshotBatchSummary,
     SnapshotBatchTask,
-    SnapshotBatchVerificationEvidenceV1,
+    SnapshotBatchVerificationEvidenceV2,
     verify_snapshot_batch_with_evidence,
 )
 from vulngym_agent.benchmark.source_acquisition import (
@@ -26,8 +26,9 @@ from vulngym_agent.benchmark.source_acquisition import (
 )
 from vulngym_agent.benchmark.source_sealing_receipt import (
     SOURCE_SEALING_CLOSURE_DIGEST_DOMAIN,
+    SOURCE_SEALING_TASK_CLOSURE_DOMAIN,
     SourceSealingClosureError,
-    SourceSealingClosureReceiptV1,
+    SourceSealingClosureReceiptV2,
 )
 
 
@@ -51,14 +52,20 @@ def _batch_tasks(split: str) -> tuple[SnapshotBatchTask, ...]:
         SnapshotBatchTask(
             task_id=f"VG-{split.upper()}-{index:020d}",
             repo_url=f"https://github.com/example/repository-{index % 22:02d}",
-            commit=f"{index + 1:040x}",
+            commit=f"{index + 1 + (0 if split == 'test' else 20):040x}",
             split=split,
             instruction_id="vulngym-whitebox-locate-v1",
             snapshot_manifest_sha256=_sha(f"{split}-task-manifest-{index}"),
             snapshot_content_root=_sha(f"{split}-task-root-{index}"),
-            file_count=1,
-            node_count=1,
-            total_bytes=index + 1,
+            root_tree=f"{10_001 + index + (0 if split == 'test' else 20):040x}",
+                file_count=1,
+                node_count=1,
+                total_bytes=index + 1,
+                entry_count=1,
+                regular_file_count=1,
+                gitlink_count=0,
+                regular_file_bytes=index + 1,
+                materialized_bytes=index + 1,
         )
         for index in range(count)
     )
@@ -146,22 +153,17 @@ def _hygiene(index: int, commit_count: int) -> dict[str, object]:
 
 def _report_value() -> dict[str, object]:
     repositories: list[dict[str, object]] = []
-    commit_index = 1
+    all_tasks = _batch_tasks("test") + _batch_tasks("train")
     for repository_index in range(22):
-        count = 4 if repository_index < 4 else 3
-        commits = []
-        for _ in range(count):
-            commit = f"{commit_index:040x}"
-            commits.append(_audit(commit, f"{10_000 + commit_index:040x}"))
-            commit_index += 1
+        repo_url = f"https://github.com/example/repository-{repository_index:02d}"
+        tasks = tuple(task for task in all_tasks if task.repo_url == repo_url)
+        commits = [_audit(task.commit, task.root_tree) for task in tasks]
+        count = len(commits)
         repositories.append(
             {
                 "commits": commits,
                 "object_hygiene": _hygiene(repository_index, count),
-                "repo_url": (
-                    "https://github.com/example/"
-                    f"repository-{repository_index:02d}"
-                ),
+                "repo_url": repo_url,
             }
         )
     return {
@@ -172,12 +174,20 @@ def _report_value() -> dict[str, object]:
                 "source_map_sha256": _sha("test-source-map"),
                 "split": "test",
                 "task_count": 20,
+                "task_source_facts": [
+                    {"task_id": task.task_id, "repo_url": task.repo_url, "commit": task.commit, "root_tree": task.root_tree, "gitlink_count": task.gitlink_count}
+                    for task in _batch_tasks("test")
+                ],
                 "tasks_sha256": _sha("test-task-export"),
             },
             {
                 "source_map_sha256": _sha("train-source-map"),
                 "split": "train",
                 "task_count": 50,
+                "task_source_facts": [
+                    {"task_id": task.task_id, "repo_url": task.repo_url, "commit": task.commit, "root_tree": task.root_tree, "gitlink_count": task.gitlink_count}
+                    for task in _batch_tasks("train")
+                ],
                 "tasks_sha256": _sha("train-task-export"),
             },
         ],
@@ -220,7 +230,7 @@ def _mint(
     root: Path,
     summary: SnapshotBatchSummary,
     key: bytes,
-) -> SnapshotBatchVerificationEvidenceV1:
+) -> SnapshotBatchVerificationEvidenceV2:
     with mock.patch(
         "vulngym_agent.benchmark.snapshot_batch.verify_snapshot_batch",
         return_value=summary,
@@ -259,8 +269,8 @@ class SourceSealingReceiptTests(unittest.TestCase):
         test_key_id: str = "test-source-seal-2026",
         train_key_id: str = "train-source-seal-2026",
     ) -> tuple[
-        tuple[SnapshotBatchVerificationEvidenceV1, ...],
-        tuple[SnapshotBatchVerificationEvidenceV1, ...],
+        tuple[SnapshotBatchVerificationEvidenceV2, ...],
+        tuple[SnapshotBatchVerificationEvidenceV2, ...],
     ]:
         actual_test_root = test_root or self.test_root
         actual_train_root = train_root or self.train_root
@@ -281,10 +291,10 @@ class SourceSealingReceiptTests(unittest.TestCase):
             ),
         )
 
-    def _receipt(self) -> SourceSealingClosureReceiptV1:
+    def _receipt(self) -> SourceSealingClosureReceiptV2:
         report, report_sha256 = _report_bytes()
         test_evidence, train_evidence = self._evidence()
-        return SourceSealingClosureReceiptV1.from_verified_evidence(
+        return SourceSealingClosureReceiptV2.from_verified_evidence(
             implementation_commit="a" * 40,
             acquisition_report_bytes=report,
             expected_acquisition_report_sha256=report_sha256,
@@ -294,6 +304,33 @@ class SourceSealingReceiptTests(unittest.TestCase):
 
     def test_factory_roundtrip_is_path_free_and_exactly_pinned(self) -> None:
         receipt = self._receipt()
+        task_records = [
+            {
+                "task_id": task.task_id,
+                "repo_url": task.repo_url,
+                "commit": task.commit,
+                "root_tree": task.root_tree,
+                "snapshot_manifest_sha256": task.snapshot_manifest_sha256,
+                "snapshot_content_root": task.snapshot_content_root,
+                "entry_count": task.entry_count,
+                "regular_file_count": task.regular_file_count,
+                "gitlink_count": task.gitlink_count,
+                "regular_file_bytes": task.regular_file_bytes,
+                "materialized_bytes": task.materialized_bytes,
+            }
+            for task in _batch_tasks("test")
+        ]
+        self.assertEqual(
+            hashlib.sha256(
+                SOURCE_SEALING_TASK_CLOSURE_DOMAIN
+                + _canonical({"split": "test", "tasks": task_records})
+            ).hexdigest(),
+            receipt.test.task_closure_sha256,
+        )
+        self.assertNotEqual(
+            receipt.test.task_closure_sha256,
+            receipt.train.task_closure_sha256,
+        )
         payload = receipt.to_bytes()
         raw = json.loads(payload)
         semantic = raw.pop("receipt_sha256")
@@ -306,7 +343,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(payload).hexdigest(), receipt.wire_sha256)
         self.assertEqual(
             receipt,
-            SourceSealingClosureReceiptV1.from_bytes(
+            SourceSealingClosureReceiptV2.from_bytes(
                 payload,
                 expected_receipt_sha256=receipt.receipt_sha256,
                 expected_wire_sha256=receipt.wire_sha256,
@@ -328,11 +365,33 @@ class SourceSealingReceiptTests(unittest.TestCase):
             receipt.test.verify_rounds[1].run_id,
         )
 
+        tampered = json.loads(payload)
+        tampered["test"]["task_closure_sha256"] = "f" * 64
+        tampered_payload = _canonical(tampered) + b"\n"
+        with self.assertRaises(SourceSealingClosureError):
+            SourceSealingClosureReceiptV2.from_bytes(
+                tampered_payload,
+                expected_receipt_sha256=receipt.receipt_sha256,
+                expected_wire_sha256=hashlib.sha256(tampered_payload).hexdigest(),
+            )
+
+    def test_v2_reader_rejects_legacy_v1_wire(self) -> None:
+        receipt = self._receipt()
+        raw = json.loads(receipt.to_bytes())
+        raw["contract_version"] = 1
+        payload = _canonical(raw) + b"\n"
+        with self.assertRaises(SourceSealingClosureError):
+            SourceSealingClosureReceiptV2.from_bytes(
+                payload,
+                expected_receipt_sha256=raw["receipt_sha256"],
+                expected_wire_sha256=hashlib.sha256(payload).hexdigest(),
+            )
+
     def test_report_pin_and_strict_fields_reject_detachment(self) -> None:
         report, report_sha256 = _report_bytes()
         test_evidence, train_evidence = self._evidence()
         with self.assertRaises(SourceSealingClosureError):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256="0" * 64,
@@ -343,7 +402,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
         detached["report_path"] = "C:/operator/report.json"
         detached_bytes, detached_sha256 = _report_bytes(detached)
         with self.assertRaises(SourceSealingClosureError):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=detached_bytes,
                 expected_acquisition_report_sha256=detached_sha256,
@@ -362,7 +421,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
         report, report_sha256 = _report_bytes(raw)
         test_evidence, train_evidence = self._evidence()
         with self.assertRaisesRegex(SourceSealingClosureError, "hygiene"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
@@ -385,7 +444,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     SourceSealingClosureError, "fetch protocol"
                 ):
-                    SourceSealingClosureReceiptV1.from_verified_evidence(
+                    SourceSealingClosureReceiptV2.from_verified_evidence(
                         implementation_commit="a" * 40,
                         acquisition_report_bytes=report,
                         expected_acquisition_report_sha256=report_sha256,
@@ -396,7 +455,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
     def test_bounded_fetch_retry_protocol_is_strictly_required(self) -> None:
         self.assertEqual(
             SOURCE_ACQUISITION_CONTRACT_VERSION,
-            "vulngym.source-acquisition.v4",
+            "vulngym.source-acquisition.v5",
         )
         test_evidence, train_evidence = self._evidence()
         for field, invalid in (
@@ -412,7 +471,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     SourceSealingClosureError, "fetch protocol"
                 ):
-                    SourceSealingClosureReceiptV1.from_verified_evidence(
+                    SourceSealingClosureReceiptV2.from_verified_evidence(
                         implementation_commit="a" * 40,
                         acquisition_report_bytes=report,
                         expected_acquisition_report_sha256=report_sha256,
@@ -436,7 +495,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     SourceSealingClosureError, "contradictory"
                 ):
-                    SourceSealingClosureReceiptV1.from_verified_evidence(
+                    SourceSealingClosureReceiptV2.from_verified_evidence(
                         implementation_commit="a" * 40,
                         acquisition_report_bytes=report,
                         expected_acquisition_report_sha256=report_sha256,
@@ -467,13 +526,91 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 commit.update(changes)  # type: ignore[union-attr]
                 report, report_sha256 = _report_bytes(raw)
                 with self.assertRaises(SourceSealingClosureError):
-                    SourceSealingClosureReceiptV1.from_verified_evidence(
+                    SourceSealingClosureReceiptV2.from_verified_evidence(
                         implementation_commit="a" * 40,
                         acquisition_report_bytes=report,
                         expected_acquisition_report_sha256=report_sha256,
                         test_evidence=test_evidence,  # type: ignore[arg-type]
                         train_evidence=train_evidence,  # type: ignore[arg-type]
                     )
+
+    def test_gitlink_count_closes_across_audit_export_and_batch_task(self) -> None:
+        test_tasks = list(_batch_tasks("test"))
+        test_tasks[0] = replace(
+            test_tasks[0],
+            file_count=2,
+            node_count=2,
+            total_bytes=test_tasks[0].total_bytes + 49,
+            entry_count=2,
+            gitlink_count=1,
+            materialized_bytes=test_tasks[0].materialized_bytes + 49,
+        )
+        test_summary = _summary("test", self.test_root, tasks=tuple(test_tasks))
+        train_summary = _summary("train", self.train_root)
+        test_evidence = tuple(
+            _mint(self.test_root, test_summary, self.test_key) for _ in range(2)
+        )
+        train_evidence = tuple(
+            _mint(self.train_root, train_summary, self.train_key) for _ in range(2)
+        )
+
+        raw = _report_value()
+        test_export = raw["exports"][0]  # type: ignore[index]
+        test_export["task_source_facts"][0]["gitlink_count"] = 1  # type: ignore[index]
+        audit = raw["repositories"][0]["commits"][0]  # type: ignore[index]
+        audit["gitlink_count"] = 1  # type: ignore[index]
+        audit["mode_counts"] = {"100644": 1, "160000": 1}  # type: ignore[index]
+        audit["tree_entry_count"] = 2  # type: ignore[index]
+        report, report_sha256 = _report_bytes(raw)
+
+        receipt = SourceSealingClosureReceiptV2.from_verified_evidence(
+            implementation_commit="a" * 40,
+            acquisition_report_bytes=report,
+            expected_acquisition_report_sha256=report_sha256,
+            test_evidence=test_evidence,  # type: ignore[arg-type]
+            train_evidence=train_evidence,  # type: ignore[arg-type]
+        )
+        self.assertEqual(receipt.test.task_count, 20)
+
+    def test_task_source_root_tree_must_match_repository_audit_and_batch(self) -> None:
+        test_evidence, train_evidence = self._evidence()
+        for target in ("fact", "audit"):
+            with self.subTest(target=target):
+                raw = _report_value()
+                if target == "fact":
+                    raw["exports"][0]["task_source_facts"][0]["root_tree"] = "f" * 40  # type: ignore[index]
+                else:
+                    raw["repositories"][0]["commits"][0]["root_tree"] = "f" * 40  # type: ignore[index]
+                report, report_sha256 = _report_bytes(raw)
+                with self.assertRaisesRegex(SourceSealingClosureError, "source fact"):
+                    SourceSealingClosureReceiptV2.from_verified_evidence(
+                        implementation_commit="a" * 40,
+                        acquisition_report_bytes=report,
+                        expected_acquisition_report_sha256=report_sha256,
+                        test_evidence=test_evidence,  # type: ignore[arg-type]
+                        train_evidence=train_evidence,  # type: ignore[arg-type]
+                    )
+
+    def test_task_source_identities_must_exactly_close_repository_audit(self) -> None:
+        raw = _report_value()
+        test_facts = raw["exports"][0]["task_source_facts"]  # type: ignore[index]
+        assert isinstance(test_facts, list)
+        first = test_facts[0]
+        second = test_facts[1]
+        assert isinstance(first, dict)
+        assert isinstance(second, dict)
+        for field in ("repo_url", "commit", "root_tree", "gitlink_count"):
+            second[field] = first[field]
+        report, report_sha256 = _report_bytes(raw)
+        test_evidence, train_evidence = self._evidence()
+        with self.assertRaisesRegex(SourceSealingClosureError, "exactly close"):
+            SourceSealingClosureReceiptV2.from_verified_evidence(
+                implementation_commit="a" * 40,
+                acquisition_report_bytes=report,
+                expected_acquisition_report_sha256=report_sha256,
+                test_evidence=test_evidence,  # type: ignore[arg-type]
+                train_evidence=train_evidence,  # type: ignore[arg-type]
+            )
 
     def test_all_object_hygiene_contradictions_are_rejected(self) -> None:
         test_evidence, train_evidence = self._evidence()
@@ -512,7 +649,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 hygiene[field] = value  # type: ignore[index]
                 report, report_sha256 = _report_bytes(raw)
                 with self.assertRaises(SourceSealingClosureError):
-                    SourceSealingClosureReceiptV1.from_verified_evidence(
+                    SourceSealingClosureReceiptV2.from_verified_evidence(
                         implementation_commit="a" * 40,
                         acquisition_report_bytes=report,
                         expected_acquisition_report_sha256=report_sha256,
@@ -521,11 +658,11 @@ class SourceSealingReceiptTests(unittest.TestCase):
                     )
 
     def test_arbitrary_labels_and_reused_evidence_are_rejected(self) -> None:
-        self.assertFalse(hasattr(SourceSealingClosureReceiptV1, "from_summaries"))
+        self.assertFalse(hasattr(SourceSealingClosureReceiptV2, "from_summaries"))
         report, report_sha256 = _report_bytes()
         test_evidence, train_evidence = self._evidence()
         with self.assertRaisesRegex(SourceSealingClosureError, "trusted evidence"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
@@ -536,14 +673,14 @@ class SourceSealingReceiptTests(unittest.TestCase):
                 train_evidence=train_evidence,  # type: ignore[arg-type]
             )
         with self.assertRaisesRegex(SourceSealingClosureError, "does not agree"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
                 test_evidence=(test_evidence[0], test_evidence[0]),
                 train_evidence=train_evidence,  # type: ignore[arg-type]
             )
-        receipt = SourceSealingClosureReceiptV1.from_verified_evidence(
+        receipt = SourceSealingClosureReceiptV2.from_verified_evidence(
             implementation_commit="a" * 40,
             acquisition_report_bytes=report,
             expected_acquisition_report_sha256=report_sha256,
@@ -558,14 +695,14 @@ class SourceSealingReceiptTests(unittest.TestCase):
         forged = copy.copy(test_evidence[0])
         object.__setattr__(forged, "run_id", _sha("forged-run-id"))
         with self.assertRaisesRegex(SourceSealingClosureError, "fresh trusted"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
                 test_evidence=(test_evidence[0], forged),
                 train_evidence=train_evidence,  # type: ignore[arg-type]
             )
-        receipt = SourceSealingClosureReceiptV1.from_verified_evidence(
+        receipt = SourceSealingClosureReceiptV2.from_verified_evidence(
             implementation_commit="a" * 40,
             acquisition_report_bytes=report,
             expected_acquisition_report_sha256=report_sha256,
@@ -589,7 +726,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
         )
         _, train_evidence = self._evidence()
         with self.assertRaisesRegex(SourceSealingClosureError, "does not agree"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
@@ -606,7 +743,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
             train_key_id="train-key-id",
         )
         with self.assertRaisesRegex(SourceSealingClosureError, "reuse"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
@@ -621,7 +758,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
             train_root=self.test_root,
         )
         with self.assertRaisesRegex(SourceSealingClosureError, "reuse"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
@@ -643,7 +780,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
             _mint(shared, train_summary, self.train_key) for _ in range(2)
         )
         with self.assertRaisesRegex(SourceSealingClosureError, "output root"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
@@ -658,7 +795,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
         self.test_root.rename(preserved)
         self.test_root.mkdir()
         with self.assertRaisesRegex(SourceSealingClosureError, "fresh trusted"):
-            SourceSealingClosureReceiptV1.from_verified_evidence(
+            SourceSealingClosureReceiptV2.from_verified_evidence(
                 implementation_commit="a" * 40,
                 acquisition_report_bytes=report,
                 expected_acquisition_report_sha256=report_sha256,
@@ -667,7 +804,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
             )
         self.test_root.rmdir()
         preserved.rename(self.test_root)
-        receipt = SourceSealingClosureReceiptV1.from_verified_evidence(
+        receipt = SourceSealingClosureReceiptV2.from_verified_evidence(
             implementation_commit="a" * 40,
             acquisition_report_bytes=report,
             expected_acquisition_report_sha256=report_sha256,
@@ -690,7 +827,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(SourceSealingClosureError, "fresh trusted"):
-                SourceSealingClosureReceiptV1.from_verified_evidence(
+                SourceSealingClosureReceiptV2.from_verified_evidence(
                     implementation_commit="a" * 40,
                     acquisition_report_bytes=report,
                     expected_acquisition_report_sha256=report_sha256,
@@ -700,9 +837,9 @@ class SourceSealingReceiptTests(unittest.TestCase):
 
     def test_direct_receipt_constructor_and_unpinned_dict_are_unavailable(self) -> None:
         receipt = self._receipt()
-        self.assertFalse(hasattr(SourceSealingClosureReceiptV1, "from_dict"))
+        self.assertFalse(hasattr(SourceSealingClosureReceiptV2, "from_dict"))
         with self.assertRaisesRegex(SourceSealingClosureError, "trusted evidence"):
-            SourceSealingClosureReceiptV1(
+            SourceSealingClosureReceiptV2(
                 implementation_commit=receipt.implementation_commit,
                 acquisition=receipt.acquisition,
                 test=receipt.test,
@@ -722,7 +859,7 @@ class SourceSealingReceiptTests(unittest.TestCase):
     def test_evidence_constructor_is_not_a_public_mint(self) -> None:
         summary = _summary("test", self.test_root)
         with self.assertRaisesRegex(SnapshotBatchError, "trusted verifier"):
-            SnapshotBatchVerificationEvidenceV1(
+            SnapshotBatchVerificationEvidenceV2(
                 summary=summary,
                 _key_material=bytearray(self.test_key),
                 _output_identity=(1, 2),

@@ -28,6 +28,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     SNAPSHOT_POLICY_VERSION,
     SealedSnapshotError,
     SealedSnapshotFile,
+    SealedSnapshotGitlink,
     SnapshotPolicy,
     _manifest_bytes,
     _parse_manifest,
@@ -56,6 +57,7 @@ _POLICY_KEYS: Final[frozenset[str]] = frozenset(
         "max_total_bytes",
         "max_tree_object_bytes",
         "git_symlink_representation",
+        "gitlink_representation",
         "policy_version",
     }
 )
@@ -155,6 +157,7 @@ def _policy_from_dict(value: object) -> SnapshotPolicy:
             max_tree_object_bytes=raw["max_tree_object_bytes"],
             max_manifest_bytes=raw["max_manifest_bytes"],
             git_symlink_representation=raw["git_symlink_representation"],
+            gitlink_representation=raw["gitlink_representation"],
         )
     except (TypeError, ValueError):
         raise WorkerHandoffError(
@@ -248,14 +251,15 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             value.max_tree_object_bytes,
             value.max_manifest_bytes,
             value.git_symlink_representation,
+            value.gitlink_representation,
         )
     except (AttributeError, TypeError):
         raise WorkerHandoffError(
             "invalid_contract", "worker handoff policy fields are incomplete"
         ) from None
     if (
-        any(type(item) is not int for item in fields[:-1])
-        or type(fields[-1]) is not str
+        any(type(item) is not int for item in fields[:-2])
+        or any(type(item) is not str for item in fields[-2:])
     ):
         raise WorkerHandoffError(
             "invalid_argument", "worker handoff policy fields have invalid exact types"
@@ -271,6 +275,7 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
             max_tree_object_bytes=fields[6],
             max_manifest_bytes=fields[7],
             git_symlink_representation=fields[8],
+            gitlink_representation=fields[9],
         )
     except (AttributeError, TypeError, ValueError):
         raise WorkerHandoffError(
@@ -280,7 +285,7 @@ def _canonical_policy(value: object) -> SnapshotPolicy:
     if any(
         current > maximum
         for current, maximum in zip(
-            fields[:-1],
+            fields[:-2],
             (
                 ceiling.max_files,
                 ceiling.max_file_bytes,
@@ -658,6 +663,11 @@ def build_worker_handoff(
     ):
         raise WorkerHandoffError(
             "invalid_binding", "sealed snapshot does not match the worker task"
+        )
+    if any(type(item) is SealedSnapshotGitlink for item in verified.files):
+        raise WorkerHandoffError(
+            "snapshot_verification_failed",
+            "metadata-only gitlinks are sealed but not worker-readable",
         )
     result = WorkerHandoffV2(
         task=canonical_task,

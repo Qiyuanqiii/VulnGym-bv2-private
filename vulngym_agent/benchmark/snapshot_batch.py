@@ -45,7 +45,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
 from vulngym_agent.tools.git.repository import GitFactError, GitRepository
 
 
-BATCH_CONTRACT_VERSION: Final[str] = "vulngym.sealed-snapshot-batch.v2"
+BATCH_CONTRACT_VERSION: Final[str] = "vulngym.sealed-snapshot-batch.v3"
 SOURCE_MAP_KIND: Final[str] = "sealed_snapshot_source_map"
 SOURCE_MAP_SCHEMA_VERSION: Final[str] = "1.0.0"
 
@@ -59,34 +59,35 @@ PROFILE_MANIFEST_SHA256: Final[str] = (
 )
 
 _BATCH_CONTENT_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot batch content root v2\0"
+    b"VulnGym sealed snapshot batch content root v3\0"
 )
 _BATCH_ATTESTATION_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot batch attestation v2\0"
+    b"VulnGym sealed snapshot batch attestation v3\0"
 )
 _BATCH_MATERIALIZED_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot batch materialized state v2\0"
+    b"VulnGym sealed snapshot batch materialized state v3\0"
 )
-SNAPSHOT_BATCH_EVIDENCE_CONTRACT_VERSION: Final[int] = 1
+SNAPSHOT_BATCH_EVIDENCE_CONTRACT_VERSION: Final[int] = 2
 SNAPSHOT_BATCH_EVIDENCE_KIND: Final[str] = (
-    "vulngym.sealed-snapshot-verification-evidence.v1"
+    "vulngym.sealed-snapshot-verification-evidence.v2"
 )
 SNAPSHOT_BATCH_EVIDENCE_SEMANTIC_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot verification evidence v1\0"
+    b"VulnGym sealed snapshot verification evidence v2\0"
 )
 SNAPSHOT_BATCH_EVIDENCE_RUN_ID_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot verification run id v1\0"
+    b"VulnGym sealed snapshot verification run id v2\0"
 )
 SNAPSHOT_BATCH_KEY_EQUALITY_TAG_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot key equality tag v1\0"
+    b"VulnGym sealed snapshot key equality tag v2\0"
 )
 SNAPSHOT_BATCH_OUTPUT_IDENTITY_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot output filesystem identity v1\0"
+    b"VulnGym sealed snapshot output filesystem identity v2\0"
 )
 SNAPSHOT_BATCH_TASK_RECORDS_DOMAIN: Final[bytes] = (
-    b"VulnGym sealed snapshot batch task records v1\0"
+    b"VulnGym sealed snapshot batch task records v2\0"
 )
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
+_SHA1_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
 _KEY_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
 )
@@ -144,9 +145,15 @@ class SnapshotBatchTask:
     instruction_id: str
     snapshot_manifest_sha256: str
     snapshot_content_root: str
+    root_tree: str
     file_count: int
     node_count: int
     total_bytes: int
+    entry_count: int
+    regular_file_count: int
+    gitlink_count: int
+    regular_file_bytes: int
+    materialized_bytes: int
 
     def __post_init__(self) -> None:
         SnapshotTaskSpec(
@@ -162,6 +169,13 @@ class SnapshotBatchTask:
         ):
             if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
                 raise ValueError(f"{name} must be a lower-case SHA-256 digest")
+        if type(self.root_tree) is not str or _SHA1_RE.fullmatch(self.root_tree) is None:
+            raise ValueError("root_tree must be a lower-case SHA-1 object id")
+        if any(type(value) is not int or value < 0 for value in (
+            self.entry_count, self.regular_file_count, self.gitlink_count,
+            self.regular_file_bytes, self.materialized_bytes,
+        )):
+            raise ValueError("entry and byte counters must be integers")
         if (
             isinstance(self.file_count, bool)
             or not isinstance(self.file_count, int)
@@ -180,6 +194,14 @@ class SnapshotBatchTask:
             or not 0 <= self.total_bytes <= _MAX_BATCH_TOTAL_BYTES
         ):
             raise ValueError("total_bytes violates the fixed batch budget")
+        if (
+            self.entry_count != self.file_count
+            or self.entry_count != self.regular_file_count + self.gitlink_count
+            or self.materialized_bytes != self.total_bytes
+            or self.materialized_bytes
+            != self.regular_file_bytes + 49 * self.gitlink_count
+        ):
+            raise ValueError("entry and byte counters do not close")
 
     @property
     def bundle_path(self) -> str:
@@ -190,10 +212,16 @@ class SnapshotBatchTask:
             "bundle_path": self.bundle_path,
             "commit": self.commit,
             "file_count": self.file_count,
+            "entry_count": self.entry_count,
+            "regular_file_count": self.regular_file_count,
+            "gitlink_count": self.gitlink_count,
+            "regular_file_bytes": self.regular_file_bytes,
+            "materialized_bytes": self.materialized_bytes,
             "instruction_id": self.instruction_id,
             "node_count": self.node_count,
             "record_type": "task",
             "repo_url": self.repo_url,
+            "root_tree": self.root_tree,
             "snapshot_content_root": self.snapshot_content_root,
             "snapshot_manifest_sha256": self.snapshot_manifest_sha256,
             "split": self.split,
@@ -220,6 +248,26 @@ class SnapshotBatchSummary:
     batch_content_root: str
     key_id: str
     tasks: tuple[SnapshotBatchTask, ...]
+
+    @property
+    def total_entries(self) -> int:
+        return sum(task.entry_count for task in self.tasks)
+
+    @property
+    def total_regular_files(self) -> int:
+        return sum(task.regular_file_count for task in self.tasks)
+
+    @property
+    def total_gitlinks(self) -> int:
+        return sum(task.gitlink_count for task in self.tasks)
+
+    @property
+    def total_regular_file_bytes(self) -> int:
+        return sum(task.regular_file_bytes for task in self.tasks)
+
+    @property
+    def total_materialized_bytes(self) -> int:
+        return sum(task.materialized_bytes for task in self.tasks)
 
     def __post_init__(self) -> None:
         if not isinstance(self.batch_root, Path) or not self.batch_root.is_absolute():
@@ -283,6 +331,11 @@ class SnapshotBatchSummary:
             "total_bytes": self.total_bytes,
             "total_files": self.total_files,
             "total_nodes": self.total_nodes,
+            "total_entries": self.total_entries,
+            "total_regular_files": self.total_regular_files,
+            "total_gitlinks": self.total_gitlinks,
+            "total_regular_file_bytes": self.total_regular_file_bytes,
+            "total_materialized_bytes": self.total_materialized_bytes,
         }
 
 
@@ -308,7 +361,7 @@ def _snapshot_batch_output_identity_sha256(
 
 
 @dataclass(frozen=True, slots=True)
-class SnapshotBatchVerificationEvidenceV1:
+class SnapshotBatchVerificationEvidenceV2:
     """Mint-only, path-free evidence from one complete batch verification."""
 
     summary: SnapshotBatchSummary
@@ -429,7 +482,7 @@ _SNAPSHOT_BATCH_EVIDENCE_LOCK: Final[threading.Lock] = threading.Lock()
 
 @dataclass(frozen=True, slots=True)
 class _SnapshotBatchEvidenceRegistration:
-    evidence: SnapshotBatchVerificationEvidenceV1
+    evidence: SnapshotBatchVerificationEvidenceV2
     wire_sha256: str
     batch_root: Path
     output_identity: tuple[int, int]
@@ -454,7 +507,7 @@ def _purge_expired_snapshot_batch_evidence_locked(now: float) -> None:
 
 
 def _register_snapshot_batch_verification_evidence(
-    evidence: SnapshotBatchVerificationEvidenceV1,
+    evidence: SnapshotBatchVerificationEvidenceV2,
     *,
     batch_root: Path,
     output_identity: tuple[int, int],
@@ -491,12 +544,12 @@ def _register_snapshot_batch_verification_evidence(
 def _claim_snapshot_batch_verification_evidence_batch(
     *,
     test_evidence: tuple[
-        SnapshotBatchVerificationEvidenceV1,
-        SnapshotBatchVerificationEvidenceV1,
+        SnapshotBatchVerificationEvidenceV2,
+        SnapshotBatchVerificationEvidenceV2,
     ],
     train_evidence: tuple[
-        SnapshotBatchVerificationEvidenceV1,
-        SnapshotBatchVerificationEvidenceV1,
+        SnapshotBatchVerificationEvidenceV2,
+        SnapshotBatchVerificationEvidenceV2,
     ],
 ) -> None:
     """Atomically consume four fresh, unchanged trusted verifier mints.
@@ -521,7 +574,7 @@ def _claim_snapshot_batch_verification_evidence_batch(
         )
     evidence_values = (*test_evidence, *train_evidence)
     if any(
-        type(evidence) is not SnapshotBatchVerificationEvidenceV1
+        type(evidence) is not SnapshotBatchVerificationEvidenceV2
         for evidence in evidence_values
     ) or len({id(evidence) for evidence in evidence_values}) != len(
         evidence_values
@@ -2674,6 +2727,11 @@ def _manifest_bytes(
         "total_bytes": total_bytes,
         "total_files": total_files,
         "total_nodes": total_nodes,
+        "total_entries": sum(task.entry_count for task in tasks),
+        "total_regular_files": sum(task.regular_file_count for task in tasks),
+        "total_gitlinks": sum(task.gitlink_count for task in tasks),
+        "total_regular_file_bytes": sum(task.regular_file_bytes for task in tasks),
+        "total_materialized_bytes": sum(task.materialized_bytes for task in tasks),
     }
     payload = _canonical_json(header) + b"\n" + b"".join(task_lines) + _canonical_json(footer) + b"\n"
     if len(payload) > _MAX_BATCH_MANIFEST_BYTES:
@@ -2824,9 +2882,15 @@ def prepare_snapshot_batch(
                     instruction_id=task.instruction_id,
                     snapshot_manifest_sha256=verified.manifest_sha256,
                     snapshot_content_root=verified.content_root,
+                    root_tree=verified.root_tree,
                     file_count=verified.file_count,
                     node_count=verified_node_count,
                     total_bytes=verified.total_bytes,
+                    entry_count=verified.entry_count,
+                    regular_file_count=verified.regular_file_count,
+                    gitlink_count=verified.gitlink_count,
+                    regular_file_bytes=verified.regular_file_bytes,
+                    materialized_bytes=verified.materialized_bytes,
                 )
             )
             first_verified.append(verified)
@@ -2892,9 +2956,15 @@ def prepare_snapshot_batch(
             if (
                 verified.manifest_sha256 != task.snapshot_manifest_sha256
                 or verified.content_root != task.snapshot_content_root
+                or verified.root_tree != task.root_tree
                 or verified.file_count != task.file_count
                 or _snapshot_node_count(verified.files) != task.node_count
                 or verified.total_bytes != task.total_bytes
+                or verified.entry_count != task.entry_count
+                or verified.regular_file_count != task.regular_file_count
+                or verified.gitlink_count != task.gitlink_count
+                or verified.regular_file_bytes != task.regular_file_bytes
+                or verified.materialized_bytes != task.materialized_bytes
             ):
                 raise SnapshotBatchError(
                     "transaction_verification_failed",
@@ -3017,11 +3087,17 @@ def _parse_batch_manifest(
         "bundle_path",
         "commit",
         "file_count",
+        "entry_count",
+        "regular_file_count",
+        "gitlink_count",
+        "regular_file_bytes",
+        "materialized_bytes",
         "instruction_id",
         "node_count",
         "record_type",
         "repo_url",
         "snapshot_content_root",
+        "root_tree",
         "snapshot_manifest_sha256",
         "split",
         "task_id",
@@ -3062,6 +3138,8 @@ def _parse_batch_manifest(
             or _SHA256_RE.fullmatch(record["snapshot_manifest_sha256"]) is None
             or not isinstance(record.get("snapshot_content_root"), str)
             or _SHA256_RE.fullmatch(record["snapshot_content_root"]) is None
+            or type(record.get("root_tree")) is not str
+            or _SHA1_RE.fullmatch(record["root_tree"]) is None
             or isinstance(file_count, bool)
             or not isinstance(file_count, int)
             or not 0 <= file_count <= policy.max_files
@@ -3090,8 +3168,8 @@ def _parse_batch_manifest(
                 "batch manifest exceeds its aggregate resource budget",
                 exit_status=4,
             )
-        tasks.append(
-            SnapshotBatchTask(
+        try:
+            parsed_task = SnapshotBatchTask(
                 task_id=spec.task_id,
                 repo_url=spec.repo_url,
                 commit=spec.commit,
@@ -3099,11 +3177,23 @@ def _parse_batch_manifest(
                 instruction_id=spec.instruction_id,
                 snapshot_manifest_sha256=record["snapshot_manifest_sha256"],
                 snapshot_content_root=record["snapshot_content_root"],
+                root_tree=record["root_tree"],
                 file_count=file_count,
                 node_count=node_count,
                 total_bytes=total_bytes,
+                entry_count=record["entry_count"],
+                regular_file_count=record["regular_file_count"],
+                gitlink_count=record["gitlink_count"],
+                regular_file_bytes=record["regular_file_bytes"],
+                materialized_bytes=record["materialized_bytes"],
             )
-        )
+        except (TypeError, ValueError) as error:
+            raise SnapshotBatchError(
+                "batch_manifest_invalid",
+                "a batch task record violates the v3 counter or source identity contract",
+                exit_status=4,
+            ) from error
+        tasks.append(parsed_task)
         task_lines.append(raw_line)
     content_root = _batch_content_root(task_lines)
     total_files = aggregate_files
@@ -3119,6 +3209,11 @@ def _parse_batch_manifest(
             "total_bytes",
             "total_files",
             "total_nodes",
+            "total_entries",
+            "total_regular_files",
+            "total_gitlinks",
+            "total_regular_file_bytes",
+            "total_materialized_bytes",
         }
         or footer.get("record_type") != "footer"
         or footer.get("batch_content_root") != content_root
@@ -3126,6 +3221,11 @@ def _parse_batch_manifest(
         or footer.get("total_files") != total_files
         or footer.get("total_nodes") != total_nodes
         or footer.get("total_bytes") != total_bytes
+        or footer.get("total_entries") != sum(task.entry_count for task in tasks)
+        or footer.get("total_regular_files") != sum(task.regular_file_count for task in tasks)
+        or footer.get("total_gitlinks") != sum(task.gitlink_count for task in tasks)
+        or footer.get("total_regular_file_bytes") != sum(task.regular_file_bytes for task in tasks)
+        or footer.get("total_materialized_bytes") != sum(task.materialized_bytes for task in tasks)
     ):
         raise SnapshotBatchError(
             "batch_manifest_invalid", "batch manifest footer is invalid", exit_status=4
@@ -3233,9 +3333,15 @@ def verify_snapshot_batch(
         if (
             verified.manifest_sha256 != task.snapshot_manifest_sha256
             or verified.content_root != task.snapshot_content_root
+            or verified.root_tree != task.root_tree
             or verified.file_count != task.file_count
             or _snapshot_node_count(verified.files) != task.node_count
             or verified.total_bytes != task.total_bytes
+            or verified.entry_count != task.entry_count
+            or verified.regular_file_count != task.regular_file_count
+            or verified.gitlink_count != task.gitlink_count
+            or verified.regular_file_bytes != task.regular_file_bytes
+            or verified.materialized_bytes != task.materialized_bytes
         ):
             raise SnapshotBatchError(
                 "task_snapshot_binding_mismatch",
@@ -3267,9 +3373,15 @@ def verify_snapshot_batch(
         if (
             verified.manifest_sha256 != task.snapshot_manifest_sha256
             or verified.content_root != task.snapshot_content_root
+            or verified.root_tree != task.root_tree
             or verified.file_count != task.file_count
             or _snapshot_node_count(verified.files) != task.node_count
             or verified.total_bytes != task.total_bytes
+            or verified.entry_count != task.entry_count
+            or verified.regular_file_count != task.regular_file_count
+            or verified.gitlink_count != task.gitlink_count
+            or verified.regular_file_bytes != task.regular_file_bytes
+            or verified.materialized_bytes != task.materialized_bytes
         ):
             raise SnapshotBatchError(
                 "task_snapshot_binding_mismatch",
@@ -3337,7 +3449,7 @@ def verify_snapshot_batch_with_evidence(
     attestation_key: bytes | bytearray | memoryview,
     expected_key_id: str,
     policy: SnapshotPolicy = DEFAULT_SNAPSHOT_POLICY,
-) -> SnapshotBatchVerificationEvidenceV1:
+) -> SnapshotBatchVerificationEvidenceV2:
     """Run full verification and mint non-replayable path-free evidence."""
 
     if type(policy) is not SnapshotPolicy or policy != DEFAULT_SNAPSHOT_POLICY:
@@ -3368,7 +3480,7 @@ def verify_snapshot_batch_with_evidence(
                 "batch root identity changed across evidence minting",
                 exit_status=4,
             )
-        evidence = SnapshotBatchVerificationEvidenceV1(
+        evidence = SnapshotBatchVerificationEvidenceV2(
             summary=summary,
             _key_material=key_buffer,
             _output_identity=after_identity,
@@ -3401,7 +3513,7 @@ __all__ = [
     "SnapshotBatchError",
     "SnapshotBatchSummary",
     "SnapshotBatchTask",
-    "SnapshotBatchVerificationEvidenceV1",
+    "SnapshotBatchVerificationEvidenceV2",
     "VerifiedSnapshotSourceMap",
     "VerifiedTaskExport",
     "build_snapshot_source_map_document",

@@ -55,9 +55,15 @@ class EvaluatorContractTests(unittest.TestCase):
                 instruction_id=INSTRUCTION_ID,
                 snapshot_manifest_sha256=_sha(100 + index),
                 snapshot_content_root=_sha(200 + index),
+                root_tree=f"{300 + index:040x}",
                 file_count=1,
                 node_count=1,
                 total_bytes=10 + index,
+                entry_count=1,
+                regular_file_count=1,
+                gitlink_count=0,
+                regular_file_bytes=10 + index,
+                materialized_bytes=10 + index,
             )
             for index in range(20)
         )
