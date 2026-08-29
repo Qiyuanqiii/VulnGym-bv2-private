@@ -477,6 +477,38 @@ class SnapshotBatchTests(unittest.TestCase):
             self._verify("legacy-v1-batch", batch_manifest_sha256)
         self.assertEqual(captured.exception.code, "batch_attestation_invalid")
 
+    def test_batch_rejects_a_pinned_policy_v3_header(self) -> None:
+        prepared = self._prepare("policy-v3-batch")
+        control = prepared.batch_root / "control"
+        manifest_path = control / "manifest.jsonl"
+        records = [json.loads(line) for line in manifest_path.read_bytes().splitlines()]
+        policy = records[0]["snapshot_policy"]
+        policy["policy_version"] = "vulngym.portable-source-tree.v3"
+        policy["max_file_bytes"] = 16 * 1024 * 1024
+        policy["max_total_bytes"] = 512 * 1024 * 1024
+        manifest = b"".join(_canonical(record) + b"\n" for record in records)
+        manifest_sha256 = hashlib.sha256(manifest).hexdigest()
+        mac = hmac.new(KEY, digestmod=hashlib.sha256)
+        mac.update(snapshot_batch._BATCH_ATTESTATION_DOMAIN)
+        mac.update(KEY_ID.encode("ascii"))
+        mac.update(b"\0")
+        mac.update(manifest)
+        attestation = _canonical(
+            {
+                "algorithm": "HMAC-SHA256",
+                "contract_version": snapshot_batch.BATCH_CONTRACT_VERSION,
+                "key_id": KEY_ID,
+                "mac": mac.hexdigest(),
+                "manifest_sha256": manifest_sha256,
+            }
+        ) + b"\n"
+        manifest_path.write_bytes(manifest)
+        (control / "attestation.json").write_bytes(attestation)
+
+        with self.assertRaises(SnapshotBatchError) as captured:
+            self._verify("policy-v3-batch", manifest_sha256)
+        self.assertEqual(captured.exception.code, "batch_manifest_invalid")
+
     def test_source_map_digest_coverage_duplicates_extras_and_schema(self) -> None:
         with self.assertRaisesRegex(SnapshotBatchError, "digest"):
             self._prepare(expected_source_map_sha256="0" * 64)

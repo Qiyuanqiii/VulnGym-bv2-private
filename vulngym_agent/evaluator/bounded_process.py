@@ -23,7 +23,8 @@ from typing import Final, Mapping
 
 PROCESS_TRANSPORT_VERSION: Final[str] = "bounded-subprocess-transport-v1"
 _CHUNK_BYTES: Final[int] = 64 * 1024
-_MAX_STREAM_BYTES: Final[int] = 64 * 1024 * 1024
+_MAX_STDOUT_BYTES: Final[int] = 96 * 1024 * 1024
+_MAX_STDERR_BYTES: Final[int] = 64 * 1024 * 1024
 _MAX_STDIN_BYTES: Final[int] = 64 * 1024 * 1024
 _MAX_TIMEOUT_SECONDS: Final[float] = 7200.0
 _WINDOWS_CREATE_SUSPENDED: Final[int] = 0x00000004
@@ -223,11 +224,11 @@ def _validate_arguments(
         raise BoundedProcessError("invalid_argument", "process argv is invalid")
     if type(stdin) is not bytes or len(stdin) > _MAX_STDIN_BYTES:
         raise BoundedProcessError("invalid_argument", "process stdin is invalid")
-    for value, name in (
-        (stdout_max_bytes, "stdout_max_bytes"),
-        (stderr_max_bytes, "stderr_max_bytes"),
+    for value, name, hard_limit in (
+        (stdout_max_bytes, "stdout_max_bytes", _MAX_STDOUT_BYTES),
+        (stderr_max_bytes, "stderr_max_bytes", _MAX_STDERR_BYTES),
     ):
-        if type(value) is not int or not 0 <= value <= _MAX_STREAM_BYTES:
+        if type(value) is not int or not 0 <= value <= hard_limit:
             raise BoundedProcessError("invalid_argument", f"{name} is invalid")
     if (
         type(timeout_seconds) not in {int, float}

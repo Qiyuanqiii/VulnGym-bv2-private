@@ -418,6 +418,29 @@ class SourceSealingReceiptTests(unittest.TestCase):
             )
         self.assertEqual(hashlib.sha256(report).hexdigest(), report_sha256)
 
+    def test_policy_v3_acquisition_audits_cannot_mint_a_receipt(self) -> None:
+        raw = _report_value()
+        repositories = raw["repositories"]
+        assert isinstance(repositories, list)
+        for repository in repositories:
+            commits = repository["commits"]
+            assert isinstance(commits, list)
+            for audit in commits:
+                policy = audit["policy"]
+                policy["policy_version"] = "vulngym.portable-source-tree.v3"
+                policy["max_file_bytes"] = 16 * 1024 * 1024
+                policy["max_total_bytes"] = 512 * 1024 * 1024
+        report, report_sha256 = _report_bytes(raw)
+        test_evidence, train_evidence = self._evidence()
+        with self.assertRaises(SourceSealingClosureError):
+            SourceSealingClosureReceiptV2.from_verified_evidence(
+                implementation_commit="a" * 40,
+                acquisition_report_bytes=report,
+                expected_acquisition_report_sha256=report_sha256,
+                test_evidence=test_evidence,  # type: ignore[arg-type]
+                train_evidence=train_evidence,  # type: ignore[arg-type]
+            )
+
     def test_contradictory_repository_hygiene_is_rejected(self) -> None:
         raw = _report_value()
         repositories = raw["repositories"]

@@ -182,7 +182,9 @@ class SealedSnapshotTests(unittest.TestCase):
             "vulngym.sealed-source-snapshot.v3",
             sealed_snapshot_module.SNAPSHOT_CONTRACT_VERSION,
         )
-        self.assertEqual("vulngym.portable-source-tree.v3", policy["policy_version"])
+        self.assertEqual("vulngym.portable-source-tree.v4", policy["policy_version"])
+        self.assertEqual(80 * 1024 * 1024, policy["max_file_bytes"])
+        self.assertEqual(640 * 1024 * 1024, policy["max_total_bytes"])
         self.assertEqual(
             GIT_SYMLINK_REPRESENTATION,
             policy["git_symlink_representation"],
@@ -200,6 +202,47 @@ class SealedSnapshotTests(unittest.TestCase):
             SnapshotPolicy(git_symlink_representation="host-symlink")
         with self.assertRaises(ValueError):
             SnapshotPolicy(gitlink_representation="recursive-checkout")
+        SnapshotPolicy(
+            max_file_bytes=96 * 1024 * 1024,
+            max_total_bytes=2 * 1024 * 1024 * 1024,
+        )
+        with self.assertRaises(ValueError):
+            SnapshotPolicy(max_file_bytes=(96 * 1024 * 1024) + 1)
+        with self.assertRaises(ValueError):
+            SnapshotPolicy(max_total_bytes=(2 * 1024 * 1024 * 1024) + 1)
+
+    def test_v4_policy_rejects_a_self_consistent_policy_v3_bundle(self) -> None:
+        prepared = self._prepare("legacy-policy-v3")
+        manifest_path = prepared.snapshot_root / "control" / "manifest.jsonl"
+        records = [json.loads(line) for line in manifest_path.read_bytes().splitlines()]
+        records[0]["policy"]["policy_version"] = "vulngym.portable-source-tree.v3"
+        records[0]["policy"]["max_file_bytes"] = 16 * 1024 * 1024
+        records[0]["policy"]["max_total_bytes"] = 512 * 1024 * 1024
+        manifest = b"".join(
+            sealed_snapshot_module._canonical_json(record) + b"\n"
+            for record in records
+        )
+        manifest_sha256 = hashlib.sha256(manifest).hexdigest()
+        mac = hmac.new(KEY, digestmod=hashlib.sha256)
+        mac.update(sealed_snapshot_module._ATTESTATION_DOMAIN)
+        mac.update(KEY_ID.encode("ascii"))
+        mac.update(b"\0")
+        mac.update(manifest)
+        attestation = {
+            "algorithm": "HMAC-SHA256",
+            "contract_version": "vulngym.sealed-source-snapshot.v3",
+            "key_id": KEY_ID,
+            "mac": mac.hexdigest(),
+            "manifest_sha256": manifest_sha256,
+        }
+        manifest_path.write_bytes(manifest)
+        (prepared.snapshot_root / "control" / "attestation.json").write_bytes(
+            sealed_snapshot_module._canonical_json(attestation) + b"\n"
+        )
+
+        with self.assertRaises(SealedSnapshotError) as captured:
+            self._verify("legacy-policy-v3")
+        self.assertEqual(captured.exception.code, "manifest_binding_mismatch")
 
     def test_v3_verifier_rejects_a_self_consistent_legacy_v1_bundle(self) -> None:
         prepared = self._prepare("legacy-v1")

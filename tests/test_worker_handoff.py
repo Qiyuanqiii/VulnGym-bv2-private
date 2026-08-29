@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 import vulngym_agent.benchmark as benchmark_api
+import vulngym_agent.benchmark.snapshot_batch as snapshot_batch_module
 import vulngym_agent.benchmark.sealed_tree_access as sealed_tree_access_module
 import vulngym_agent.benchmark.worker_handoff as worker_handoff_module
 from vulngym_agent.benchmark.contracts import INSTRUCTION_ID
@@ -20,13 +21,16 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     prepare_sealed_snapshot,
 )
 from vulngym_agent.benchmark.sealed_tree_access import (
+    DEFAULT_SEALED_TREE_ACCESS_LIMITS,
     SealedTreeAccessError,
     SealedTreeAccessLimits,
     bind_worker_tree,
 )
 from vulngym_agent.benchmark.worker_handoff import (
+    WORKER_HANDOFF_DIGEST_DOMAIN,
     WORKER_HANDOFF_CONTRACT_VERSION,
     WORKER_HANDOFF_MAX_BYTES,
+    WORKER_HANDOFF_MAX_FILES,
     WorkerHandoffError,
     WorkerHandoffV2,
     build_worker_handoff,
@@ -42,6 +46,16 @@ SOURCE_PATH = "src/app.py"
 SOURCE = b"def entry(value):\n    return critical(value)\n"
 GIT_SYMLINK_PATH = "absolute-link"
 GIT_SYMLINK_TARGET = b"/opt/vulngym/outside"
+
+
+def _canonical(value: object) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 class WorkerHandoffTests(unittest.TestCase):
@@ -244,6 +258,55 @@ class WorkerHandoffTests(unittest.TestCase):
                 )
         self.assertEqual(captured.exception.code, "digest_mismatch")
         parser.assert_not_called()
+
+    def test_pinned_policy_v3_handoff_is_rejected(self) -> None:
+        raw = json.loads(self.handoff.to_bytes())
+        raw["policy"]["policy_version"] = "vulngym.portable-source-tree.v3"
+        raw["policy"]["max_file_bytes"] = 16 * 1024 * 1024
+        raw["policy"]["max_total_bytes"] = 512 * 1024 * 1024
+        core = dict(raw)
+        core.pop("handoff_sha256")
+        handoff_sha256 = hashlib.sha256(
+            WORKER_HANDOFF_DIGEST_DOMAIN + _canonical(core)
+        ).hexdigest()
+        raw["handoff_sha256"] = handoff_sha256
+        payload = _canonical(raw) + b"\n"
+
+        with self.assertRaises(WorkerHandoffError) as captured:
+            WorkerHandoffV2.from_bytes(
+                payload,
+                expected_sha256=handoff_sha256,
+                expected_wire_sha256=hashlib.sha256(payload).hexdigest(),
+            )
+        self.assertEqual(captured.exception.code, "invalid_contract")
+
+    def test_snapshot_policy_does_not_expand_downstream_budgets(self) -> None:
+        self.assertEqual(snapshot_batch_module._MAX_BATCH_TOTAL_BYTES, 16 * 1024**3)
+        self.assertEqual(WORKER_HANDOFF_CONTRACT_VERSION, 2)
+        self.assertEqual(WORKER_HANDOFF_MAX_BYTES, 72 * 1024 * 1024)
+        self.assertEqual(WORKER_HANDOFF_MAX_FILES, 100_000)
+        self.assertEqual(
+            DEFAULT_SEALED_TREE_ACCESS_LIMITS.max_bytes_per_read,
+            4 * 1024 * 1024,
+        )
+        self.assertEqual(
+            DEFAULT_SEALED_TREE_ACCESS_LIMITS.max_total_bytes_read,
+            64 * 1024 * 1024,
+        )
+        SealedTreeAccessLimits(
+            max_bytes_per_read=16 * 1024 * 1024,
+            max_total_bytes_read=256 * 1024 * 1024,
+        )
+        with self.assertRaises(ValueError):
+            SealedTreeAccessLimits(
+                max_bytes_per_read=(16 * 1024 * 1024) + 1,
+                max_total_bytes_read=256 * 1024 * 1024,
+            )
+        with self.assertRaises(ValueError):
+            SealedTreeAccessLimits(
+                max_bytes_per_read=1,
+                max_total_bytes_read=(256 * 1024 * 1024) + 1,
+            )
 
     def test_strict_parser_rejects_duplicate_noncanonical_and_wrong_digest(self) -> None:
         payload = self.handoff.to_bytes()

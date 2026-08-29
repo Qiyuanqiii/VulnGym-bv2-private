@@ -447,8 +447,17 @@ source-only discovery 链路实现；原有依赖公告/fix 锚点的
 `python -m vulngym_agent.snapshot_cli` 已能准备并独立校验经过认证的 source-only 快照
 批次。受信 preparer 打开完整本地 Git 仓库，解析每个任务的精确 commit 与根 tree，只把
 该 commit 的普通源码文件物化到 `bundles/<task_id>/tree`。发布树不含 `.git` 目录或其他
-历史读取面；符号链接、Gitlink/submodule、LFS pointer、不安全或碰撞路径、空目录，以及
-不受支持的 Git 存储布局都会 fail closed。
+历史读取面；宿主符号链接/reparse point、LFS pointer、不安全或碰撞路径、空目录，以及
+不受支持的 Git 存储布局都会 fail closed。Gitlink 会被表示成普通、不可执行的 marker
+文件，内容只含精确的被链接 commit OID；系统不会抓取或挂载嵌套仓库。
+
+`portable-source-tree` policy v4 对所有获准的普通 Git blob 保持逐字节完整；单题默认
+上限为 100,000 个文件、单文件 80 MiB、物化总量 640 MiB，构造器不可突破的硬上限仍为
+200,000 个文件、单文件 96 MiB、物化总量 2 GiB。大文件不会被替换成只有 digest 的
+占位符；任何越界源码树仍会在发布前 fail closed。
+
+上述封存上限不会放宽 worker 独立的有界读取能力：大文件可以被完整认证，并不代表一次
+Agent 操作能将其全部读出。每个 split 固定 16 GiB 的批次总上限也继续独立于单题包络。
 
 每题 canonical manifest 与 HMAC 会绑定 task ID、精确 repo URL 和 commit、根 tree 对象
 ID、快照策略、文件 mode，以及逐文件 Git blob OID、字节数和 SHA-256。外层批次 manifest

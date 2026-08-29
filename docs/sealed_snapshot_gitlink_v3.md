@@ -4,6 +4,12 @@ Snapshot v3 represents a Git tree entry whose mode is exactly `160000` and
 whose object type is exactly `commit` as authenticated metadata. It does not
 checkout, fetch, recurse into, or read the child repository.
 
+The snapshot wire/representation version remains v3 while the independently
+bound portable-source-tree resource policy is v4. Policy v4 changes only the
+bounded ordinary-blob envelope; it does not change the gitlink marker format.
+Artifacts bound to policy v3 must be prepared again; changing a version label
+or digest cannot migrate or authenticate their contents under policy v4.
+
 The manifest uses a distinct `record_type: "gitlink"` record with the original
 portable path, `git_mode: "160000"`, the 40-character
 `target_commit_oid`, the fixed representation

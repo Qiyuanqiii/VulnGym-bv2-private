@@ -253,7 +253,7 @@ GitHub SSH transport；连接端固定为官方 `ssh.github.com:443`，并强制
 BatchMode/no-prompt/strict host-key checking、忽略 ambient 用户 SSH 配置且禁用
 ProxyCommand/ProxyJump，不能接收任意 SSH URL。Windows 上的显式 SSH executable 会先转换为
 Git for Windows POSIX shell 可安全解析的路径，再统一做 shell quoting，避免反斜杠被吞掉。
-v4 contract 对每个 repository 的全部 fetch/deepen segment 合计只允许消费一个 transient
+当前 v5 contract 对每个 repository 的全部 fetch/deepen segment 合计只允许消费一个 transient
 `git_command_failed` retry token。仅在准备消费该 token 时，必须先确认 recovery state 无
 transaction 残留，再将调用方传入的 pre-segment state 与独立复验结果比较：完整的 path-free
 Git storage seal 及逻辑 refs mapping 必须完全不变。任何已落盘的 object、ref、shallow boundary、
@@ -263,7 +263,7 @@ output-limit、process unavailable 与 interrupt 同样不重试。安全重试�
 repository 确认 non-shallow 后，`prepare` 会在最终对象校验前写入并验证 Git 的派生
 multi-pack index；写入前后精确 refs、object counts、non-shallow 状态与 pack payload
 inventory 必须保持不变。`verify` 只验证已有索引，绝不写入。MIDX 仅用于加速大型 multi-pack store
-的对象查找，不能替代 full fsck、exact-ref closure 或逐 commit source audit。v4 contract
+的对象查找，不能替代 full fsck、exact-ref closure 或逐 commit source audit。v5 contract
 要求至少一个 pack 且其中至少有一个 object；loose-only store 会被明确拒绝，而不是静默豁免
 MIDX 验证。
 

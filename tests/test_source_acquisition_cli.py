@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -97,16 +98,34 @@ class SourceAcquisitionCliTests(unittest.TestCase):
         self.assertEqual(len(call.args[0]), 1)
 
     def test_policy_blocked_sources_publish_summary_but_return_not_ready(self) -> None:
-        standard_output = StringIO()
-        with mock.patch.object(
-            source_acquisition_cli,
-            "prepare_source_acquisition",
-            return_value=_summary(ready=False),
-        ), redirect_stdout(standard_output):
-            status = source_acquisition_cli.main(self._argv())
-        self.assertEqual(status, SOURCE_NOT_READY_EXIT_STATUS)
-        self.assertIn('"blocked_task_count":1', standard_output.getvalue())
-        self.assertIn('"ready":false', standard_output.getvalue())
+        self.assertEqual(SOURCE_NOT_READY_EXIT_STATUS, 10)
+        summary = _summary(ready=False)
+        expected = (
+            json.dumps(
+                summary.to_dict(),
+                ensure_ascii=False,
+                allow_nan=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        for command, operation_name in (
+            ("prepare", "prepare_source_acquisition"),
+            ("verify", "verify_source_acquisition"),
+        ):
+            with self.subTest(command=command):
+                standard_output = StringIO()
+                argv = self._argv()
+                argv[0] = command
+                with mock.patch.object(
+                    source_acquisition_cli,
+                    operation_name,
+                    return_value=summary,
+                ), redirect_stdout(standard_output):
+                    status = source_acquisition_cli.main(argv)
+                self.assertEqual(status, SOURCE_NOT_READY_EXIT_STATUS)
+                self.assertEqual(standard_output.getvalue(), expected)
 
     def test_ssh_transport_requires_explicit_executable(self) -> None:
         standard_error = StringIO()

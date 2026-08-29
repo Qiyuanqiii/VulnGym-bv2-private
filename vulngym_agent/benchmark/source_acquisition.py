@@ -1014,7 +1014,7 @@ def _assert_packed_storage(
     if counts["packs"] < 1 or counts["in-pack"] < 1:
         raise SourceAcquisitionError(
             "packed_storage_required",
-            "source acquisition v4 requires packed storage for its verified MIDX",
+            "source acquisition v5 requires packed storage for its verified MIDX",
             exit_status=status,
         )
 

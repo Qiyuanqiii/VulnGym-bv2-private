@@ -207,6 +207,44 @@ class BoundedProcessTests(unittest.TestCase):
                 inherited_fds=(0,),
             )
 
+    def test_stdout_ceiling_covers_snapshot_blobs_without_widening_stderr(self) -> None:
+        checked = bounded_module._validate_arguments(
+            (sys.executable,),
+            b"",
+            stdout_max_bytes=96 * 1024 * 1024,
+            stderr_max_bytes=64 * 1024 * 1024,
+            timeout_seconds=1,
+            env=None,
+            cwd=None,
+            executable=None,
+            inherited_fds=(),
+        )
+        self.assertEqual(checked[0], (sys.executable,))
+        with self.assertRaises(BoundedProcessError):
+            bounded_module._validate_arguments(
+                (sys.executable,),
+                b"",
+                stdout_max_bytes=(96 * 1024 * 1024) + 1,
+                stderr_max_bytes=1,
+                timeout_seconds=1,
+                env=None,
+                cwd=None,
+                executable=None,
+                inherited_fds=(),
+            )
+        with self.assertRaises(BoundedProcessError):
+            bounded_module._validate_arguments(
+                (sys.executable,),
+                b"",
+                stdout_max_bytes=1,
+                stderr_max_bytes=(64 * 1024 * 1024) + 1,
+                timeout_seconds=1,
+                env=None,
+                cwd=None,
+                executable=None,
+                inherited_fds=(),
+            )
+
     @unittest.skipUnless(
         os.name == "posix" and Path("/proc/self/fd").is_dir(),
         "requires a procfd-capable POSIX host",

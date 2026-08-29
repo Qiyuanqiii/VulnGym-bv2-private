@@ -115,6 +115,29 @@ class RawGitTreeTests(unittest.TestCase):
         with self.assertRaises(GitBlobTooLarge):
             self.repository.read_blob_object(entry.object_id, max_bytes=1)
 
+    def test_git_blob_larger_than_legacy_transport_limit_is_read_exactly(self) -> None:
+        blob_size = (64 * 1024 * 1024) + 1
+        blob_path = self.root / "large-transport.bin"
+        chunk = b"V" * (1024 * 1024)
+        with blob_path.open("wb") as stream:
+            for _ in range(64):
+                stream.write(chunk)
+            stream.write(b"!")
+        object_id = _git(
+            self.root,
+            "hash-object",
+            "-w",
+            "--",
+            blob_path.name,
+        ).decode("ascii").strip()
+        repository = GitRepository(self.root, max_blob_bytes=blob_size)
+        with self.assertRaises(GitBlobTooLarge):
+            repository.read_blob_object(object_id, max_bytes=64 * 1024 * 1024)
+        data = repository.read_blob_object(object_id, max_bytes=blob_size)
+        self.assertEqual(len(data), blob_size)
+        self.assertEqual(data[:1], b"V")
+        self.assertEqual(data[-1:], b"!")
+
     def test_reused_empty_trees_consume_node_budget_and_can_be_exposed(self) -> None:
         empty_tree = _git(
             self.root, "mktree", "-z", input_data=b""

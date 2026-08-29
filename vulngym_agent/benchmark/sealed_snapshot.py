@@ -39,7 +39,7 @@ from vulngym_agent.tools.git.repository import (
 
 
 SNAPSHOT_CONTRACT_VERSION: Final[str] = "vulngym.sealed-source-snapshot.v3"
-SNAPSHOT_POLICY_VERSION: Final[str] = "vulngym.portable-source-tree.v3"
+SNAPSHOT_POLICY_VERSION: Final[str] = "vulngym.portable-source-tree.v4"
 GIT_SYMLINK_REPRESENTATION: Final[str] = "regular-file-raw-target-bytes"
 GITLINK_REPRESENTATION: Final[str] = "regular-file-gitlink-commit-oid-lf"
 ATTESTATION_ALGORITHM: Final[str] = "HMAC-SHA256"
@@ -65,7 +65,7 @@ _WINDOWS_RESERVED: Final[frozenset[str]] = frozenset(
 )
 
 _HARD_MAX_FILES: Final[int] = 200_000
-_HARD_MAX_FILE_BYTES: Final[int] = 64 * 1024 * 1024
+_HARD_MAX_FILE_BYTES: Final[int] = 96 * 1024 * 1024
 _HARD_MAX_TOTAL_BYTES: Final[int] = 2 * 1024 * 1024 * 1024
 _HARD_MAX_PATH_BYTES: Final[int] = 4_096
 _HARD_MAX_COMPONENT_BYTES: Final[int] = 255
@@ -90,8 +90,8 @@ class SnapshotPolicy:
     """Strict resource and cross-platform path limits for one snapshot."""
 
     max_files: int = 100_000
-    max_file_bytes: int = 16 * 1024 * 1024
-    max_total_bytes: int = 512 * 1024 * 1024
+    max_file_bytes: int = 80 * 1024 * 1024
+    max_total_bytes: int = 640 * 1024 * 1024
     max_path_bytes: int = 1_024
     max_component_bytes: int = 255
     max_depth: int = 64

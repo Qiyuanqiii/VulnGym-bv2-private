@@ -502,9 +502,23 @@ materializes that commit's allowed source blobs under
 history surface. A Git mode-`120000` symlink blob is represented safely as an
 ordinary non-executable file containing its exact link-target bytes; the
 policy and manifest bind that representation, and no host symlink is created.
-Host symlinks/reparse points, Gitlinks/submodules, LFS pointers, unsafe or
-colliding paths, empty directories, and unsupported Git storage arrangements
-fail closed.
+Host symlinks/reparse points, LFS pointers, unsafe or colliding paths, empty
+directories, and unsupported Git storage arrangements fail closed. Gitlinks
+are represented as ordinary non-executable marker files that contain only the
+exact linked commit object ID; nested repositories are never fetched or
+mounted.
+
+Portable-source-tree policy v4 keeps every accepted ordinary Git blob byte-for-
+byte intact. Its per-task defaults are 100,000 files, 80 MiB per file, and
+640 MiB total materialized bytes; immutable constructor ceilings remain
+200,000 files, 96 MiB per file, and 2 GiB total. Large blobs are never replaced
+with digest-only placeholders, and any tree outside those limits still fails
+closed before publication.
+
+These sealing limits do not widen the worker's independent bounded-read
+capabilities: accepting and authenticating a large file does not imply that one
+Agent operation may read it in full. The fixed 16 GiB split-level batch ceiling
+also remains independent of the per-task envelope.
 
 Each task's canonical manifest and HMAC bind the task ID, exact repository URL
 and commit, root-tree object ID, snapshot policy, file modes, and every file's
@@ -533,7 +547,7 @@ identities only, creates one independent bare SHA-1 object store at
 `refs/vulngym/<commit>`. Acquisition may start with bounded shallow fetches and
 repeatedly deepen, but readiness and publication require a final non-shallow
 repository. Filter/promisor/alternate/worktree storage and interactive prompts
-remain forbidden. Contract v4 permits at most one transient
+remain forbidden. The current contract v5 retains at most one transient
 `git_command_failed` retry across all fetch segments for one repository. Before
 spending that token, acquisition requires recovery state to be clean and proves
 that the complete path-free repository storage seal plus the independently
@@ -552,7 +566,7 @@ Git's derived multi-pack index before final object checks. The operation must
 leave exact refs, object counts, non-shallow state, and the pack payload
 inventory unchanged. `verify` only verifies the existing index and never writes one.
 MIDX accelerates lookup in large multi-pack stores; it does not replace full
-fsck, exact-ref closure, or per-commit source auditing. The v4 contract requires
+fsck, exact-ref closure, or per-commit source auditing. Contract v5 requires
 at least one pack containing at least one object; loose-only stores are rejected
 instead of being silently exempted from MIDX verification.
 Each prepare or verify invocation is the complete authorization union for its

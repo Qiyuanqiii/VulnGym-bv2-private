@@ -21,6 +21,7 @@ from vulngym_agent.benchmark.snapshot_batch import (
     PROFILE_MANIFEST_SHA256,
     PROFILE_SCHEMA_VERSION,
 )
+from vulngym_agent.benchmark.sealed_snapshot import DEFAULT_SNAPSHOT_POLICY
 from vulngym_agent.benchmark import source_acquisition
 from vulngym_agent.benchmark.source_acquisition import (
     SOURCE_ACQUISITION_CONTRACT_VERSION,
@@ -321,6 +322,7 @@ class SourceAcquisitionIntegrationTests(unittest.TestCase):
             self.assertTrue(audit["ready"])
             self.assertTrue(audit["scan_complete"])
             self.assertTrue(audit["lfs_scan_complete"])
+            self.assertEqual(audit["policy"], DEFAULT_SNAPSHOT_POLICY.to_dict())
             self.assertEqual(audit["mode_counts"], {"100644": 1})
             self.assertEqual(audit["regular_file_count"], 1)
             self.assertEqual(audit["symlink_count"], 0)
