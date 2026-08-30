@@ -34,6 +34,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     VerifiedSealedSnapshot,
     _reject_windows_device_path,
     _scan_tree,
+    _stable_path_identity,
     _windows_assert_no_named_streams,
     _windows_extended_path,
     verify_sealed_snapshot,
@@ -280,7 +281,7 @@ class SourceUsageLedger:
 
 
 _DirectoryIdentity = tuple[int, int]
-_FileIdentity = tuple[int, int, int, int | None, int | None]
+_FileIdentity = tuple[int, ...]
 
 
 class _TreeAuthority(Protocol):
@@ -352,7 +353,11 @@ def _safe_regular(path: Path) -> tuple[os.stat_result, _FileIdentity]:
         raise SealedTreeAccessError(
             "unsafe_source_path", "trusted source entries must remain plain files"
         )
-    return result, _file_identity(result)
+    # Separate pathname observations on NTFS deliberately ignore change time:
+    # opening a newly materialized file may advance ctime without changing its
+    # object identity or bytes.  An already-open descriptor is still compared
+    # with `_file_identity`, including ctime, before and after every read.
+    return result, _stable_path_identity(result)
 
 
 def _root_chain(path: Path) -> tuple[Path, ...]:
