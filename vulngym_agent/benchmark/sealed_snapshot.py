@@ -1801,11 +1801,21 @@ def prepare_sealed_snapshot(
             "source_limit_exceeded", "Git tree exceeds the snapshot policy"
         ) from error
     entries = _validate_entries(raw_entries, policy)
+    blob_object_ids = tuple(
+        entry.object_id for entry, _, _ in entries if entry.mode != "160000"
+    )
     staging = _begin_staging(output_dir, repository)
     file_records: list[SealedSnapshotEntry] = []
     total_bytes = 0
     regular_file_bytes = 0
     try:
+        blob_iterator = iter(
+            repository.iter_blob_objects(
+                blob_object_ids,
+                max_total_bytes=policy.max_total_bytes,
+                max_bytes=policy.max_file_bytes,
+            )
+        )
         _create_staging_dir(staging, "tree")
         _create_staging_dir(staging, "control")
         for entry, components, _ in entries:
@@ -1818,13 +1828,22 @@ def prepare_sealed_snapshot(
                     )
             else:
                 try:
-                    data = repository.read_blob_object(
-                        entry.object_id, max_bytes=policy.max_file_bytes
-                    )
+                    returned_id, data = next(blob_iterator)
                 except GitBlobTooLarge as error:
                     raise SealedSnapshotError(
-                        "source_limit_exceeded", "a source blob exceeds its byte budget"
+                        "source_limit_exceeded",
+                        "source blobs exceed the snapshot byte budgets",
                     ) from error
+                except StopIteration as error:
+                    raise SealedSnapshotError(
+                        "snapshot_preparation_failed",
+                        "Git blob batch ended before the source tree",
+                    ) from error
+                if returned_id != entry.object_id:
+                    raise SealedSnapshotError(
+                        "snapshot_preparation_failed",
+                        "Git blob batch order changed during preparation",
+                    )
             total_bytes += len(data)
             if entry.mode != "160000":
                 regular_file_bytes += len(data)
@@ -1856,6 +1875,16 @@ def prepare_sealed_snapshot(
             # the raw target blob and is never interpreted as a path.
             _write_staging_file(staging, "tree/" + "/".join(components), data)
             file_records.append(record)
+
+        try:
+            next(blob_iterator)
+        except StopIteration:
+            pass
+        else:
+            raise SealedSnapshotError(
+                "snapshot_preparation_failed",
+                "Git blob batch contains an unexpected response",
+            )
 
         repository.assert_storage_safe()
         if repository.history_is_shallow():

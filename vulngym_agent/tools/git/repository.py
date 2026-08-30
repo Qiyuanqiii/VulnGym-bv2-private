@@ -8,6 +8,7 @@ executes code from the inspected repository.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import ntpath
 import os
 import re
@@ -16,7 +17,7 @@ import subprocess
 from dataclasses import dataclass
 from difflib import unified_diff
 from pathlib import Path
-from typing import Final, Mapping, Sequence
+from typing import Final, Iterator, Mapping, Sequence
 
 from vulngym_agent.evaluator.bounded_process import (
     BoundedProcessError,
@@ -47,6 +48,8 @@ MAX_SHALLOW_BYTES: Final[int] = 16 * 1024 * 1024
 DEFAULT_MAX_PROCESS_STDOUT_BYTES: Final[int] = 64 * 1024 * 1024
 DEFAULT_MAX_PROCESS_STDERR_BYTES: Final[int] = 256 * 1024
 DEFAULT_MAX_PROCESS_STDIN_BYTES: Final[int] = 16 * 1024 * 1024
+_MAX_BATCH_OBJECTS: Final[int] = 4_096
+_MAX_BATCH_CONTENT_RESPONSE_BYTES: Final[int] = 64 * 1024 * 1024
 _PROMISOR_CONFIG_RE: Final[re.Pattern[str]] = re.compile(
     r"remote\..+\.promisor\Z", re.IGNORECASE
 )
@@ -1327,6 +1330,191 @@ class GitRepository:
             max_bytes=limit,
             operation="cat-file",
         )
+
+    def iter_blob_objects(
+        self,
+        object_ids: Sequence[object],
+        *,
+        max_total_bytes: int,
+        max_bytes: int | None = None,
+    ) -> Iterator[tuple[str, bytes]]:
+        """Yield bounded, hash-verified blobs in the caller's exact order.
+
+        Metadata and contents use finite ``cat-file`` batches through the same
+        bounded process runner as every other Git fact.  A complete response
+        batch is framed and hash-checked before any of its bytes are yielded.
+        """
+
+        if isinstance(object_ids, (str, bytes, bytearray, memoryview)) or not isinstance(
+            object_ids, Sequence
+        ):
+            raise ValueError("object_ids must be a finite sequence")
+        if len(object_ids) > DEFAULT_MAX_TREE_ENTRIES:
+            raise GitBlobTooLarge("blob request count exceeds the fixed limit")
+        if (
+            isinstance(max_total_bytes, bool)
+            or not isinstance(max_total_bytes, int)
+            or max_total_bytes < 0
+        ):
+            raise ValueError("max_total_bytes must be a non-negative integer")
+        limit = self.max_blob_bytes if max_bytes is None else max_bytes
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+            raise ValueError("max_bytes must be a non-negative integer")
+
+        requested = tuple(validate_commit_sha(value) for value in object_ids)
+        metadata: list[tuple[str, int]] = []
+        total_bytes = 0
+        for offset in range(0, len(requested), _MAX_BATCH_OBJECTS):
+            chunk = requested[offset : offset + _MAX_BATCH_OBJECTS]
+            request_payload = b"".join(
+                object_id.encode("ascii") + b"\n" for object_id in chunk
+            )
+            result = self._run(
+                (
+                    "cat-file",
+                    "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+                ),
+                operation="cat-file",
+                input_data=request_payload,
+                max_stdout_bytes=max(1, 96 * len(chunk)),
+            )
+            if result.stderr:
+                raise GitCommandError(
+                    "cat-file", result.returncode, _diagnostic_text(result.stderr)
+                )
+            lines = result.stdout.splitlines(keepends=True)
+            if len(lines) != len(chunk):
+                raise GitCommandError(
+                    "cat-file", 0, "Git batch metadata record count is invalid"
+                )
+            for expected_id, line in zip(chunk, lines, strict=True):
+                if not line.endswith(b"\n") or line.endswith(b"\r\n"):
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch metadata framing is invalid"
+                    )
+                fields = line[:-1].split(b" ")
+                if len(fields) != 3:
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch metadata fields are invalid"
+                    )
+                returned_id, object_type, raw_size = fields
+                try:
+                    returned_text = returned_id.decode("ascii", errors="strict")
+                except UnicodeDecodeError as error:
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch metadata object ID is invalid"
+                    ) from error
+                if returned_text != expected_id or object_type != b"blob":
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch metadata binding is invalid"
+                    )
+                if (
+                    not raw_size
+                    or len(raw_size) > 20
+                    or not raw_size.isdigit()
+                    or (len(raw_size) > 1 and raw_size.startswith(b"0"))
+                ):
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch metadata size is invalid"
+                    )
+                size = int(raw_size)
+                if size > limit:
+                    raise GitBlobTooLarge(
+                        f"blob object is {size} bytes; limit is {limit}"
+                    )
+                total_bytes += size
+                if total_bytes > max_total_bytes:
+                    raise GitBlobTooLarge(
+                        "blob objects exceed the aggregate byte limit"
+                    )
+                metadata.append((expected_id, size))
+
+        position = 0
+        while position < len(metadata):
+            object_id, size = metadata[position]
+            frame_size = len(f"{object_id} blob {size}\n".encode("ascii")) + size + 1
+            if frame_size > _MAX_BATCH_CONTENT_RESPONSE_BYTES:
+                data = self._read_object_bytes(
+                    object_id,
+                    expected_type="blob",
+                    max_bytes=limit,
+                    operation="cat-file",
+                )
+                if len(data) != size:
+                    raise GitCommandError(
+                        "cat-file", 0, "Git blob metadata size changed during reading"
+                    )
+                yield object_id, data
+                position += 1
+                continue
+
+            end = position
+            response_bytes = 0
+            while end < len(metadata) and end - position < _MAX_BATCH_OBJECTS:
+                candidate_id, candidate_size = metadata[end]
+                candidate_frame = (
+                    len(
+                        f"{candidate_id} blob {candidate_size}\n".encode("ascii")
+                    )
+                    + candidate_size
+                    + 1
+                )
+                if response_bytes and (
+                    response_bytes + candidate_frame
+                    > _MAX_BATCH_CONTENT_RESPONSE_BYTES
+                ):
+                    break
+                if candidate_frame > _MAX_BATCH_CONTENT_RESPONSE_BYTES:
+                    break
+                response_bytes += candidate_frame
+                end += 1
+
+            group = metadata[position:end]
+            request_payload = b"".join(
+                item[0].encode("ascii") + b"\n" for item in group
+            )
+            result = self._run(
+                ("cat-file", "--batch"),
+                operation="cat-file",
+                input_data=request_payload,
+                max_stdout_bytes=response_bytes,
+            )
+            if result.stderr:
+                raise GitCommandError(
+                    "cat-file", result.returncode, _diagnostic_text(result.stderr)
+                )
+            payload = result.stdout
+            view = memoryview(payload)
+            cursor = 0
+            frames: list[tuple[str, int, int]] = []
+            for expected_id, expected_size in group:
+                header = f"{expected_id} blob {expected_size}\n".encode("ascii")
+                if payload[cursor : cursor + len(header)] != header:
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch content header is invalid"
+                    )
+                data_start = cursor + len(header)
+                data_end = data_start + expected_size
+                if data_end >= len(payload) or payload[data_end : data_end + 1] != b"\n":
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch content framing is invalid"
+                    )
+                digest = hashlib.sha1(usedforsecurity=False)
+                digest.update(f"blob {expected_size}\0".encode("ascii"))
+                digest.update(view[data_start:data_end])
+                if not hmac.compare_digest(digest.hexdigest(), expected_id):
+                    raise GitCommandError(
+                        "cat-file", 0, "Git batch content does not match its object ID"
+                    )
+                frames.append((expected_id, data_start, data_end))
+                cursor = data_end + 1
+            if cursor != len(payload):
+                raise GitCommandError(
+                    "cat-file", 0, "Git batch content has trailing bytes"
+                )
+            for returned_id, data_start, data_end in frames:
+                yield returned_id, bytes(view[data_start:data_end])
+            position = end
 
     def object_type(self, object_id: str) -> str | None:
         """Return the exact object's Git type, or ``None`` if it is absent."""

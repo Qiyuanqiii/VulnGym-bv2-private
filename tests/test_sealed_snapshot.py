@@ -183,6 +183,23 @@ class SealedSnapshotTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             verified.file_count = 0  # type: ignore[misc]
 
+    def test_prepare_reads_regular_blobs_through_bounded_batches(self) -> None:
+        with mock.patch.object(
+            self.repository,
+            "iter_blob_objects",
+            wraps=self.repository.iter_blob_objects,
+        ) as batch_reader, mock.patch.object(
+            self.repository,
+            "read_blob_object",
+            side_effect=AssertionError("per-blob subprocess path used"),
+        ):
+            prepared = self._prepare("batched-blob-read")
+        batch_reader.assert_called_once()
+        requested = batch_reader.call_args.args[0]
+        self.assertEqual(3, len(requested))
+        verified = self._verify("batched-blob-read")
+        self.assertEqual(prepared.content_root, verified.content_root)
+
     @unittest.skipUnless(os.name == "nt", "NTFS change-time compatibility")
     def test_path_identity_tolerates_only_cross_observation_ctime_drift(self) -> None:
         path = self.root / "ctime-drift.bin"
@@ -941,10 +958,13 @@ class SealedSnapshotTests(unittest.TestCase):
         self._git("commit", "-q", "-m", "metadata-only gitlink")
         commit = self._git("rev-parse", "HEAD").stdout.strip()
         with mock.patch.object(
-            self.repository, "read_blob_object", wraps=self.repository.read_blob_object
+            self.repository,
+            "iter_blob_objects",
+            wraps=self.repository.iter_blob_objects,
         ) as reader:
             prepared = self._prepare("gitlink-no-child-read", commit=commit)
-        self.assertNotIn(child, [call.args[0] for call in reader.call_args_list])
+        reader.assert_called_once()
+        self.assertNotIn(child, reader.call_args.args[0])
         self.assertEqual(
             b"gitlink " + child.encode("ascii") + b"\n",
             (prepared.agent_tree / "Peekaboo").read_bytes(),
@@ -1056,7 +1076,7 @@ class SealedSnapshotTests(unittest.TestCase):
         failing = self.root / "read-failure"
         with mock.patch.object(
             self.repository,
-            "read_blob_object",
+            "iter_blob_objects",
             side_effect=GitFactError("injected read failure"),
         ), self.assertRaises(SealedSnapshotError):
             self._prepare("read-failure")

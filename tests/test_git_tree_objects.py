@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -10,6 +11,7 @@ import unittest
 from unittest import mock
 
 import vulngym_agent.evaluator.bounded_process as bounded_process_module
+import vulngym_agent.tools.git.repository as repository_module
 
 from vulngym_agent.tools.git import (
     GitBlobTooLarge,
@@ -72,6 +74,200 @@ class RawGitTreeTests(unittest.TestCase):
             self.repository.read_blob_object(binary_entry.object_id, max_bytes=64),
             self.binary,
         )
+
+    def test_batched_blob_reader_preserves_order_duplicates_and_binary_bytes(self) -> None:
+        entries = self.repository.list_tree_entries(
+            self.commit, max_entries=10, max_output_bytes=4096
+        )
+        binary_id = next(
+            entry.object_id for entry in entries if entry.path == "src/data.bin"
+        )
+        empty_id = _git(
+            self.root, "hash-object", "-w", "--stdin", input_data=b""
+        ).decode("ascii").strip()
+        requested = (binary_id, empty_id, binary_id)
+        with mock.patch.object(
+            self.repository, "_run", wraps=self.repository._run
+        ) as runner:
+            observed = tuple(
+                self.repository.iter_blob_objects(
+                    requested,
+                    max_total_bytes=2 * len(self.binary),
+                    max_bytes=64,
+                )
+            )
+        self.assertEqual(
+            (
+                (binary_id, self.binary),
+                (empty_id, b""),
+                (binary_id, self.binary),
+            ),
+            observed,
+        )
+        commands = tuple(call.args[0] for call in runner.call_args_list)
+        self.assertEqual(2, len(commands))
+        self.assertEqual("cat-file", commands[0][0])
+        self.assertTrue(commands[0][1].startswith("--batch-check="))
+        self.assertEqual(("cat-file", "--batch"), commands[1])
+
+    def test_batched_blob_reader_rejects_limits_types_and_malformed_content(self) -> None:
+        with mock.patch.object(
+            self.repository,
+            "_run",
+            side_effect=AssertionError("empty batch invoked Git"),
+        ):
+            self.assertEqual(
+                (),
+                tuple(
+                    self.repository.iter_blob_objects(
+                        (), max_total_bytes=0, max_bytes=0
+                    )
+                ),
+            )
+
+        entry = self.repository.list_tree_entries(
+            self.commit, max_entries=10, max_output_bytes=4096
+        )[0]
+        with self.assertRaises(GitBlobTooLarge):
+            tuple(
+                self.repository.iter_blob_objects(
+                    (entry.object_id,),
+                    max_total_bytes=0,
+                    max_bytes=1024,
+                )
+            )
+        with self.assertRaises(GitCommandError):
+            tuple(
+                self.repository.iter_blob_objects(
+                    (self.commit,),
+                    max_total_bytes=1024,
+                    max_bytes=1024,
+                )
+            )
+
+        object_id = hashlib.sha1(
+            b"blob 1\0x", usedforsecurity=False
+        ).hexdigest()
+        metadata = subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout=f"{object_id} blob 1\n".encode("ascii"),
+            stderr=b"",
+        )
+        malformed = subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout=f"{object_id} blob 1\n".encode("ascii") + b"y\n",
+            stderr=b"",
+        )
+        with mock.patch.object(
+            self.repository, "_run", side_effect=(metadata, malformed)
+        ), self.assertRaises(GitCommandError):
+            tuple(
+                self.repository.iter_blob_objects(
+                    (object_id,),
+                    max_total_bytes=1,
+                    max_bytes=1,
+                )
+            )
+
+        first_data = b"a"
+        second_data = b"b"
+        first_id = hashlib.sha1(
+            b"blob 1\0" + first_data, usedforsecurity=False
+        ).hexdigest()
+        second_id = hashlib.sha1(
+            b"blob 1\0" + second_data, usedforsecurity=False
+        ).hexdigest()
+        metadata = subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout=(
+                f"{first_id} blob 1\n{second_id} blob 1\n".encode("ascii")
+            ),
+            stderr=b"",
+        )
+        corrupt_second_frame = subprocess.CompletedProcess(
+            args=(),
+            returncode=0,
+            stdout=(
+                f"{first_id} blob 1\n".encode("ascii")
+                + first_data
+                + b"\n"
+                + f"{second_id} blob 1\n".encode("ascii")
+                + b"c\n"
+            ),
+            stderr=b"",
+        )
+        with mock.patch.object(
+            self.repository,
+            "_run",
+            side_effect=(metadata, corrupt_second_frame),
+        ):
+            reader = self.repository.iter_blob_objects(
+                (first_id, second_id), max_total_bytes=2, max_bytes=1
+            )
+            with self.assertRaises(GitCommandError):
+                next(reader)
+
+    def test_batched_blob_reader_chunks_content_and_uses_large_blob_fallback(self) -> None:
+        entries = self.repository.list_tree_entries(
+            self.commit, max_entries=10, max_output_bytes=4096
+        )
+        object_ids = tuple(entry.object_id for entry in entries)
+        expected = tuple(
+            (object_id, self.repository.read_blob_object(object_id, max_bytes=1024))
+            for object_id in object_ids
+        )
+        with mock.patch.object(
+            repository_module, "_MAX_BATCH_CONTENT_RESPONSE_BYTES", 80
+        ), mock.patch.object(
+            self.repository, "_run", wraps=self.repository._run
+        ) as runner:
+            observed = tuple(
+                self.repository.iter_blob_objects(
+                    object_ids,
+                    max_total_bytes=1024,
+                    max_bytes=1024,
+                )
+            )
+        self.assertEqual(expected, observed)
+        content_calls = tuple(
+            call
+            for call in runner.call_args_list
+            if call.args[0] == ("cat-file", "--batch")
+        )
+        self.assertGreaterEqual(len(content_calls), 2)
+
+        with mock.patch.object(
+            repository_module, "_MAX_BATCH_CONTENT_RESPONSE_BYTES", 1
+        ), mock.patch.object(
+            self.repository,
+            "_read_object_bytes",
+            wraps=self.repository._read_object_bytes,
+        ) as fallback:
+            observed = tuple(
+                self.repository.iter_blob_objects(
+                    (object_ids[0],),
+                    max_total_bytes=1024,
+                    max_bytes=1024,
+                )
+            )
+        self.assertEqual(expected[:1], observed)
+        fallback.assert_called_once()
+
+        with mock.patch.object(
+            repository_module, "_MAX_BATCH_CONTENT_RESPONSE_BYTES", 1
+        ), mock.patch.object(
+            self.repository, "_read_object_bytes", return_value=b"wrong-size"
+        ), self.assertRaises(GitCommandError):
+            tuple(
+                self.repository.iter_blob_objects(
+                    (object_ids[0],),
+                    max_total_bytes=1024,
+                    max_bytes=1024,
+                )
+            )
 
     def test_symlink_and_gitlink_modes_are_preserved_for_policy_rejection(self) -> None:
         link_blob = _git(
