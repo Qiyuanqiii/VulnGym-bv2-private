@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -181,6 +182,107 @@ class SealedSnapshotTests(unittest.TestCase):
         self.assertEqual(prepared.agent_tree, verified.agent_tree)
         with self.assertRaises(FrozenInstanceError):
             verified.file_count = 0  # type: ignore[misc]
+
+    @unittest.skipUnless(os.name == "nt", "NTFS change-time compatibility")
+    def test_path_identity_tolerates_only_cross_observation_ctime_drift(self) -> None:
+        path = self.root / "ctime-drift.bin"
+        payload = b"stable snapshot bytes"
+        path.write_bytes(payload)
+        current = os.lstat(path)
+
+        def observed(**overrides: int) -> SimpleNamespace:
+            values = {
+                "st_dev": current.st_dev,
+                "st_ino": current.st_ino,
+                "st_size": current.st_size,
+                "st_mtime_ns": current.st_mtime_ns,
+                "st_ctime_ns": current.st_ctime_ns,
+            }
+            values.update(overrides)
+            return SimpleNamespace(**values)
+
+        before = observed(st_ctime_ns=current.st_ctime_ns - 1)
+        after = observed(st_ctime_ns=current.st_ctime_ns + 1)
+        with mock.patch.object(
+            sealed_snapshot_module,
+            "_require_safe_regular",
+            side_effect=(before, after),
+        ), mock.patch.object(
+            sealed_snapshot_module, "_windows_assert_no_named_streams"
+        ):
+            data, identity = sealed_snapshot_module._read_stable_file(
+                path, len(payload)
+            )
+        self.assertEqual(payload, data)
+        self.assertEqual(
+            sealed_snapshot_module._stable_path_identity(after), identity
+        )
+
+        mutations = {
+            "device": {"st_dev": current.st_dev + 1},
+            "inode": {"st_ino": current.st_ino + 1},
+            "size": {"st_size": current.st_size + 1},
+            "mtime": {"st_mtime_ns": current.st_mtime_ns + 1},
+        }
+        for name, mutation in mutations.items():
+            with self.subTest(name=name), mock.patch.object(
+                sealed_snapshot_module,
+                "_require_safe_regular",
+                side_effect=(observed(), observed(**mutation)),
+            ), mock.patch.object(
+                sealed_snapshot_module, "_windows_assert_no_named_streams"
+            ), self.assertRaises(SealedSnapshotError) as captured:
+                sealed_snapshot_module._read_stable_file(path, len(payload))
+            self.assertEqual("snapshot_changed", captured.exception.code)
+
+    @unittest.skipIf(os.name == "nt", "POSIX retains reliable change time")
+    def test_posix_path_identity_retains_ctime(self) -> None:
+        first = SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_size=3,
+            st_mtime_ns=4,
+            st_ctime_ns=5,
+        )
+        second = SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_size=3,
+            st_mtime_ns=4,
+            st_ctime_ns=6,
+        )
+        self.assertNotEqual(
+            sealed_snapshot_module._stable_path_identity(first),
+            sealed_snapshot_module._stable_path_identity(second),
+        )
+
+    def test_open_handle_identity_still_rejects_ctime_drift(self) -> None:
+        path = self.root / "handle-ctime-drift.bin"
+        payload = b"stable snapshot bytes"
+        path.write_bytes(payload)
+        current = os.lstat(path)
+
+        def observed(ctime: int) -> SimpleNamespace:
+            return SimpleNamespace(
+                st_mode=current.st_mode,
+                st_dev=current.st_dev,
+                st_ino=current.st_ino,
+                st_size=current.st_size,
+                st_nlink=current.st_nlink,
+                st_mtime_ns=current.st_mtime_ns,
+                st_ctime_ns=ctime,
+                st_file_attributes=getattr(current, "st_file_attributes", 0),
+            )
+
+        before = observed(current.st_ctime_ns)
+        after = observed(current.st_ctime_ns + 1)
+        with mock.patch.object(
+            sealed_snapshot_module.os,
+            "fstat",
+            side_effect=(before, after),
+        ), self.assertRaises(SealedSnapshotError) as captured:
+            sealed_snapshot_module._read_stable_file(path, len(payload))
+        self.assertEqual("snapshot_changed", captured.exception.code)
 
     @unittest.skipUnless(os.name == "nt", "Windows extended-length path contract")
     def test_prepare_and_verify_long_tree_without_host_long_path_policy(self) -> None:

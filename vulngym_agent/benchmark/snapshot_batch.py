@@ -90,6 +90,7 @@ SNAPSHOT_BATCH_TASK_RECORDS_DOMAIN: Final[bytes] = (
 )
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _SHA1_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
+_DIAGNOSTIC_CODE_RE: Final[re.Pattern[str]] = re.compile(r"[a-z0-9_]{1,128}\Z")
 _KEY_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
 )
@@ -127,12 +128,22 @@ class SnapshotBatchError(RuntimeError):
         *,
         exit_status: int,
         committed: bool = False,
+        diagnostic_code: str | None = None,
     ) -> None:
         if exit_status not in {2, 3, 4, 5}:
             raise ValueError("exit_status must be one of 2, 3, 4, or 5")
+        if (
+            diagnostic_code is not None
+            and (
+                type(diagnostic_code) is not str
+                or _DIAGNOSTIC_CODE_RE.fullmatch(diagnostic_code) is None
+            )
+        ):
+            raise ValueError("diagnostic_code must be a bounded lowercase token")
         self.code = code
         self.exit_status = exit_status
         self.committed = bool(committed)
+        self.diagnostic_code = diagnostic_code
         super().__init__(message)
 
 
@@ -2620,6 +2631,26 @@ def _snapshot_node_count(files: Sequence[Any]) -> int:
     return len(files) + len(directories)
 
 
+def _verification_diagnostic_code(
+    stage: str,
+    task_ordinal: int,
+    error: BaseException,
+) -> str:
+    """Return bounded, path-free context for a failed verification pass."""
+
+    inner_code = getattr(error, "code", None)
+    if (
+        type(inner_code) is not str
+        or len(inner_code) > 80
+        or _DIAGNOSTIC_CODE_RE.fullmatch(inner_code) is None
+    ):
+        inner_code = "value_error" if isinstance(error, ValueError) else "inner_error"
+    diagnostic_code = f"{stage}_task_{task_ordinal:03d}_{inner_code}"
+    if _DIAGNOSTIC_CODE_RE.fullmatch(diagnostic_code) is None:
+        return f"{stage}_task_{task_ordinal:03d}_inner_error"
+    return diagnostic_code
+
+
 def _materialized_batch_digest(
     bundles: Path,
     verified_snapshots: Sequence[Any],
@@ -2857,7 +2888,7 @@ def prepare_snapshot_batch(
         aggregate_nodes = 0
         aggregate_bytes = 0
         first_verified: list[Any] = []
-        for task in task_export.tasks:
+        for task_ordinal, task in enumerate(task_export.tasks, start=1):
             try:
                 verified = verify_sealed_snapshot(
                     bundles / task.task_id,
@@ -2873,6 +2904,9 @@ def prepare_snapshot_batch(
                     "transaction_verification_failed",
                     "a prepared task failed verification before batch binding",
                     exit_status=5,
+                    diagnostic_code=_verification_diagnostic_code(
+                        "pass1", task_ordinal, error
+                    ),
                 ) from error
             aggregate_files += verified.file_count
             verified_node_count = _snapshot_node_count(verified.files)
@@ -2957,7 +2991,7 @@ def prepare_snapshot_batch(
         )
         _fixed_names(bundles, {task.task_id for task in task_results}, status=5)
         second_verified: list[Any] = []
-        for task in task_results:
+        for task_ordinal, task in enumerate(task_results, start=1):
             try:
                 verified = verify_sealed_snapshot(
                     bundles / task.task_id,
@@ -2973,6 +3007,9 @@ def prepare_snapshot_batch(
                     "transaction_verification_failed",
                     "a staged task changed before batch publication",
                     exit_status=5,
+                    diagnostic_code=_verification_diagnostic_code(
+                        "pass2", task_ordinal, error
+                    ),
                 ) from error
             if (
                 verified.manifest_sha256 != task.snapshot_manifest_sha256
@@ -2991,6 +3028,7 @@ def prepare_snapshot_batch(
                     "transaction_verification_failed",
                     "a staged task no longer matches its batch record",
                     exit_status=5,
+                    diagnostic_code=f"record_match_task_{task_ordinal:03d}",
                 )
             second_verified.append(verified)
         final_materialized = _materialized_batch_digest(
@@ -3001,6 +3039,7 @@ def prepare_snapshot_batch(
                 "transaction_verification_failed",
                 "batch materialized state changed across full verification passes",
                 exit_status=5,
+                diagnostic_code="materialized_match",
             )
         if not _cleanup_layout_is_exact(
             staging.staging,

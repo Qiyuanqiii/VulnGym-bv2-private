@@ -517,6 +517,27 @@ def _identity(result: os.stat_result) -> tuple[int, int, int, int | None, int | 
     )
 
 
+def _stable_path_identity(
+    result: os.stat_result,
+) -> tuple[int, ...]:
+    """Return identity stable across separate NTFS path observations.
+
+    NTFS can advance change-time metadata when a newly created file is first
+    opened.  Device, file ID, size, and last-write time remain stable across
+    pathname observations.  An already-open handle is still checked with the
+    full identity, including change time, before and after every read.
+    """
+
+    if os.name != "nt":
+        return _identity(result)
+    return (
+        result.st_dev,
+        result.st_ino,
+        result.st_size,
+        getattr(result, "st_mtime_ns", None),
+    )
+
+
 def _directory_identity(result: os.stat_result) -> tuple[int, int]:
     return (result.st_dev, result.st_ino)
 
@@ -1950,7 +1971,9 @@ def _policy_matches_exactly(value: object, policy: SnapshotPolicy) -> bool:
     return True
 
 
-def _read_stable_file(path: Path, maximum: int) -> tuple[bytes, tuple[int, int, int, int | None, int | None]]:
+def _read_stable_file(
+    path: Path, maximum: int
+) -> tuple[bytes, tuple[int, ...]]:
     before = _require_safe_regular(path)
     _windows_assert_no_named_streams(path)
     if before.st_size > maximum:
@@ -2002,11 +2025,11 @@ def _read_stable_file(path: Path, maximum: int) -> tuple[bytes, tuple[int, int, 
         os.close(descriptor)
     after = _require_safe_regular(path)
     _windows_assert_no_named_streams(path)
-    if _identity(before) != _identity(after):
+    if _stable_path_identity(before) != _stable_path_identity(after):
         raise SealedSnapshotError(
             "snapshot_changed", "snapshot file identity changed while reading"
         )
-    return data, _identity(after)
+    return data, _stable_path_identity(after)
 
 
 def _fixed_snapshot_layout(root: Path) -> tuple[Path, Path]:
@@ -2231,10 +2254,10 @@ def _scan_tree(
     expected_files: frozenset[str],
     expected_directories: frozenset[str],
 ) -> tuple[
-    dict[str, tuple[int, int, int, int | None, int | None]],
+    dict[str, tuple[int, ...]],
     dict[str, tuple[int, int, int, int | None, int | None]],
 ]:
-    files: dict[str, tuple[int, int, int, int | None, int | None]] = {}
+    files: dict[str, tuple[int, ...]] = {}
     directories: dict[str, tuple[int, int, int, int | None, int | None]] = {}
     collision_keys: set[str] = set()
     total_bytes = 0
@@ -2316,7 +2339,7 @@ def _scan_tree(
                             "snapshot_limit_exceeded",
                             "snapshot tree exceeds its byte budget",
                         )
-                    files[relative] = _identity(item)
+                    files[relative] = _stable_path_identity(item)
         except SealedSnapshotError:
             raise
         except OSError as error:
@@ -2467,9 +2490,9 @@ def verify_sealed_snapshot(
         _directory_identity(_require_safe_directory(root)) != root_identity
         or _directory_identity(_require_safe_directory(tree)) != tree_identity
         or _directory_identity(_require_safe_directory(control)) != control_identity
-        or _identity(_require_safe_regular(control / "manifest.jsonl"))
+        or _stable_path_identity(_require_safe_regular(control / "manifest.jsonl"))
         != manifest_identity
-        or _identity(_require_safe_regular(control / "attestation.json"))
+        or _stable_path_identity(_require_safe_regular(control / "attestation.json"))
         != attestation_identity
     ):
         raise SealedSnapshotError(

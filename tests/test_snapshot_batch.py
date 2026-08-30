@@ -881,6 +881,43 @@ class SnapshotBatchTests(unittest.TestCase):
         ), self.assertRaises(SnapshotBatchError):
             self._verify("cross-window-verify", prepared.manifest_sha256)
 
+    def test_prepare_failure_reports_path_free_pass_and_task_ordinal(self) -> None:
+        real_verify = snapshot_batch.verify_sealed_snapshot
+        cases = (
+            (1, "pass1_task_001_snapshot_unavailable"),
+            (2, "pass1_task_002_snapshot_unavailable"),
+            (3, "pass2_task_001_snapshot_unavailable"),
+            (4, "pass2_task_002_snapshot_unavailable"),
+        )
+        for failure_call, diagnostic_code in cases:
+            calls = 0
+
+            def fail_selected_verification(*args: object, **kwargs: object):
+                nonlocal calls
+                calls += 1
+                if calls == failure_call:
+                    raise SealedSnapshotError(
+                        "snapshot_unavailable", "injected path-free failure"
+                    )
+                return real_verify(*args, **kwargs)
+
+            output_name = f"diagnostic-{failure_call}"
+            with self.subTest(failure_call=failure_call), mock.patch.object(
+                snapshot_batch,
+                "verify_sealed_snapshot",
+                side_effect=fail_selected_verification,
+            ), self.assertRaises(SnapshotBatchError) as captured:
+                self._prepare(output_name)
+            self.assertEqual(
+                "transaction_verification_failed", captured.exception.code
+            )
+            self.assertEqual(
+                diagnostic_code, captured.exception.diagnostic_code
+            )
+            self.assertNotIn(TASK_ONE, diagnostic_code)
+            self.assertNotIn(TASK_TWO, diagnostic_code)
+            self.assertFalse((self.root / output_name).exists())
+
     @unittest.skipUnless(os.name == "nt", "Windows device-path alias contract")
     def test_windows_subst_drive_is_canonicalized_by_object_identity(self) -> None:
         drive = next(
