@@ -32,8 +32,10 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     SealedSnapshotGitlink,
     SnapshotPolicy,
     VerifiedSealedSnapshot,
+    _reject_windows_device_path,
     _scan_tree,
     _windows_assert_no_named_streams,
+    _windows_extended_path,
     verify_sealed_snapshot,
 )
 from vulngym_agent.benchmark.worker_handoff import WorkerHandoffError, WorkerHandoffV2
@@ -308,7 +310,7 @@ def _is_reparse(result: os.stat_result) -> bool:
 
 def _safe_directory(path: Path) -> tuple[os.stat_result, _DirectoryIdentity]:
     try:
-        result = os.lstat(path)
+        result = os.lstat(_windows_extended_path(path))
     except OSError:
         raise SealedTreeAccessError(
             "source_changed", "a trusted source directory is unavailable"
@@ -336,7 +338,7 @@ def _file_identity(result: os.stat_result) -> _FileIdentity:
 
 def _safe_regular(path: Path) -> tuple[os.stat_result, _FileIdentity]:
     try:
-        result = os.lstat(path)
+        result = os.lstat(_windows_extended_path(path))
     except OSError:
         raise SealedTreeAccessError(
             "source_changed", "a trusted source file is unavailable"
@@ -534,7 +536,7 @@ def _windows_open_source_handle(path: Path, *, read_data: bool) -> tuple[int, st
     create_file.restype = wintypes.HANDLE
     desired_access = 0x0080 | (0x80000000 if read_data else 0)
     handle = create_file(
-        str(path),
+        str(_windows_extended_path(path)),
         desired_access,
         0x00000001 | 0x00000002 | 0x00000004,
         None,
@@ -1456,6 +1458,9 @@ def bind_sealed_tree(
             "invalid_argument", "attestation material must be contiguous bytes"
         ) from None
     try:
+        _reject_windows_device_path(
+            snapshot_root, code="unsafe_snapshot_path"
+        )
         root = Path(os.path.abspath(os.fspath(snapshot_root)))
         verified = verify_sealed_snapshot(
             root,
@@ -1575,8 +1580,9 @@ def bind_worker_tree(
             "invalid_binding", "worker handoff does not match the requested task"
         )
     try:
+        _reject_windows_device_path(tree_root, code="unsafe_snapshot_path")
         root = Path(os.path.abspath(os.fspath(tree_root)))
-    except (OSError, TypeError, ValueError):
+    except (OSError, SealedSnapshotError, TypeError, ValueError):
         raise SealedTreeAccessError(
             "invalid_argument", "worker tree root is invalid"
         ) from None

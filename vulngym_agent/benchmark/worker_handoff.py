@@ -32,6 +32,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     SnapshotPolicy,
     _manifest_bytes,
     _parse_manifest,
+    _reject_windows_device_path,
     verify_sealed_snapshot,
 )
 
@@ -640,6 +641,9 @@ def build_worker_handoff(
     canonical_task = _canonical_task(task)
     canonical_policy = _canonical_policy(policy)
     try:
+        _reject_windows_device_path(
+            snapshot_root, code="unsafe_snapshot_path"
+        )
         root = Path(os.path.abspath(os.fspath(snapshot_root)))
         verified = verify_sealed_snapshot(
             root,

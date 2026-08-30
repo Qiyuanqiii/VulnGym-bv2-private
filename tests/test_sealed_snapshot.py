@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -95,6 +96,27 @@ class SealedSnapshotTests(unittest.TestCase):
         tree = self._hash_object(tree_data, object_type="tree")
         return self._git("commit-tree", tree, "-m", "crafted tree").stdout.strip()
 
+    def _nested_blob_commit(
+        self, components: tuple[str, ...], payload: bytes
+    ) -> str:
+        blob = self._hash_object(payload)
+        tree = self._hash_object(
+            b"100644 "
+            + components[-1].encode("utf-8")
+            + b"\0"
+            + bytes.fromhex(blob),
+            object_type="tree",
+        )
+        for component in reversed(components[:-1]):
+            tree = self._hash_object(
+                b"40000 "
+                + component.encode("utf-8")
+                + b"\0"
+                + bytes.fromhex(tree),
+                object_type="tree",
+            )
+        return self._git("commit-tree", tree, "-m", "nested tree").stdout.strip()
+
     def _commit_git_symlinks(
         self, entries: tuple[tuple[str, bytes], ...], *, message: str
     ) -> str:
@@ -159,6 +181,212 @@ class SealedSnapshotTests(unittest.TestCase):
         self.assertEqual(prepared.agent_tree, verified.agent_tree)
         with self.assertRaises(FrozenInstanceError):
             verified.file_count = 0  # type: ignore[misc]
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended-length path contract")
+    def test_prepare_and_verify_long_tree_without_host_long_path_policy(self) -> None:
+        components = tuple(
+            f"level{index}-" + (chr(ord("a") + index) * 44)
+            for index in range(6)
+        ) + ("payload-" + ("z" * 44) + ".bin",)
+        relative = "/".join(components)
+        commit = self._nested_blob_commit(components, b"long-path-bytes")
+        prepared = self._prepare("long-path-snapshot", commit=commit)
+        try:
+            self.assertGreater(
+                len(str(prepared.agent_tree.joinpath(*components))), 260
+            )
+            self.assertFalse(str(prepared.snapshot_root).startswith("\\\\?\\"))
+            self.assertEqual((relative,), tuple(item.path for item in prepared.files))
+            first = self._verify(
+                "long-path-snapshot", expected_commit=commit
+            )
+            second = self._verify(
+                "long-path-snapshot", expected_commit=commit
+            )
+            self.assertEqual(prepared.content_root, first.content_root)
+            self.assertEqual(first, second)
+            self.assertFalse(str(first.snapshot_root).startswith("\\\\?\\"))
+        finally:
+            shutil.rmtree(
+                sealed_snapshot_module._windows_extended_path(
+                    prepared.snapshot_root, force=True
+                )
+            )
+        with mock.patch.object(
+            sealed_snapshot_module,
+            "_manifest_bytes",
+            side_effect=SealedSnapshotError(
+                "snapshot_preparation_failed", "injected after tree materialization"
+            ),
+        ):
+            with self.assertRaises(SealedSnapshotError):
+                self._prepare("long-path-rollback", commit=commit)
+        self.assertFalse((self.root / "long-path-rollback").exists())
+        self.assertEqual([], list(self.root.glob(".long-path-rollback.*.staging")))
+
+    @unittest.skipUnless(os.name == "nt", "Windows UTF-16 path length contract")
+    def test_windows_long_path_threshold_counts_utf16_code_units(self) -> None:
+        components = (("😀" * 50), ("🚀" * 50), "payload.bin")
+        commit = self._nested_blob_commit(components, b"astral-path-bytes")
+        output_name = "astral-😀😀-path-snapshot"
+        prepared = self._prepare(output_name, commit=commit)
+        try:
+            materialized = prepared.agent_tree.joinpath(*components)
+            text = str(materialized)
+            self.assertLess(len(text), 260)
+            self.assertGreater(len(text.encode("utf-16-le")) // 2, 260)
+            self.assertTrue(
+                str(
+                    sealed_snapshot_module._windows_extended_path(
+                        materialized
+                    )
+                ).startswith("\\\\?\\")
+            )
+            verified = self._verify(
+                output_name, expected_commit=commit
+            )
+            self.assertEqual(prepared.content_root, verified.content_root)
+            self.assertFalse(str(verified.snapshot_root).startswith("\\\\?\\"))
+        finally:
+            shutil.rmtree(
+                sealed_snapshot_module._windows_extended_path(
+                    prepared.snapshot_root, force=True
+                )
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Windows device-name contract")
+    def test_extended_io_path_never_upgrades_unsafe_dos_names(self) -> None:
+        parent = self.root / ("p" * 120) / ("q" * 120)
+        safe = parent / "source.py"
+        self.assertTrue(
+            str(
+                sealed_snapshot_module._windows_extended_path(
+                    safe, force=True
+                )
+            ).startswith("\\\\?\\")
+        )
+        for name in ("CON", "con.txt", "name.", "name ", "file:stream"):
+            logical = parent / name
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    sealed_snapshot_module._windows_extended_path(
+                        logical, force=True
+                    )
+        with self.assertRaises(ValueError):
+            sealed_snapshot_module._windows_extended_path(
+                Path("\\\\?\\" + str(safe)), force=True
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Windows long output transaction")
+    def test_long_output_root_preserves_publish_and_cleanup_contracts(self) -> None:
+        first_component = self.root / ("p" * 120)
+        parent = first_component / ("q" * 120)
+        sealed_snapshot_module._windows_extended_path(
+            parent, force=True
+        ).mkdir(parents=True)
+        output = parent / "sealed"
+        failed_output = parent / "failed"
+        try:
+            self.assertGreater(len(str(output).encode("utf-16-le")) // 2, 260)
+            for unsafe_name in (
+                "CON",
+                "CON .txt",
+                "name.",
+                "name ",
+                "file:stream",
+            ):
+                with self.subTest(unsafe_name=unsafe_name):
+                    with self.assertRaises(
+                        SealedSnapshotError
+                    ) as captured:
+                        prepare_sealed_snapshot(
+                            self.repository,
+                            task_id=TASK_ID,
+                            repo_url=REPO_URL,
+                            commit=self.commit,
+                            output_dir=parent / unsafe_name,
+                            attestation_key=KEY,
+                            key_id=KEY_ID,
+                        )
+                    self.assertEqual(
+                        "unsafe_output", captured.exception.code
+                    )
+            self.assertEqual(
+                set(),
+                {
+                    entry.name
+                    for entry in os.scandir(
+                        sealed_snapshot_module._windows_extended_path(
+                            parent, force=True
+                        )
+                    )
+                },
+            )
+            prepared = prepare_sealed_snapshot(
+                self.repository,
+                task_id=TASK_ID,
+                repo_url=REPO_URL,
+                commit=self.commit,
+                output_dir=output,
+                attestation_key=KEY,
+                key_id=KEY_ID,
+            )
+            self.assertEqual(output, prepared.snapshot_root)
+            verified = verify_sealed_snapshot(
+                output,
+                expected_task_id=TASK_ID,
+                expected_repo_url=REPO_URL,
+                expected_commit=self.commit,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+            )
+            self.assertEqual(prepared.content_root, verified.content_root)
+            with self.assertRaises(SealedSnapshotError) as captured:
+                prepare_sealed_snapshot(
+                    self.repository,
+                    task_id=TASK_ID,
+                    repo_url=REPO_URL,
+                    commit=self.commit,
+                    output_dir=output,
+                    attestation_key=KEY,
+                    key_id=KEY_ID,
+                )
+            self.assertEqual("output_exists", captured.exception.code)
+            with mock.patch.object(
+                sealed_snapshot_module,
+                "_manifest_bytes",
+                side_effect=SealedSnapshotError(
+                    "snapshot_preparation_failed", "injected before publication"
+                ),
+            ):
+                with self.assertRaises(SealedSnapshotError):
+                    prepare_sealed_snapshot(
+                        self.repository,
+                        task_id=TASK_ID,
+                        repo_url=REPO_URL,
+                        commit=self.commit,
+                        output_dir=failed_output,
+                        attestation_key=KEY,
+                        key_id=KEY_ID,
+                    )
+            names = {
+                entry.name
+                for entry in os.scandir(
+                    sealed_snapshot_module._windows_extended_path(
+                        parent, force=True
+                    )
+                )
+            }
+            self.assertNotIn("failed", names)
+            self.assertFalse(
+                any(name.startswith(".failed.") for name in names)
+            )
+        finally:
+            shutil.rmtree(
+                sealed_snapshot_module._windows_extended_path(
+                    first_component, force=True
+                )
+            )
 
     def test_manifest_and_attestation_are_deterministic(self) -> None:
         first = self._prepare("first")
@@ -666,10 +894,19 @@ class SealedSnapshotTests(unittest.TestCase):
         with self.assertRaises(SealedSnapshotError):
             self._prepare("non-nfc", commit=decomposed_commit)
 
-        reserved_tree = b"100644 CON.txt\0" + bytes.fromhex(blob)
-        reserved_commit = self._raw_commit(reserved_tree)
-        with self.assertRaises(SealedSnapshotError):
-            self._prepare("reserved", commit=reserved_commit)
+        for index, reserved_name in enumerate((b"CON.txt", b"CON .txt")):
+            with self.subTest(reserved_name=reserved_name):
+                reserved_tree = (
+                    b"100644 " + reserved_name + b"\0" + bytes.fromhex(blob)
+                )
+                reserved_commit = self._raw_commit(reserved_tree)
+                with self.assertRaises(SealedSnapshotError) as captured:
+                    self._prepare(
+                        f"reserved-{index}", commit=reserved_commit
+                    )
+                self.assertEqual(
+                    "unsafe_source_path", captured.exception.code
+                )
 
         first = b"100644 README\0" + bytes.fromhex(blob)
         second = b"100644 Readme\0" + bytes.fromhex(blob)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -129,6 +131,40 @@ class WorkerHandoffTests(unittest.TestCase):
             text=True,
         )
 
+    def _hash_object(self, payload: bytes, *, object_type: str) -> str:
+        result = subprocess.run(
+            ["git", "hash-object", "-w", "-t", object_type, "--stdin"],
+            cwd=self.repository,
+            input=payload,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.stdout.decode("ascii").strip()
+
+    def _nested_blob_commit(
+        self, components: tuple[str, ...], payload: bytes
+    ) -> str:
+        blob = self._hash_object(payload, object_type="blob")
+        tree = self._hash_object(
+            b"100644 "
+            + components[-1].encode("ascii")
+            + b"\0"
+            + bytes.fromhex(blob),
+            object_type="tree",
+        )
+        for component in reversed(components[:-1]):
+            tree = self._hash_object(
+                b"40000 "
+                + component.encode("ascii")
+                + b"\0"
+                + bytes.fromhex(tree),
+                object_type="tree",
+            )
+        return self._git(
+            "commit-tree", tree, "-m", "nested worker tree"
+        ).stdout.strip()
+
     def _bind(self):
         return bind_worker_tree(
             self.task,
@@ -201,6 +237,19 @@ class WorkerHandoffTests(unittest.TestCase):
         self.assertIs(benchmark_api.bind_worker_tree, bind_worker_tree)
         self.assertIn("build_worker_handoff", benchmark_api.__all__)
         self.assertEqual(len(benchmark_api.__all__), len(set(benchmark_api.__all__)))
+
+    @unittest.skipUnless(os.name == "nt", "Windows device-path alias contract")
+    def test_worker_tree_rejects_caller_supplied_device_path(self) -> None:
+        aliased = Path("\\\\?\\" + str(self.snapshot_root / "tree"))
+        with self.assertRaises(SealedTreeAccessError) as captured:
+            bind_worker_tree(
+                self.task,
+                aliased,
+                self.handoff.to_bytes(),
+                expected_handoff_sha256=self.handoff.handoff_sha256,
+                expected_handoff_wire_sha256=self.handoff.wire_sha256,
+            )
+        self.assertEqual("invalid_argument", captured.exception.code)
 
     def test_constructor_detaches_task_and_recomputes_original_manifest(self) -> None:
         original_task = self.task
@@ -470,6 +519,37 @@ class WorkerHandoffTests(unittest.TestCase):
                 expected_key_id=KEY_ID,
             )
 
+    @unittest.skipUnless(os.name == "nt", "Windows path-alias contract")
+    def test_builder_rejects_raw_alias_before_snapshot_verification(self) -> None:
+        aliases = (
+            Path(str(self.snapshot_root) + "."),
+            Path(str(self.snapshot_root) + " "),
+            Path("\\\\?\\" + str(self.snapshot_root)),
+        )
+        with mock.patch.object(
+            worker_handoff_module,
+            "verify_sealed_snapshot",
+            side_effect=AssertionError(
+                "raw aliases must be rejected before verification"
+            ),
+        ) as verifier:
+            for alias in aliases:
+                with self.subTest(alias=alias):
+                    with self.assertRaises(
+                        WorkerHandoffError
+                    ) as captured:
+                        build_worker_handoff(
+                            self.task,
+                            alias,
+                            attestation_key=KEY,
+                            expected_key_id=KEY_ID,
+                        )
+                    self.assertEqual(
+                        "snapshot_verification_failed",
+                        captured.exception.code,
+                    )
+        verifier.assert_not_called()
+
     def test_mounted_binder_reads_and_finalizes_without_control_or_key(self) -> None:
         tree = self._bind()
         inventory = tree.inventory()
@@ -484,6 +564,66 @@ class WorkerHandoffTests(unittest.TestCase):
         self.assertTrue(ledger.verification_succeeded)
         self.assertEqual(ledger.read_calls, 1)
         self.assertEqual(ledger.reads[0].sha256, hashlib.sha256(SOURCE).hexdigest())
+
+    @unittest.skipUnless(os.name == "nt", "Windows long worker handoff")
+    def test_worker_handoff_reads_and_finalizes_long_tree(self) -> None:
+        components = tuple(
+            f"level{index}-" + (chr(ord("a") + index) * 44)
+            for index in range(6)
+        ) + ("payload-" + ("z" * 44) + ".bin",)
+        relative = "/".join(components)
+        payload = b"long-worker-handoff-bytes"
+        commit = self._nested_blob_commit(components, payload)
+        snapshot_root = self.root / "sealed-long-worker"
+        prepared = prepare_sealed_snapshot(
+            GitRepository(self.repository),
+            task_id=TASK_ID,
+            repo_url=REPO_URL,
+            commit=commit,
+            output_dir=snapshot_root,
+            attestation_key=KEY,
+            key_id=KEY_ID,
+        )
+        try:
+            self.assertGreater(
+                len(str(prepared.agent_tree.joinpath(*components))), 260
+            )
+            task = DiscoveryTaskInputV1(
+                task_id=TASK_ID,
+                repo_url=REPO_URL,
+                commit=commit,
+                instruction_id=INSTRUCTION_ID,
+                snapshot_manifest_sha256=prepared.manifest_sha256,
+                snapshot_content_root=prepared.content_root,
+            )
+            handoff = build_worker_handoff(
+                task,
+                snapshot_root,
+                attestation_key=KEY,
+                expected_key_id=KEY_ID,
+            )
+            tree = bind_worker_tree(
+                task,
+                prepared.agent_tree,
+                handoff.to_bytes(),
+                expected_handoff_sha256=handoff.handoff_sha256,
+                expected_handoff_wire_sha256=handoff.wire_sha256,
+            )
+            self.assertIn(relative, tuple(item.path for item in tree.inventory()))
+            self.assertEqual(
+                payload,
+                tree.read_bytes(relative, maximum_bytes=len(payload)),
+            )
+            ledger = tree.finalize()
+            self.assertTrue(ledger.finalized)
+            self.assertTrue(ledger.verification_succeeded)
+            self.assertEqual(1, ledger.read_calls)
+        finally:
+            shutil.rmtree(
+                sealed_tree_access_module._windows_extended_path(
+                    snapshot_root, force=True
+                )
+            )
 
     def test_handoff_and_worker_preserve_git_symlink_mode_but_read_plain_bytes(self) -> None:
         record = next(

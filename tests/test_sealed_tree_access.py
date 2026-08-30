@@ -4,6 +4,7 @@ from dataclasses import FrozenInstanceError
 import os
 from pathlib import Path
 import pickle
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -107,6 +108,38 @@ class SealedTreeAccessTests(unittest.TestCase):
             text=True,
         )
 
+    def _hash_object(self, payload: bytes, *, object_type: str) -> str:
+        result = subprocess.run(
+            ["git", "hash-object", "-w", "-t", object_type, "--stdin"],
+            cwd=self.repo_path,
+            input=payload,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.stdout.decode("ascii").strip()
+
+    def _nested_blob_commit(
+        self, components: tuple[str, ...], payload: bytes
+    ) -> str:
+        blob = self._hash_object(payload, object_type="blob")
+        tree = self._hash_object(
+            b"100644 "
+            + components[-1].encode("ascii")
+            + b"\0"
+            + bytes.fromhex(blob),
+            object_type="tree",
+        )
+        for component in reversed(components[:-1]):
+            tree = self._hash_object(
+                b"40000 "
+                + component.encode("ascii")
+                + b"\0"
+                + bytes.fromhex(tree),
+                object_type="tree",
+            )
+        return self._git("commit-tree", tree, "-m", "nested tree").stdout.strip()
+
     def _bind(
         self, *, limits: SealedTreeAccessLimits | None = None
     ) -> BoundSealedTree:
@@ -147,6 +180,56 @@ class SealedTreeAccessTests(unittest.TestCase):
         self.assertEqual(self.prepared.manifest_sha256, bound.manifest_sha256)
         self.assertEqual(self.prepared.content_root, bound.content_root)
         bound.finalize()
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended-length path contract")
+    def test_bound_tree_reads_and_reverifies_long_manifest_member(self) -> None:
+        components = tuple(
+            f"level{index}-" + (chr(ord("a") + index) * 44)
+            for index in range(6)
+        ) + ("payload-" + ("z" * 44) + ".bin",)
+        relative = "/".join(components)
+        payload = b"sealed-tree-long-path"
+        commit = self._nested_blob_commit(components, payload)
+        snapshot_root = self.root / "sealed-long-path"
+        prepared = prepare_sealed_snapshot(
+            GitRepository(self.repo_path),
+            task_id=TASK_ID,
+            repo_url=REPO_URL,
+            commit=commit,
+            output_dir=snapshot_root,
+            attestation_key=KEY,
+            key_id=KEY_ID,
+        )
+        task = DiscoveryTaskInputV1(
+            task_id=TASK_ID,
+            repo_url=REPO_URL,
+            commit=commit,
+            instruction_id=INSTRUCTION_ID,
+            snapshot_manifest_sha256=prepared.manifest_sha256,
+            snapshot_content_root=prepared.content_root,
+        )
+        bound = bind_sealed_tree(
+            task,
+            snapshot_root,
+            attestation_key=KEY,
+            expected_key_id=KEY_ID,
+        )
+        try:
+            self.assertGreater(
+                len(str(snapshot_root.joinpath("tree", *components))), 260
+            )
+            self.assertEqual(payload, bound.read_bytes(relative, maximum_bytes=len(payload)))
+            usage = bound.finalize()
+            self.assertTrue(usage.finalized)
+            self.assertTrue(usage.verification_succeeded)
+        finally:
+            if not bound.usage_snapshot().finalized:
+                bound._abort()
+            shutil.rmtree(
+                access_module._windows_extended_path(
+                    snapshot_root, force=True
+                )
+            )
 
     def test_manifest_or_content_binding_mismatch_fails_closed(self) -> None:
         for field in ("snapshot_manifest_sha256", "snapshot_content_root"):
@@ -432,6 +515,37 @@ class SealedTreeAccessTests(unittest.TestCase):
         message = str(captured.exception)
         self.assertNotIn(str(self.root), message)
         self.assertNotIn(OTHER_KEY.decode("ascii"), message)
+
+    @unittest.skipUnless(os.name == "nt", "Windows path-alias contract")
+    def test_factory_rejects_raw_alias_before_snapshot_verification(self) -> None:
+        aliases = (
+            Path(str(self.snapshot_root) + "."),
+            Path(str(self.snapshot_root) + " "),
+            Path("\\\\?\\" + str(self.snapshot_root)),
+        )
+        with mock.patch.object(
+            access_module,
+            "verify_sealed_snapshot",
+            side_effect=AssertionError(
+                "raw aliases must be rejected before verification"
+            ),
+        ) as verifier:
+            for alias in aliases:
+                with self.subTest(alias=alias):
+                    with self.assertRaises(
+                        SealedTreeAccessError
+                    ) as captured:
+                        bind_sealed_tree(
+                            self.task,
+                            alias,
+                            attestation_key=KEY,
+                            expected_key_id=KEY_ID,
+                        )
+                    self.assertEqual(
+                        "snapshot_verification_failed",
+                        captured.exception.code,
+                    )
+        verifier.assert_not_called()
 
     @unittest.skipIf(os.name == "nt", "POSIX descriptor-relative regression")
     def test_posix_ancestor_swap_cannot_redirect_the_pinned_tree_read(self) -> None:

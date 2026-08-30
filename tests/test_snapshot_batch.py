@@ -8,6 +8,7 @@ from io import StringIO
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -114,6 +115,38 @@ class SnapshotBatchTests(unittest.TestCase):
             stderr=subprocess.PIPE,
         )
 
+    def _hash_object(self, payload: bytes, *, object_type: str) -> str:
+        result = subprocess.run(
+            ["git", "hash-object", "-w", "-t", object_type, "--stdin"],
+            cwd=self.repo,
+            input=payload,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return result.stdout.decode("ascii").strip()
+
+    def _nested_blob_commit(
+        self, components: tuple[str, ...], payload: bytes
+    ) -> str:
+        blob = self._hash_object(payload, object_type="blob")
+        tree = self._hash_object(
+            b"100644 "
+            + components[-1].encode("ascii")
+            + b"\0"
+            + bytes.fromhex(blob),
+            object_type="tree",
+        )
+        for component in reversed(components[:-1]):
+            tree = self._hash_object(
+                b"40000 "
+                + component.encode("ascii")
+                + b"\0"
+                + bytes.fromhex(tree),
+                object_type="tree",
+            )
+        return self._git("commit-tree", tree, "-m", "nested tree").stdout.strip()
+
     def _write_export(self, tasks: tuple[SnapshotTaskSpec, ...]) -> str:
         self.export_dir.mkdir(exist_ok=True)
         payload = b"".join(_canonical(task.to_dict()) + b"\n" for task in tasks)
@@ -168,17 +201,22 @@ class SnapshotBatchTests(unittest.TestCase):
         ):
             return prepare_snapshot_batch(self.export_dir, **arguments)
 
-    def _verify(self, name: str, manifest_sha256: str, **overrides: object):
+    def _verify(
+        self, name: str | Path, manifest_sha256: str, **overrides: object
+    ):
         arguments: dict[str, object] = {
             "expected_manifest_sha256": manifest_sha256,
             "attestation_key": KEY,
             "expected_key_id": KEY_ID,
         }
         arguments.update(overrides)
+        batch_root = Path(name)
+        if not batch_root.is_absolute():
+            batch_root = self.root / batch_root
         with mock.patch.object(
             snapshot_batch, "_OFFICIAL_SPLIT_COUNTS", {"train": 2, "test": 1}
         ):
-            return verify_snapshot_batch(self.root / name, **arguments)
+            return verify_snapshot_batch(batch_root, **arguments)
 
     def test_prepare_and_verify_two_tasks_with_fresh_repository_gates(self) -> None:
         real_repository = GitRepository
@@ -207,6 +245,111 @@ class SnapshotBatchTests(unittest.TestCase):
         self.assertEqual(prepared.to_dict(), verified.to_dict())
         self.assertEqual(prepared.tasks, verified.tasks)
         self.assertNotIn(str(self.repo), json.dumps(prepared.to_dict()))
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended-length path contract")
+    def test_batch_prepare_and_repeated_verify_support_long_tree(self) -> None:
+        components = tuple(
+            f"level{index}-" + (chr(ord("a") + index) * 44)
+            for index in range(6)
+        ) + ("payload-" + ("z" * 44) + ".bin",)
+        commit = self._nested_blob_commit(components, b"batch-long-path")
+        self.tasks = (
+            self.tasks[0],
+            SnapshotTaskSpec(
+                task_id=TASK_TWO,
+                repo_url=REPO_URL,
+                commit=commit,
+                split="train",
+            ),
+        )
+        self.tasks_sha256 = self._write_export(self.tasks)
+        self.source_map_sha256 = self._write_source_map(
+            [
+                {
+                    "commit": task.commit,
+                    "repo_root": str(self.repo),
+                    "repo_url": task.repo_url,
+                }
+                for task in self.tasks
+            ]
+        )
+        first_component = self.root / ("p" * 120)
+        parent = first_component / ("q" * 120)
+        snapshot_batch._windows_extended_path(parent, force=True).mkdir(
+            parents=True
+        )
+        output = parent / "long-😀😀-sealed-batch"
+        failed_output = parent / "long-😀😀-batch-rollback"
+        try:
+            self.assertGreater(
+                len(str(output).encode("utf-16-le")) // 2, 260
+            )
+            for unsafe_name in (
+                "CON",
+                "CON .txt",
+                "name.",
+                "name ",
+                "file:stream",
+            ):
+                with self.subTest(unsafe_name=unsafe_name):
+                    with self.assertRaises(
+                        SnapshotBatchError
+                    ) as captured:
+                        self._prepare(
+                            output_dir=parent / unsafe_name
+                        )
+                    self.assertEqual(
+                        "path_alias_rejected", captured.exception.code
+                    )
+            prepared = self._prepare(output_dir=output)
+            long_file = (
+                prepared.batch_root
+                / "bundles"
+                / TASK_TWO
+                / "tree"
+            ).joinpath(*components)
+            self.assertGreater(len(str(long_file)), 260)
+            self.assertFalse(str(prepared.batch_root).startswith("\\\\?\\"))
+            first = self._verify(output, prepared.manifest_sha256)
+            second = self._verify(output, prepared.manifest_sha256)
+            self.assertEqual(prepared.to_dict(), first.to_dict())
+            self.assertEqual(first.to_dict(), second.to_dict())
+            self.assertFalse(str(first.batch_root).startswith("\\\\?\\"))
+            with self.assertRaises(SnapshotBatchError) as captured:
+                self._prepare(output_dir=output)
+            self.assertEqual("output_exists", captured.exception.code)
+            with mock.patch.object(
+                snapshot_batch,
+                "_manifest_bytes",
+                side_effect=SnapshotBatchError(
+                    "transaction_failed",
+                    "injected after long bundle registration",
+                    exit_status=5,
+                ),
+            ):
+                with self.assertRaises(SnapshotBatchError):
+                    self._prepare(output_dir=failed_output)
+            names = {
+                entry.name
+                for entry in os.scandir(
+                    snapshot_batch._windows_extended_path(
+                        parent, force=True
+                    )
+                )
+            }
+            self.assertNotIn(failed_output.name, names)
+            self.assertFalse(
+                any(
+                    name.startswith(f".{failed_output.name}.")
+                    for name in names
+                )
+            )
+        finally:
+            shutil.rmtree(
+                snapshot_batch._windows_extended_path(
+                    first_component, force=True
+                )
+            )
 
     def test_trusted_evidence_requires_two_actual_full_verifications(self) -> None:
         prepared = self._prepare()

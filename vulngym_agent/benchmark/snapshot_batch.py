@@ -39,6 +39,8 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     SealedSnapshotError,
     SealedSnapshotSummary,
     SnapshotPolicy,
+    _windows_logical_path_is_safe,
+    _windows_extended_path,
     prepare_sealed_snapshot,
     verify_sealed_snapshot,
 )
@@ -851,7 +853,7 @@ def _validate_key_id(value: object) -> str:
 
 def _require_safe_directory(path: Path, *, status: int) -> os.stat_result:
     try:
-        result = os.lstat(path)
+        result = os.lstat(_windows_extended_path(path))
     except OSError as error:
         raise SnapshotBatchError(
             "directory_unavailable", "a required directory is unavailable", exit_status=status
@@ -869,7 +871,7 @@ def _require_safe_directory(path: Path, *, status: int) -> os.stat_result:
 
 def _require_safe_regular(path: Path, *, status: int) -> os.stat_result:
     try:
-        result = os.lstat(path)
+        result = os.lstat(_windows_extended_path(path))
     except OSError as error:
         raise SnapshotBatchError(
             "file_unavailable", "a required input file is unavailable", exit_status=status
@@ -926,7 +928,7 @@ def _read_stable_file(path: Path, maximum: int, *, status: int) -> bytes:
         | getattr(os, "O_CLOEXEC", 0)
     )
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(_windows_extended_path(path), flags)
     except OSError as error:
         raise SnapshotBatchError(
             "file_unavailable", "an input file cannot be opened", exit_status=status
@@ -1057,7 +1059,7 @@ def _fixed_names(path: Path, expected: set[str], *, status: int) -> None:
     _windows_assert_no_named_streams(path, status=status)
     seen: set[str] = set()
     try:
-        with os.scandir(path) as entries:
+        with os.scandir(_windows_extended_path(path)) as entries:
             for entry in entries:
                 if entry.name not in expected or len(seen) >= len(expected):
                     raise SnapshotBatchError(
@@ -1492,7 +1494,7 @@ def _windows_assert_no_named_streams(path: Path, *, status: int) -> None:
     find_close.argtypes = [wintypes.HANDLE]
     find_close.restype = wintypes.BOOL
     data = _WindowsFindStreamData()
-    handle = find_first(str(path), 0, ctypes.byref(data), 0)
+    handle = find_first(str(_windows_extended_path(path)), 0, ctypes.byref(data), 0)
     invalid_handle = ctypes.c_void_p(-1).value
     if handle in {None, 0, invalid_handle}:
         error_number = ctypes.get_last_error()
@@ -1548,7 +1550,7 @@ def _windows_open_directory(
     if share_delete:
         share_mode |= 0x00000004
     handle = create_file(
-        str(path),
+        str(_windows_extended_path(path)),
         desired_access,
         share_mode,
         None,
@@ -1591,20 +1593,25 @@ def _windows_close_handle(handle: int) -> None:
 
 
 def _windows_rename_directory_handle(handle: int, destination: Path) -> None:
-    destination_text = str(destination)
+    destination_text = str(_windows_extended_path(destination))
+    destination_utf16 = destination_text.encode("utf-16-le")
+    destination_utf16_units = len(destination_utf16) // 2
 
     class _WindowsRenameInformation(ctypes.Structure):
         _fields_ = [
             ("replace_if_exists", ctypes.c_ubyte),
             ("root_directory", wintypes.HANDLE),
             ("file_name_length", wintypes.DWORD),
-            ("file_name", wintypes.WCHAR * (len(destination_text) + 1)),
+            (
+                "file_name",
+                wintypes.WCHAR * (destination_utf16_units + 1),
+            ),
         ]
 
     information = _WindowsRenameInformation()
     information.replace_if_exists = 0
     information.root_directory = None
-    information.file_name_length = len(destination_text.encode("utf-16-le"))
+    information.file_name_length = len(destination_utf16)
     information.file_name = destination_text
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     set_information = kernel32.SetFileInformationByHandle
@@ -1642,7 +1649,7 @@ def _windows_final_path(path: Path, *, directory: bool) -> Path:
     create_file.restype = wintypes.HANDLE
     flags = 0x00200000 | (0x02000000 if directory else 0)
     handle = create_file(
-        str(path),
+        str(_windows_extended_path(path)),
         0x0080,
         0x00000001 | 0x00000002 | 0x00000004,
         None,
@@ -1691,6 +1698,20 @@ def _reject_device_path(path: str | os.PathLike[str], *, status: int) -> None:
         raise SnapshotBatchError(
             "path_alias_rejected",
             "Windows device-path spellings are forbidden",
+            exit_status=status,
+        )
+    logical = Path(os.fspath(path))
+    if not _windows_logical_path_is_safe(logical):
+        raise SnapshotBatchError(
+            "path_alias_rejected",
+            "Windows logical path components are unsafe",
+            exit_status=status,
+        )
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    if not _windows_logical_path_is_safe(absolute):
+        raise SnapshotBatchError(
+            "path_alias_rejected",
+            "Windows logical path components are unsafe",
             exit_status=status,
         )
 
@@ -1849,7 +1870,7 @@ def _preflight_output(
 ) -> Path:
     output = _canonical_new_child(output_dir, status=2)
     try:
-        os.lstat(output)
+        os.lstat(_windows_extended_path(output))
     except FileNotFoundError:
         pass
     except OSError as error:
@@ -1941,7 +1962,7 @@ def _begin_staging(output: Path) -> _BatchStaging:
                         staging_name, dir_fd=parent_fd, follow_symlinks=False
                     )
                     if _directory_identity(named) == _directory_identity(
-                        os.lstat(staging)
+                        os.lstat(_windows_extended_path(staging))
                     ):
                         os.rmdir(staging_name, dir_fd=parent_fd)
                 except OSError:
@@ -1953,7 +1974,7 @@ def _begin_staging(output: Path) -> _BatchStaging:
     for _ in range(128):
         staging = output.parent / f".{output.name}.{secrets.token_hex(16)}.staging"
         try:
-            staging.mkdir(mode=0o700)
+            _windows_extended_path(staging).mkdir(mode=0o700)
         except FileExistsError:
             continue
         except OSError as error:
@@ -1984,9 +2005,9 @@ def _begin_staging(output: Path) -> _BatchStaging:
                     )
             except Exception:
                 try:
-                    current = os.lstat(staging)
+                    current = os.lstat(_windows_extended_path(staging))
                     if _directory_identity(current) == _directory_identity(state):
-                        staging.rmdir()
+                        _windows_extended_path(staging).rmdir()
                 except OSError:
                     pass
                 raise
@@ -2106,7 +2127,7 @@ def _register_cleanup_node(
 def _create_tracked_directory(state: _BatchStaging, relative: str) -> Path:
     path = state.staging.joinpath(*_cleanup_parts(relative))
     try:
-        path.mkdir(mode=0o700)
+        _windows_extended_path(path).mkdir(mode=0o700)
     except OSError as error:
         raise SnapshotBatchError(
             "transaction_failed",
@@ -2221,7 +2242,7 @@ def _exclusive_write(path: Path, payload: bytes) -> _CleanupNode:
         | getattr(os, "O_CLOEXEC", 0)
     )
     try:
-        descriptor = os.open(path, flags, 0o600)
+        descriptor = os.open(_windows_extended_path(path), flags, 0o600)
     except OSError as error:
         raise SnapshotBatchError(
             "transaction_failed", "batch control file creation failed", exit_status=5
@@ -2273,7 +2294,7 @@ def _fsync_directory(path: Path) -> None:
         | getattr(os, "O_CLOEXEC", 0)
     )
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(_windows_extended_path(path), flags)
     except OSError as error:
         if os.name == "posix":
             raise SnapshotBatchError(
@@ -2405,7 +2426,7 @@ def _publish_noreplace(state: _BatchStaging) -> None:
                     "transaction_changed", "batch transaction identity changed", exit_status=5
                 )
             try:
-                os.lstat(state.output)
+                os.lstat(_windows_extended_path(state.output))
             except FileNotFoundError:
                 pass
             else:
@@ -2450,7 +2471,7 @@ def _publish_noreplace(state: _BatchStaging) -> None:
 def _cleanup_node_matches(path: Path, expected: _CleanupNode) -> bool:
     try:
         _windows_assert_no_named_streams(path, status=5)
-        current = os.lstat(path)
+        current = os.lstat(_windows_extended_path(path))
         if expected.directory:
             identity: tuple[object, ...] = _directory_identity(current)
             safe_type = (
@@ -2482,7 +2503,7 @@ def _cleanup_layout_is_exact(
     if len(allowed) > _MAX_BATCH_CLEANUP_NODES:
         return False
     try:
-        root = os.lstat(path)
+        root = os.lstat(_windows_extended_path(path))
         if (
             not stat.S_ISDIR(root.st_mode)
             or stat.S_ISLNK(root.st_mode)
@@ -2495,7 +2516,7 @@ def _cleanup_layout_is_exact(
         seen: set[str] = set()
         while stack:
             parent_relative, directory = stack.pop()
-            with os.scandir(directory) as entries:
+            with os.scandir(_windows_extended_path(directory)) as entries:
                 for entry in entries:
                     relative = (
                         entry.name
@@ -2509,13 +2530,13 @@ def _cleanup_layout_is_exact(
                         or len(seen) >= _MAX_BATCH_CLEANUP_NODES
                     ):
                         return False
-                    child = Path(entry.path)
+                    child = directory / entry.name
                     if not _cleanup_node_matches(child, expected):
                         return False
                     seen.add(relative)
                     if expected.directory:
                         stack.append((relative, child))
-        final_root = os.lstat(path)
+        final_root = os.lstat(_windows_extended_path(path))
         _windows_assert_no_named_streams(path, status=5)
         return (
             _directory_identity(final_root) == expected_identity
@@ -2550,16 +2571,16 @@ def _cleanup_tree(
             if not _cleanup_node_matches(child, expected):
                 return
             if expected.directory:
-                child.rmdir()
+                _windows_extended_path(child).rmdir()
             else:
-                child.unlink()
+                _windows_extended_path(child).unlink()
             try:
-                os.lstat(child)
+                os.lstat(_windows_extended_path(child))
             except FileNotFoundError:
                 pass
             else:
                 return
-        final = os.lstat(path)
+        final = os.lstat(_windows_extended_path(path))
         if (
             stat.S_ISDIR(final.st_mode)
             and not stat.S_ISLNK(final.st_mode)
@@ -2567,7 +2588,7 @@ def _cleanup_tree(
             and _directory_identity(final) == expected_identity
         ):
             _windows_assert_no_named_streams(path, status=5)
-            path.rmdir()
+            _windows_extended_path(path).rmdir()
     except (OSError, SnapshotBatchError):
         # Preserving a remainder is safer than deleting an unproven object.
         return

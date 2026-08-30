@@ -59,9 +59,11 @@ _SHA1_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _WINDOWS_FORBIDDEN: Final[frozenset[str]] = frozenset('<>:"\\|?*')
 _WINDOWS_RESERVED: Final[frozenset[str]] = frozenset(
-    {"CON", "PRN", "AUX", "NUL"}
+    {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"}
     | {f"COM{number}" for number in range(1, 10)}
     | {f"LPT{number}" for number in range(1, 10)}
+    | {f"COM{number}" for number in "¹²³"}
+    | {f"LPT{number}" for number in "¹²³"}
 )
 
 _HARD_MAX_FILES: Final[int] = 200_000
@@ -75,6 +77,83 @@ _HARD_MAX_MANIFEST_BYTES: Final[int] = 128 * 1024 * 1024
 _MAX_ATTESTATION_BYTES: Final[int] = 4_096
 _MIN_KEY_BYTES: Final[int] = 32
 _MAX_KEY_BYTES: Final[int] = 4_096
+_WINDOWS_EXTENDED_PATH_THRESHOLD: Final[int] = 240
+
+
+def _windows_reserved_stem(component: str) -> str:
+    """Return the Win32 device-name stem used by logical path checks."""
+
+    return component.split(".", 1)[0].rstrip(" ").upper()
+
+
+def _windows_logical_path_is_safe(path: Path) -> bool:
+    if os.name != "nt":
+        return True
+    for component in path.parts:
+        if component == path.anchor:
+            continue
+        if (
+            not component
+            or component in {".", ".."}
+            or component.endswith((" ", "."))
+            or any(character in _WINDOWS_FORBIDDEN for character in component)
+            or any(ord(character) < 32 for character in component)
+            or _windows_reserved_stem(component) in _WINDOWS_RESERVED
+        ):
+            return False
+    return True
+
+
+def _windows_extended_path(path: Path, *, force: bool = False) -> Path:
+    """Return an internal extended-length spelling for long absolute paths.
+
+    Windows still applies the legacy MAX_PATH boundary when the host-wide
+    long-path policy is disabled, even for a long-path-aware interpreter.
+    The sealed-tree policy deliberately permits longer portable Git paths, so
+    trusted filesystem calls must opt in explicitly.  The conversion happens
+    only at syscall boundaries; public summaries retain their ordinary path
+    spelling and caller-supplied device paths receive no new acceptance path.
+    """
+
+    if os.name != "nt":
+        return path
+    text = os.fspath(path)
+    if text.startswith(("\\\\?\\", "\\\\.\\", "\\??\\")):
+        raise ValueError("Windows device paths are not logical filesystem paths")
+    if not _windows_logical_path_is_safe(path):
+        raise ValueError("Windows logical path components are unsafe")
+    utf16_units = len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+    if not force and utf16_units < _WINDOWS_EXTENDED_PATH_THRESHOLD:
+        return path
+    if not path.is_absolute():
+        return path
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    if re.fullmatch(r"[A-Za-z]:", path.drive) is not None:
+        return Path("\\\\?\\" + text)
+    return path
+
+
+def _reject_windows_device_path(
+    path: str | os.PathLike[str], *, code: str
+) -> None:
+    if os.name != "nt":
+        return
+    spelling = os.fspath(path).replace("/", "\\")
+    if spelling.startswith(("\\\\?\\", "\\\\.\\", "\\??\\")):
+        raise SealedSnapshotError(
+            code, "caller-supplied Windows device paths are forbidden"
+        )
+    logical = Path(os.fspath(path))
+    if not _windows_logical_path_is_safe(logical):
+        raise SealedSnapshotError(
+            code, "Windows logical path components are unsafe"
+        )
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    if not _windows_logical_path_is_safe(absolute):
+        raise SealedSnapshotError(
+            code, "Windows logical path components are unsafe"
+        )
 
 
 class SealedSnapshotError(RuntimeError):
@@ -444,7 +523,7 @@ def _directory_identity(result: os.stat_result) -> tuple[int, int]:
 
 def _require_safe_directory(path: Path) -> os.stat_result:
     try:
-        result = os.lstat(path)
+        result = os.lstat(_windows_extended_path(path))
     except OSError as error:
         raise SealedSnapshotError(
             "snapshot_unavailable", "a required directory is unavailable"
@@ -462,7 +541,7 @@ def _require_safe_directory(path: Path) -> os.stat_result:
 
 def _require_safe_regular(path: Path) -> os.stat_result:
     try:
-        result = os.lstat(path)
+        result = os.lstat(_windows_extended_path(path))
     except OSError as error:
         raise SealedSnapshotError(
             "snapshot_unavailable", "a required snapshot file is unavailable"
@@ -561,7 +640,7 @@ def _windows_assert_no_named_streams(path: Path) -> None:
     find_close.argtypes = [wintypes.HANDLE]
     find_close.restype = wintypes.BOOL
     data = _WindowsFindStreamData()
-    handle = find_first(str(path), 0, ctypes.byref(data), 0)
+    handle = find_first(str(_windows_extended_path(path)), 0, ctypes.byref(data), 0)
     invalid_handle = ctypes.c_void_p(-1).value
     if handle in {None, 0, invalid_handle}:
         error_number = ctypes.get_last_error()
@@ -614,7 +693,7 @@ def _windows_open_directory(
     if share_delete:
         share_mode |= 0x00000004
     handle = create_file(
-        str(path),
+        str(_windows_extended_path(path)),
         desired_access,
         share_mode,
         None,
@@ -658,20 +737,25 @@ def _windows_close_handle(handle: int) -> None:
 def _windows_rename_directory_handle(handle: int, destination: Path) -> None:
     """Rename the directory represented by *handle* without replacement."""
 
-    destination_text = str(destination)
+    destination_text = str(_windows_extended_path(destination))
+    destination_utf16 = destination_text.encode("utf-16-le")
+    destination_utf16_units = len(destination_utf16) // 2
 
     class _WindowsRenameInformation(ctypes.Structure):
         _fields_ = [
             ("replace_if_exists", ctypes.c_ubyte),
             ("root_directory", wintypes.HANDLE),
             ("file_name_length", wintypes.DWORD),
-            ("file_name", wintypes.WCHAR * (len(destination_text) + 1)),
+            (
+                "file_name",
+                wintypes.WCHAR * (destination_utf16_units + 1),
+            ),
         ]
 
     information = _WindowsRenameInformation()
     information.replace_if_exists = 0
     information.root_directory = None
-    information.file_name_length = len(destination_text.encode("utf-16-le"))
+    information.file_name_length = len(destination_utf16)
     information.file_name = destination_text
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     set_information = kernel32.SetFileInformationByHandle
@@ -788,7 +872,7 @@ def _validate_portable_path(
             raise SealedSnapshotError(
                 "unsafe_source_path", "Git paths are not portable text paths"
             )
-        windows_stem = component.split(".", 1)[0].upper()
+        windows_stem = _windows_reserved_stem(component)
         if windows_stem in _WINDOWS_RESERVED:
             raise SealedSnapshotError(
                 "unsafe_source_path", "Git paths contain a reserved device name"
@@ -1139,11 +1223,12 @@ def _write_all(descriptor: int, payload: bytes) -> None:
 
 
 def _begin_staging(output_dir: str | os.PathLike[str], repository: GitRepository) -> _StagingState:
+    _reject_windows_device_path(output_dir, code="unsafe_output")
     output = Path(os.path.abspath(os.fspath(output_dir)))
     if output.name in {"", ".", ".."}:
         raise ValueError("output_dir must name a new child directory")
     try:
-        os.lstat(output)
+        os.lstat(_windows_extended_path(output))
     except FileNotFoundError:
         pass
     except OSError as error:
@@ -1206,7 +1291,7 @@ def _begin_staging(output_dir: str | os.PathLike[str], repository: GitRepository
                     f".{output.name}.{secrets.token_hex(16)}.staging"
                 )
                 try:
-                    candidate_path.mkdir(mode=0o700)
+                    _windows_extended_path(candidate_path).mkdir(mode=0o700)
                 except FileExistsError:
                     continue
                 staging = candidate_path
@@ -1267,7 +1352,7 @@ def _begin_staging(output_dir: str | os.PathLike[str], repository: GitRepository
                     created_staging_identity is not None
                     and _directory_identity(current) == created_staging_identity
                 ):
-                    staging.rmdir()
+                    _windows_extended_path(staging).rmdir()
             except (OSError, SealedSnapshotError):
                 pass
         raise
@@ -1305,7 +1390,7 @@ def _create_staging_dir(state: _StagingState, relative: str) -> None:
         )
     target = parent_path / name
     try:
-        target.mkdir(mode=0o700)
+        _windows_extended_path(target).mkdir(mode=0o700)
     except FileExistsError as error:
         raise SealedSnapshotError(
             "output_transaction_changed", "unexpected staging entry exists"
@@ -1340,7 +1425,7 @@ def _write_staging_file(
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_CLOEXEC", 0)
     )
-    descriptor = os.open(target, flags, 0o600)
+    descriptor = os.open(_windows_extended_path(target), flags, 0o600)
     try:
         opened = os.fstat(descriptor)
         if not stat.S_ISREG(opened.st_mode) or _is_reparse(opened):
@@ -1377,7 +1462,7 @@ def _fsync_staging_directories(state: _StagingState) -> None:
     )
     for path in paths:
         try:
-            descriptor = os.open(path, flags)
+            descriptor = os.open(_windows_extended_path(path), flags)
         except OSError:
             if os.name == "posix":
                 raise
@@ -1469,7 +1554,7 @@ def _rename_noreplace(state: _StagingState) -> None:
                     "output_transaction_changed", "snapshot transaction identity changed"
                 )
             try:
-                os.lstat(state.output)
+                os.lstat(_windows_extended_path(state.output))
             except FileNotFoundError:
                 pass
             else:
@@ -1533,7 +1618,7 @@ def _cleanup_staging(state: _StagingState) -> None:
         ):
             target = _state_relative_path(state, relative)
             try:
-                item = os.lstat(target)
+                item = os.lstat(_windows_extended_path(target))
             except FileNotFoundError:
                 continue
             if (
@@ -1543,7 +1628,7 @@ def _cleanup_staging(state: _StagingState) -> None:
                 or _directory_identity(item) != state.created_files[relative]
             ):
                 return
-            target.unlink()
+            _windows_extended_path(target).unlink()
         for relative in sorted(
             state.created_dirs,
             key=lambda item: (item.count("/"), item),
@@ -1551,7 +1636,7 @@ def _cleanup_staging(state: _StagingState) -> None:
         ):
             target = _state_relative_path(state, relative)
             try:
-                item = os.lstat(target)
+                item = os.lstat(_windows_extended_path(target))
             except FileNotFoundError:
                 continue
             if (
@@ -1561,10 +1646,10 @@ def _cleanup_staging(state: _StagingState) -> None:
                 or _directory_identity(item) != state.created_dirs[relative]
             ):
                 return
-            target.rmdir()
+            _windows_extended_path(target).rmdir()
         final = _require_safe_directory(state.staging)
         if _directory_identity(final) == state.staging_identity:
-            state.staging.rmdir()
+            _windows_extended_path(state.staging).rmdir()
     except (OSError, SealedSnapshotError):
         # Fail-safe cleanup leaks a private staging directory instead of ever
         # deleting a path whose identity is no longer proven.
@@ -1879,7 +1964,7 @@ def _read_stable_file(path: Path, maximum: int) -> tuple[bytes, tuple[int, int, 
         | getattr(os, "O_CLOEXEC", 0)
     )
     try:
-        descriptor = os.open(path, flags)
+        descriptor = os.open(_windows_extended_path(path), flags)
     except OSError as error:
         raise SealedSnapshotError(
             "snapshot_unavailable", "snapshot file cannot be opened"
@@ -1948,7 +2033,7 @@ def _fixed_snapshot_layout(root: Path) -> tuple[Path, Path]:
 def _bounded_directory_names(path: Path, *, maximum: int) -> set[str]:
     names: set[str] = set()
     try:
-        with os.scandir(path) as iterator:
+        with os.scandir(_windows_extended_path(path)) as iterator:
             for entry in iterator:
                 if len(names) >= maximum:
                     raise SealedSnapshotError(
@@ -2166,7 +2251,7 @@ def _scan_tree(
                 )
             directories[relative_directory] = _identity(state)
         try:
-            with os.scandir(directory) as entries:
+            with os.scandir(_windows_extended_path(directory)) as entries:
                 for entry in entries:
                     if len(files) + len(directories) >= policy.max_files:
                         raise SealedSnapshotError(
@@ -2174,6 +2259,7 @@ def _scan_tree(
                             "snapshot tree exceeds its node budget",
                         )
                     relative = "/".join((*prefix, entry.name))
+                    child = directory / entry.name
                     components, _, collision = _validate_portable_path(
                         relative, policy
                     )
@@ -2186,7 +2272,7 @@ def _scan_tree(
                     try:
                         # Direct lstat supplies stable volume/file identities on
                         # Windows; DirEntry.stat may report zero device/inode values.
-                        item = os.lstat(entry.path)
+                        item = os.lstat(_windows_extended_path(child))
                     except OSError as error:
                         raise SealedSnapshotError(
                             "snapshot_unavailable",
@@ -2197,13 +2283,13 @@ def _scan_tree(
                             "unsafe_snapshot_path", "snapshot tree contains a link"
                         )
                     if stat.S_ISDIR(item.st_mode):
-                        _windows_assert_no_named_streams(Path(entry.path))
+                        _windows_assert_no_named_streams(child)
                         if relative not in expected_directories:
                             raise SealedSnapshotError(
                                 "snapshot_tree_mismatch",
                                 "snapshot tree contains an unexpected directory",
                             )
-                        stack.append((Path(entry.path), components))
+                        stack.append((child, components))
                         continue
                     # Some Windows directory enumeration APIs report zero links
                     # even though direct lstat/open reports one.  Values above
@@ -2213,7 +2299,7 @@ def _scan_tree(
                             "unsafe_snapshot_path",
                             "snapshot tree contains a non-regular file",
                         )
-                    _windows_assert_no_named_streams(Path(entry.path))
+                    _windows_assert_no_named_streams(child)
                     if relative not in expected_files:
                         raise SealedSnapshotError(
                             "snapshot_tree_mismatch",
@@ -2260,6 +2346,7 @@ def verify_sealed_snapshot(
 
     if not isinstance(policy, SnapshotPolicy):
         raise ValueError("policy must be a SnapshotPolicy")
+    _reject_windows_device_path(snapshot_root, code="unsafe_snapshot_path")
     expected_task_id, expected_repo_url, expected_commit, expected_key_id = (
         _validate_binding(
             expected_task_id,
