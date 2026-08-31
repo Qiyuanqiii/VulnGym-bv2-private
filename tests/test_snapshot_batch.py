@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -917,6 +918,55 @@ class SnapshotBatchTests(unittest.TestCase):
             self.assertNotIn(TASK_ONE, diagnostic_code)
             self.assertNotIn(TASK_TWO, diagnostic_code)
             self.assertFalse((self.root / output_name).exists())
+
+    def test_prepare_failure_prefers_path_free_inner_diagnostic(self) -> None:
+        def fail_verification(*args: object, **kwargs: object):
+            raise SealedSnapshotError(
+                "snapshot_changed",
+                "injected identity drift",
+                diagnostic_code="tree_directory_scan_identity_changed",
+            )
+
+        with mock.patch.object(
+            snapshot_batch,
+            "verify_sealed_snapshot",
+            side_effect=fail_verification,
+        ), self.assertRaises(SnapshotBatchError) as captured:
+            self._prepare("detailed-diagnostic")
+        self.assertEqual(
+            "pass1_task_001_tree_directory_scan_identity_changed",
+            captured.exception.diagnostic_code,
+        )
+        self.assertLessEqual(len(captured.exception.diagnostic_code or ""), 64)
+        self.assertFalse((self.root / "detailed-diagnostic").exists())
+
+    def test_verification_diagnostic_falls_back_to_bounded_outer_code(self) -> None:
+        error = SimpleNamespace(
+            code="snapshot_changed",
+            diagnostic_code="a" * 64,
+        )
+        diagnostic = snapshot_batch._verification_diagnostic_code(
+            "pass1", 1, error
+        )
+        self.assertEqual("pass1_task_001_snapshot_changed", diagnostic)
+        self.assertLessEqual(len(diagnostic), 64)
+
+    def test_batch_error_retains_public_diagnostic_length_contract(self) -> None:
+        diagnostic = "a" * 128
+        error = SnapshotBatchError(
+            "transaction_verification_failed",
+            "bounded public diagnostic",
+            exit_status=5,
+            diagnostic_code=diagnostic,
+        )
+        self.assertEqual(diagnostic, error.diagnostic_code)
+        with self.assertRaises(ValueError):
+            SnapshotBatchError(
+                "transaction_verification_failed",
+                "oversized public diagnostic",
+                exit_status=5,
+                diagnostic_code="a" * 129,
+            )
 
     @unittest.skipUnless(os.name == "nt", "Windows device-path alias contract")
     def test_windows_subst_drive_is_canonicalized_by_object_identity(self) -> None:

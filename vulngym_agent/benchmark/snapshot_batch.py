@@ -91,6 +91,9 @@ SNAPSHOT_BATCH_TASK_RECORDS_DOMAIN: Final[bytes] = (
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _SHA1_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
 _DIAGNOSTIC_CODE_RE: Final[re.Pattern[str]] = re.compile(r"[a-z0-9_]{1,128}\Z")
+_FINALIZER_DIAGNOSTIC_CODE_RE: Final[re.Pattern[str]] = re.compile(
+    r"[a-z0-9_]{1,64}\Z"
+)
 _KEY_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
 )
@@ -2638,17 +2641,16 @@ def _verification_diagnostic_code(
 ) -> str:
     """Return bounded, path-free context for a failed verification pass."""
 
-    inner_code = getattr(error, "code", None)
-    if (
-        type(inner_code) is not str
-        or len(inner_code) > 80
-        or _DIAGNOSTIC_CODE_RE.fullmatch(inner_code) is None
-    ):
-        inner_code = "value_error" if isinstance(error, ValueError) else "inner_error"
-    diagnostic_code = f"{stage}_task_{task_ordinal:03d}_{inner_code}"
-    if _DIAGNOSTIC_CODE_RE.fullmatch(diagnostic_code) is None:
-        return f"{stage}_task_{task_ordinal:03d}_inner_error"
-    return diagnostic_code
+    prefix = f"{stage}_task_{task_ordinal:03d}_"
+    for name in ("diagnostic_code", "code"):
+        inner_code = getattr(error, name, None)
+        if type(inner_code) is not str:
+            continue
+        diagnostic_code = prefix + inner_code
+        if _FINALIZER_DIAGNOSTIC_CODE_RE.fullmatch(diagnostic_code) is not None:
+            return diagnostic_code
+    fallback = "value_error" if isinstance(error, ValueError) else "inner_error"
+    return prefix + fallback
 
 
 def _materialized_batch_digest(

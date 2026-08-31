@@ -301,6 +301,73 @@ class SealedSnapshotTests(unittest.TestCase):
             sealed_snapshot_module._read_stable_file(path, len(payload))
         self.assertEqual("snapshot_changed", captured.exception.code)
 
+    @unittest.skipUnless(os.name == "nt", "NTFS directory identity compatibility")
+    def test_tree_scan_uses_stable_windows_directory_identity(self) -> None:
+        tree = self.root / "scan-tree"
+        nested = tree / "nested"
+        nested.mkdir(parents=True)
+        payload = b"stable tree bytes"
+        (nested / "entry.bin").write_bytes(payload)
+        policy = SnapshotPolicy(
+            max_files=8,
+            max_file_bytes=len(payload) + 1,
+            max_total_bytes=len(payload) + 1,
+        )
+        real_require = sealed_snapshot_module._require_safe_directory
+
+        def scan_with_drift(field: str):
+            observation = 0
+
+            def observed(path: Path):
+                nonlocal observation
+                current = real_require(path)
+                if Path(os.fspath(path)) != nested:
+                    return current
+                observation += 1
+                values = {
+                    "st_dev": current.st_dev,
+                    "st_ino": current.st_ino,
+                    "st_size": current.st_size,
+                    "st_mtime_ns": current.st_mtime_ns,
+                    "st_ctime_ns": current.st_ctime_ns,
+                }
+                values[field] += observation
+                return SimpleNamespace(**values)
+
+            with mock.patch.object(
+                sealed_snapshot_module,
+                "_require_safe_directory",
+                side_effect=observed,
+            ):
+                first = sealed_snapshot_module._scan_tree(
+                    tree,
+                    policy,
+                    expected_files=frozenset({"nested/entry.bin"}),
+                    expected_directories=frozenset({"nested"}),
+                )
+                second = sealed_snapshot_module._scan_tree(
+                    tree,
+                    policy,
+                    expected_files=frozenset({"nested/entry.bin"}),
+                    expected_directories=frozenset({"nested"}),
+                )
+            return first, second
+
+        ctime_first, ctime_second = scan_with_drift("st_ctime_ns")
+        self.assertEqual(ctime_first, ctime_second)
+
+        mtime_first, mtime_second = scan_with_drift("st_mtime_ns")
+        self.assertEqual(mtime_first, mtime_second)
+
+        size_first, size_second = scan_with_drift("st_size")
+        self.assertEqual(size_first, size_second)
+
+        inode_first, inode_second = scan_with_drift("st_ino")
+        self.assertNotEqual(inode_first, inode_second)
+
+        device_first, device_second = scan_with_drift("st_dev")
+        self.assertNotEqual(device_first, device_second)
+
     @unittest.skipUnless(os.name == "nt", "Windows extended-length path contract")
     def test_prepare_and_verify_long_tree_without_host_long_path_policy(self) -> None:
         components = tuple(

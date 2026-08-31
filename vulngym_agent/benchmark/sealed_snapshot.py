@@ -55,6 +55,7 @@ _REPO_URL_RE: Final[re.Pattern[str]] = re.compile(
 _KEY_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z"
 )
+_DIAGNOSTIC_CODE_RE: Final[re.Pattern[str]] = re.compile(r"[a-z0-9_]{1,64}\Z")
 _SHA1_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{40}\Z")
 _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _WINDOWS_FORBIDDEN: Final[frozenset[str]] = frozenset('<>:"\\|?*')
@@ -159,8 +160,23 @@ def _reject_windows_device_path(
 class SealedSnapshotError(RuntimeError):
     """A sealed snapshot violated its trusted preparation contract."""
 
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        diagnostic_code: str | None = None,
+    ) -> None:
+        if (
+            diagnostic_code is not None
+            and (
+                type(diagnostic_code) is not str
+                or _DIAGNOSTIC_CODE_RE.fullmatch(diagnostic_code) is None
+            )
+        ):
+            raise ValueError("diagnostic_code must be a bounded lowercase token")
         self.code = code
+        self.diagnostic_code = diagnostic_code
         super().__init__(message)
 
 
@@ -540,6 +556,21 @@ def _stable_path_identity(
 
 def _directory_identity(result: os.stat_result) -> tuple[int, int]:
     return (result.st_dev, result.st_ino)
+
+
+def _stable_directory_identity(result: os.stat_result) -> tuple[int, ...]:
+    """Return identity stable across separate directory scans.
+
+    Windows can advance freshly materialized directory size, last-write time,
+    and change time during the first complete enumeration.  Volume and file ID
+    remain the replacement-resistant directory identity.  The verifier still
+    compares the exact directory/file name sets twice and verifies every file
+    identity and byte digest.  POSIX retains its complete stat identity.
+    """
+
+    if os.name != "nt":
+        return _identity(result)
+    return _directory_identity(result)
 
 
 def _require_safe_directory(path: Path) -> os.stat_result:
@@ -2030,7 +2061,9 @@ def _read_stable_file(
             or _directory_identity(opened) != _directory_identity(before)
         ):
             raise SealedSnapshotError(
-                "snapshot_changed", "snapshot file changed while opening"
+                "snapshot_changed",
+                "snapshot file changed while opening",
+                diagnostic_code="path_handle_identity_changed",
             )
         chunks: list[bytes] = []
         remaining = maximum + 1
@@ -2048,7 +2081,9 @@ def _read_stable_file(
         finished = os.fstat(descriptor)
         if _identity(opened) != _identity(finished) or len(data) != opened.st_size:
             raise SealedSnapshotError(
-                "snapshot_changed", "snapshot file changed while reading"
+                "snapshot_changed",
+                "snapshot file changed while reading",
+                diagnostic_code="handle_read_identity_changed",
             )
     finally:
         os.close(descriptor)
@@ -2056,7 +2091,9 @@ def _read_stable_file(
     _windows_assert_no_named_streams(path)
     if _stable_path_identity(before) != _stable_path_identity(after):
         raise SealedSnapshotError(
-            "snapshot_changed", "snapshot file identity changed while reading"
+            "snapshot_changed",
+            "snapshot file identity changed while reading",
+            diagnostic_code="path_read_identity_changed",
         )
     return data, _stable_path_identity(after)
 
@@ -2284,10 +2321,10 @@ def _scan_tree(
     expected_directories: frozenset[str],
 ) -> tuple[
     dict[str, tuple[int, ...]],
-    dict[str, tuple[int, int, int, int | None, int | None]],
+    dict[str, tuple[int, ...]],
 ]:
     files: dict[str, tuple[int, ...]] = {}
-    directories: dict[str, tuple[int, int, int, int | None, int | None]] = {}
+    directories: dict[str, tuple[int, ...]] = {}
     collision_keys: set[str] = set()
     total_bytes = 0
     stack: list[tuple[Path, tuple[str, ...]]] = [(tree, ())]
@@ -2301,7 +2338,7 @@ def _scan_tree(
                 raise SealedSnapshotError(
                     "snapshot_limit_exceeded", "snapshot tree exceeds its node budget"
                 )
-            directories[relative_directory] = _identity(state)
+            directories[relative_directory] = _stable_directory_identity(state)
         try:
             with os.scandir(_windows_extended_path(directory)) as entries:
                 for entry in entries:
@@ -2484,7 +2521,9 @@ def verify_sealed_snapshot(
         data, file_identity = _read_stable_file(tree.joinpath(*record.path.split("/")), record.size)
         if file_identity != before_files[record.path]:
             raise SealedSnapshotError(
-                "snapshot_changed", "snapshot tree changed during verification"
+                "snapshot_changed",
+                "snapshot tree changed during verification",
+                diagnostic_code="tree_entry_identity_changed",
             )
         if type(record) is SealedSnapshotGitlink:
             expected_marker = b"gitlink " + record.target_commit_oid.encode("ascii") + b"\n"
@@ -2510,9 +2549,17 @@ def verify_sealed_snapshot(
         expected_files=expected_paths,
         expected_directories=expected_dirs,
     )
-    if before_files != after_files or before_dirs != after_dirs:
+    if before_files != after_files:
         raise SealedSnapshotError(
-            "snapshot_changed", "snapshot tree changed during verification"
+            "snapshot_changed",
+            "snapshot tree changed during verification",
+            diagnostic_code="tree_file_scan_identity_changed",
+        )
+    if before_dirs != after_dirs:
+        raise SealedSnapshotError(
+            "snapshot_changed",
+            "snapshot tree changed during verification",
+            diagnostic_code="tree_directory_scan_identity_changed",
         )
     _assert_parent_chain(checked_parent)
     if (
@@ -2525,7 +2572,9 @@ def verify_sealed_snapshot(
         != attestation_identity
     ):
         raise SealedSnapshotError(
-            "snapshot_changed", "snapshot identity changed during verification"
+            "snapshot_changed",
+            "snapshot identity changed during verification",
+            diagnostic_code="snapshot_control_identity_changed",
         )
     _fixed_snapshot_layout(root)
     return VerifiedSealedSnapshot(
