@@ -67,7 +67,16 @@ from vulngym_agent.evaluator.replay_authoring import (
     ReplayAuthoringError,
     validate_formal_replay_pair_v1,
 )
-from vulngym_agent.trusted_inputs import TrustedInputError, paths_overlap_v1
+from vulngym_agent.replay_authoring_receipt import (
+    ReplayAuthoringIndexV2,
+    ReplayAuthoringReceiptError,
+    ReplayTrustRegistryV2,
+    read_pinned_trust_registry_v2,
+)
+from vulngym_agent.trusted_inputs import (
+    TrustedInputError,
+    paths_overlap_v1,
+)
 
 
 REPLAY_BATCH_PLAN_CLI_VERSION: Final[str] = "replay-batch-plan-cli-v1"
@@ -87,8 +96,10 @@ _SHA256_RE: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{64}\Z")
 _IMAGE_ID_RE: Final[re.Pattern[str]] = re.compile(
     r"sha256:[0-9a-f]{64}\Z"
 )
-_AUTHORING_INDEX_KIND: Final[str] = "vulngym.replay-authoring-index.v1"
-_AUTHORING_INDEX_DOMAIN: Final[bytes] = b"vulngym:replay-authoring-index:v1\x00"
+_LEGACY_AUTHORING_INDEX_KIND: Final[str] = "vulngym.replay-authoring-index.v1"
+_LEGACY_AUTHORING_INDEX_DOMAIN: Final[bytes] = (
+    b"vulngym:replay-authoring-index:v1\x00"
+)
 _AUTHORING_INDEX_MAX_BYTES: Final[int] = 512 * 1024
 
 
@@ -168,6 +179,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     build_split.add_argument(
         "--expected-authoring-index-wire-sha256", type=_sha256, required=True
+    )
+    build_split.add_argument("--trust-registry-file", type=Path, required=True)
+    build_split.add_argument(
+        "--expected-trust-registry-sha256", type=_sha256, required=True
+    )
+    build_split.add_argument(
+        "--expected-trust-registry-wire-sha256", type=_sha256, required=True
     )
     build_split.add_argument("--output-root", type=Path, required=True)
 
@@ -498,7 +516,7 @@ def _strict_json_object(payload: bytes) -> dict[str, object]:
     return value
 
 
-def _load_authoring_index(
+def _load_legacy_authoring_index_read_only(
     path: Path,
     *,
     expected_sha256: str,
@@ -520,7 +538,7 @@ def _load_authoring_index(
     tasks = raw["tasks"]
     if (
         raw["contract_version"] != 1
-        or raw["kind"] != _AUTHORING_INDEX_KIND
+        or raw["kind"] != _LEGACY_AUTHORING_INDEX_KIND
         or type(raw["index_sha256"]) is not str
         or type(tasks) is not list
     ):
@@ -533,7 +551,7 @@ def _load_authoring_index(
         "tasks": tasks,
     }
     semantic = hashlib.sha256(
-        _AUTHORING_INDEX_DOMAIN + _canonical_json_line(core)[:-1]
+        _LEGACY_AUTHORING_INDEX_DOMAIN + _canonical_json_line(core)[:-1]
     ).hexdigest()
     if raw["index_sha256"] != semantic or semantic != expected_sha256:
         raise ReplayBatchPlanError(
@@ -585,6 +603,49 @@ def _load_authoring_index(
             "authoring_index_rejected", "authoring index task order differs"
         )
     return result
+
+
+def _load_authoring_index(
+    path: Path,
+    *,
+    expected_sha256: str,
+    expected_wire_sha256: str,
+    expected_tasks: tuple[tuple[str, str], ...],
+    trust_registry: ReplayTrustRegistryV2,
+) -> dict[str, tuple[str, str, str, str]]:
+    """Load only the authenticated v2 index for a formal batch gate.
+
+    The v1 parser above is intentionally named and scoped as a legacy
+    read-only inspection helper.  It is never called by ``build-split`` and a
+    v1 index therefore cannot be downgraded into the formal gate.
+    """
+
+    payload = _read_private_regular(path, maximum_bytes=_AUTHORING_INDEX_MAX_BYTES)
+    try:
+        index = ReplayAuthoringIndexV2.from_bytes(
+            payload,
+            expected_sha256=expected_sha256,
+            expected_wire_sha256=expected_wire_sha256,
+        )
+        index.verify_trust_registry(trust_registry)
+    except ReplayAuthoringReceiptError:
+        raise ReplayBatchPlanError(
+            "authoring_index_rejected", "formal v2 authoring index was rejected"
+        ) from None
+    observed_order = tuple((item.split, item.task_id) for item in index.tasks)
+    if observed_order != expected_tasks:
+        raise ReplayBatchPlanError(
+            "authoring_index_rejected", "authoring index task order differs"
+        )
+    return {
+        item.task_id: (
+            item.d2_sha256,
+            item.d2_wire_sha256,
+            item.d3_sha256,
+            item.d3_wire_sha256,
+        )
+        for item in index.tasks
+    }
 
 
 def _write_private_regular(path: Path, payload: bytes) -> None:
@@ -1074,12 +1135,23 @@ def _build_split(args: argparse.Namespace) -> dict[str, object]:
         )
         for task in expected_split_tasks
     )
-    frozen = _load_authoring_index(
-        args.authoring_index_file,
-        expected_sha256=args.expected_authoring_index_sha256,
-        expected_wire_sha256=args.expected_authoring_index_wire_sha256,
-        expected_tasks=expected_index_tasks,
-    )
+    try:
+        trust_registry = read_pinned_trust_registry_v2(
+            args.trust_registry_file,
+            expected_sha256=args.expected_trust_registry_sha256,
+            expected_wire_sha256=args.expected_trust_registry_wire_sha256,
+        )
+        frozen = _load_authoring_index(
+            args.authoring_index_file,
+            expected_sha256=args.expected_authoring_index_sha256,
+            expected_wire_sha256=args.expected_authoring_index_wire_sha256,
+            expected_tasks=expected_index_tasks,
+            trust_registry=trust_registry,
+        )
+    except ReplayAuthoringReceiptError:
+        raise ReplayBatchPlanError(
+            "authoring_index_rejected", "formal trust registry was rejected"
+        ) from None
     _assert_existing_roots_disjoint(
         (args.benchmark_root, args.authoring_output_root)
     )
@@ -1089,6 +1161,7 @@ def _build_split(args: argparse.Namespace) -> dict[str, object]:
             (args.benchmark_root, True),
             (args.authoring_output_root, True),
             (args.authoring_index_file, False),
+            (args.trust_registry_file, False),
         ),
     )
     manifest, wires = _read_authoring_outputs(

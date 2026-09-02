@@ -1,2 +1,5 @@
 # Test-only dependency used to validate the bundled Draft 2020-12 schemas.
 jsonschema>=4.18,<5
+
+# Ed25519 signatures for the formal replay receipt/index trust boundary.
+cryptography>=42.0.0,<49.0.0

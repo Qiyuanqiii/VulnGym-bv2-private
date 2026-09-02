@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 import io
 import hashlib
 import json
@@ -17,12 +18,60 @@ from vulngym_agent.evaluator.final_gate import (
     FinalGatePlanV1,
 )
 from vulngym_agent.evaluator.oci_worker_entry import OciReplayConfigV1
+from vulngym_agent.replay_authoring_receipt import (
+    ReplayActorKeyRegistrationV2,
+    ReplayAuthoringIndexSignatureV2,
+    ReplayAuthoringIndexTaskV2,
+    ReplayAuthoringIndexV2,
+    ReplaySourceBindingV2,
+    ReplayTrustKeyRegistrationV2,
+    ReplayTrustRegistryV2,
+    replay_ed25519_public_key_from_private_v2,
+)
+import vulngym_agent.replay_authoring_receipt as receipt_module
 import vulngym_agent.replay_batch_plan_cli as cli
+
+
+RUNTIME_TMP = Path(r"D:\VulnGym-bv2-runtime\tmp")
+TRUST_SLOTS = (
+    ("actor-approval", "author"),
+    ("actor-approval", "critic"),
+    ("actor-approval", "reviewer"),
+    ("readback-attestation", "test"),
+    ("readback-attestation", "train"),
+    ("authoring-index", "global"),
+)
+
+
+def _signing_keys(prefix: str = "official") -> dict[tuple[str, str], bytes]:
+    return {
+        slot: hashlib.sha256(f"{prefix}:{slot[0]}:{slot[1]}".encode()).digest()
+        for slot in TRUST_SLOTS
+    }
+
+
+def _registry(
+    keys: dict[tuple[str, str], bytes],
+) -> ReplayTrustRegistryV2:
+    return ReplayTrustRegistryV2(
+        keys=tuple(
+            ReplayTrustKeyRegistrationV2.from_public_key(
+                purpose=purpose,  # type: ignore[arg-type]
+                role=role,  # type: ignore[arg-type]
+                key_id=f"{purpose}-{role}-key",
+                public_key=replay_ed25519_public_key_from_private_v2(
+                    keys[(purpose, role)]
+                ),
+            )
+            for purpose, role in TRUST_SLOTS
+        )
+    )
 
 
 class ReplayBatchPlanCliTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
+        RUNTIME_TMP.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(dir=RUNTIME_TMP)
         self.root = Path(self.temporary.name)
         self.benchmark = self.root / "benchmark"
         self.benchmark.mkdir(mode=0o700)
@@ -34,6 +83,13 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
             split: self._authoring_root(split, suffix="baseline")
             for split in ("test", "train")
         }
+        self.signing_keys = _signing_keys()
+        self.trust_registry = _registry(self.signing_keys)
+        self.trust_registry_file = self.root / "trust-registry.json"
+        self._private_file(
+            self.trust_registry_file, self.trust_registry.to_bytes()
+        )
+        self.index_private_key = self.signing_keys[("authoring-index", "global")]
         self.authoring_index, self.authoring_index_sha, self.authoring_index_wire_sha = (
             self._authoring_index(self.authoring)
         )
@@ -102,50 +158,109 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
     def _authoring_index(
         self, roots: dict[str, Path], *, suffix: str = "baseline"
     ) -> tuple[Path, str, str]:
-        tasks: list[dict[str, object]] = []
+        tasks: list[ReplayAuthoringIndexTaskV2] = []
+        ordinal = 0
         for split in ("test", "train"):
             for task in self.tasks[split]:
+                ordinal += 1
                 task_root = roots[split] / task.task_id
                 d2 = OciReplayConfigV1.from_bytes((task_root / "d2.json").read_bytes())
                 d3 = OciReplayConfigV1.from_bytes((task_root / "d3.json").read_bytes())
                 tasks.append(
-                    {
-                        "d2_sha256": d2.config_sha256,
-                        "d2_wire_sha256": d2.wire_sha256,
-                        "d3_sha256": d3.config_sha256,
-                        "d3_wire_sha256": d3.wire_sha256,
-                        "split": split,
-                        "task_id": task.task_id,
-                    }
+                    ReplayAuthoringIndexTaskV2(
+                        split=split,
+                        task_id=task.task_id,
+                        task_wire_sha256=hashlib.sha256(
+                            f"task-wire:{task.task_id}".encode()
+                        ).hexdigest(),
+                        snapshot_id=(
+                            "VGS-"
+                            + hashlib.sha256(
+                                f"snapshot:{task.task_id}".encode()
+                            ).hexdigest()[:32].upper()
+                        ),
+                        receipt_sha256=hashlib.sha256(
+                            f"receipt:{ordinal}".encode()
+                        ).hexdigest(),
+                        receipt_wire_sha256=hashlib.sha256(
+                            f"receipt-wire:{ordinal}".encode()
+                        ).hexdigest(),
+                        d2_sha256=d2.config_sha256,
+                        d2_wire_sha256=d2.wire_sha256,
+                        d3_sha256=d3.config_sha256,
+                        d3_wire_sha256=d3.wire_sha256,
+                    )
                 )
-        core = {
-            "contract_version": 1,
-            "kind": "vulngym.replay-authoring-index.v1",
-            "tasks": tasks,
-        }
-        canonical_core = json.dumps(
-            core, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-        semantic = hashlib.sha256(
-            b"vulngym:replay-authoring-index:v1\x00" + canonical_core
-        ).hexdigest()
-        value = {**core, "index_sha256": semantic}
-        payload = (
-            json.dumps(
-                value,
-                ensure_ascii=False,
-                allow_nan=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-            + b"\n"
+        sources = tuple(
+            ReplaySourceBindingV2(
+                split=split,
+                task_export_index_sha256=hashlib.sha256(f"export:{split}".encode()).hexdigest(),
+                task_export_index_wire_sha256=hashlib.sha256(f"export-wire:{split}".encode()).hexdigest(),
+                tasks_sha256=hashlib.sha256(f"tasks:{split}".encode()).hexdigest(),
+                public_manifest_sha256=hashlib.sha256(f"public:{split}".encode()).hexdigest(),
+                sealed_batch_manifest_sha256=hashlib.sha256(f"batch:{split}".encode()).hexdigest(),
+                sealed_batch_content_root=hashlib.sha256(f"batch-root:{split}".encode()).hexdigest(),
+                sealed_batch_key_id=f"snapshot-{split}",
+                snapshot_key_fingerprint=hashlib.sha256(f"snapshot-key:{split}".encode()).hexdigest(),
+                readback_key_id=self.trust_registry.registration(
+                    purpose="readback-attestation", role=split
+                ).key_id,
+                readback_key_fingerprint=self.trust_registry.registration(
+                    purpose="readback-attestation", role=split
+                ).public_key_fingerprint,
+                trust_registry_sha256=self.trust_registry.registry_sha256,
+                trust_registry_wire_sha256=self.trust_registry.wire_sha256,
+            )
+            for split in ("test", "train")
         )
+        actor_keys = tuple(
+            ReplayActorKeyRegistrationV2.from_trust_registry(
+                actor_role=role,
+                trust_registry=self.trust_registry,
+            )
+            for role in ("author", "critic", "reviewer")
+        )
+        index_key = self.trust_registry.registration(
+            purpose="authoring-index", role="global"
+        )
+        unsigned = receipt_module._authoring_index_unsigned_dict(
+            sources,
+            actor_keys,
+            tasks,
+            trust_registry_sha256=self.trust_registry.registry_sha256,
+            trust_registry_wire_sha256=self.trust_registry.wire_sha256,
+            index_signer_key_id=index_key.key_id,
+            index_signer_key_fingerprint=index_key.public_key_fingerprint,
+        )
+        signature = ReplayAuthoringIndexSignatureV2(
+            key_id=index_key.key_id,
+            public_key_fingerprint=index_key.public_key_fingerprint,
+            signature=receipt_module._sign_ed25519(
+                self.index_private_key,
+                registration=index_key,
+                domain=receipt_module._INDEX_SIGNATURE_DOMAIN,
+                value=unsigned,
+            ),
+        )
+        index = ReplayAuthoringIndexV2(
+            sources=sources,
+            actor_keys=actor_keys,
+            tasks=tuple(tasks),
+            trust_registry_sha256=self.trust_registry.registry_sha256,
+            trust_registry_wire_sha256=self.trust_registry.wire_sha256,
+            index_signature=signature,
+        )
+        payload = index.to_bytes()
         path = self.root / f"authoring-index-{suffix}.json"
         self._private_file(path, payload)
-        return path, semantic, hashlib.sha256(payload).hexdigest()
+        return path, index.index_sha256, index.wire_sha256
 
-    @staticmethod
-    def _index_arguments(path: Path, semantic: str, wire: str) -> tuple[object, ...]:
+    def _index_arguments(
+        self,
+        path: Path,
+        semantic: str,
+        wire: str,
+    ) -> tuple[object, ...]:
         return (
             "--authoring-index-file",
             path,
@@ -153,6 +268,12 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
             semantic,
             "--expected-authoring-index-wire-sha256",
             wire,
+            "--trust-registry-file",
+            self.trust_registry_file,
+            "--expected-trust-registry-sha256",
+            self.trust_registry.registry_sha256,
+            "--expected-trust-registry-wire-sha256",
+            self.trust_registry.wire_sha256,
         )
 
     def _load_tasks(self, _root: Path, *, split: str):
@@ -311,7 +432,9 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
             "train",
             "--authoring-output-root",
             complete,
-            *self._index_arguments(extra_index, extra_index_sha, extra_index_wire),
+            *self._index_arguments(
+                extra_index, extra_index_sha, extra_index_wire
+            ),
             "--output-root",
             extra_output,
         )
@@ -517,10 +640,11 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
 
         def write_variant(tasks: list[dict[str, object]], suffix: str):
             core = {
-                "contract_version": 1,
-                "kind": "vulngym.replay-authoring-index.v1",
-                "tasks": tasks,
+                key: value
+                for key, value in baseline.items()
+                if key != "index_sha256"
             }
+            core["tasks"] = tasks
             core_wire = json.dumps(
                 core,
                 ensure_ascii=False,
@@ -529,7 +653,7 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
                 separators=(",", ":"),
             ).encode("utf-8")
             semantic = hashlib.sha256(
-                b"vulngym:replay-authoring-index:v1\x00" + core_wire
+                b"vulngym:replay-authoring-index:v2\x00" + core_wire
             ).hexdigest()
             payload = (
                 json.dumps(
@@ -555,6 +679,9 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
         duplicate = [dict(item) for item in baseline["tasks"]]
         duplicate[1]["task_id"] = duplicate[0]["task_id"]
         variants["duplicate"] = duplicate
+        self_constructed = [dict(item) for item in baseline["tasks"]]
+        self_constructed[0]["d2_sha256"] = "f" * 64
+        variants["self-constructed-binding"] = self_constructed
 
         for suffix, tasks in variants.items():
             with self.subTest(case=suffix):
@@ -578,6 +705,88 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
                     "error[authoring_index_rejected]: replay batch/plan operation failed\n",
                 )
                 self.assertFalse(output.exists())
+
+    def test_fully_self_signed_index_is_rejected_by_fixed_registry(self) -> None:
+        official = ReplayAuthoringIndexV2.from_bytes(
+            self.authoring_index.read_bytes(),
+            expected_sha256=self.authoring_index_sha,
+            expected_wire_sha256=self.authoring_index_wire_sha,
+        )
+        attacker_keys = _signing_keys("attacker")
+        attacker_registry = _registry(attacker_keys)
+        attacker_sources = tuple(
+            replace(
+                source,
+                readback_key_id=attacker_registry.registration(
+                    purpose="readback-attestation", role=source.split
+                ).key_id,
+                readback_key_fingerprint=attacker_registry.registration(
+                    purpose="readback-attestation", role=source.split
+                ).public_key_fingerprint,
+                trust_registry_sha256=attacker_registry.registry_sha256,
+                trust_registry_wire_sha256=attacker_registry.wire_sha256,
+            )
+            for source in official.sources
+        )
+        attacker_actors = tuple(
+            ReplayActorKeyRegistrationV2.from_trust_registry(
+                actor_role=role,
+                trust_registry=attacker_registry,
+            )
+            for role in ("author", "critic", "reviewer")
+        )
+        index_key = attacker_registry.registration(
+            purpose="authoring-index", role="global"
+        )
+        unsigned = receipt_module._authoring_index_unsigned_dict(
+            attacker_sources,
+            attacker_actors,
+            official.tasks,
+            trust_registry_sha256=attacker_registry.registry_sha256,
+            trust_registry_wire_sha256=attacker_registry.wire_sha256,
+            index_signer_key_id=index_key.key_id,
+            index_signer_key_fingerprint=index_key.public_key_fingerprint,
+        )
+        attacker_index = ReplayAuthoringIndexV2(
+            sources=attacker_sources,
+            actor_keys=attacker_actors,
+            tasks=official.tasks,
+            trust_registry_sha256=attacker_registry.registry_sha256,
+            trust_registry_wire_sha256=attacker_registry.wire_sha256,
+            index_signature=ReplayAuthoringIndexSignatureV2(
+                key_id=index_key.key_id,
+                public_key_fingerprint=index_key.public_key_fingerprint,
+                signature=receipt_module._sign_ed25519(
+                    attacker_keys[("authoring-index", "global")],
+                    registration=index_key,
+                    domain=receipt_module._INDEX_SIGNATURE_DOMAIN,
+                    value=unsigned,
+                ),
+            ),
+        )
+        path = self.root / "attacker-index.json"
+        self._private_file(path, attacker_index.to_bytes())
+        output = self.root / "attacker-index-output"
+        status, value, error = self._invoke(
+            "build-split",
+            "--benchmark-root",
+            self.benchmark,
+            "--split",
+            "test",
+            "--authoring-output-root",
+            self.authoring["test"],
+            *self._index_arguments(
+                path, attacker_index.index_sha256, attacker_index.wire_sha256
+            ),
+            "--output-root",
+            output,
+        )
+        self.assertEqual((status, value), (2, None))
+        self.assertEqual(
+            error,
+            "error[authoring_index_rejected]: replay batch/plan operation failed\n",
+        )
+        self.assertFalse(output.exists())
 
     def test_staging_swap_is_rejected_and_replacement_is_retained(self) -> None:
         output = self.root / "staging-swap-output"

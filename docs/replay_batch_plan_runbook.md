@@ -41,16 +41,14 @@ Each task directory must be the final `--output-root` of the single-task
 input.
 
 The canonical authoring index covers all 70 tasks in exact test-then-train
-public order. It has `kind` `vulngym.replay-authoring-index.v1`,
-`contract_version` 1, an `index_sha256`, and a `tasks` array. Each task entry
-contains exactly `split`, `task_id`, `d2_sha256`, `d2_wire_sha256`,
-`d3_sha256`, and `d3_wire_sha256`. `index_sha256` is SHA-256 over
-`b"vulngym:replay-authoring-index:v1\x00"` followed by canonical JSON of
-`contract_version`, `kind`, and `tasks`; `\x00` denotes one byte with value
-`0x00`, and the semantic canonical core excludes its trailing LF. The
-separately retained wire digest is SHA-256 over the complete canonical JSON
-line, including the trailing LF. Construct and approve this index from the
-individual closure receipts, not by trusting the mutable aggregation directory.
+public order. Formal builds require `vulngym.replay-authoring-index.v2` and its
+externally retained semantic/wire pins. Version 2 binds the authenticated
+split exports, sealed-batch provenance, task/snapshot and receipt pins,
+registered actor keys, and D2/D3 pins; each split readback authority also
+signs its observations, while a separate index authority signs the complete
+index. The externally pinned public-key registry fixes all six verification
+identities. The v1 format is historical read-only input and is always rejected
+by `build-split`.
 
 Use mutually disjoint private directories. On Linux, input/output directories
 must not be group- or world-writable, and replay files must be private regular
@@ -71,6 +69,9 @@ python -B -m vulngym_agent.replay_batch_plan_cli build-split \
   --authoring-index-file /srv/vulngym/control/frozen-authoring-index.json \
   --expected-authoring-index-sha256 "${AUTHORING_INDEX_SHA256}" \
   --expected-authoring-index-wire-sha256 "${AUTHORING_INDEX_WIRE_SHA256}" \
+  --trust-registry-file /srv/vulngym/control/replay-trust-registry-v2.json \
+  --expected-trust-registry-sha256 "${TRUST_REGISTRY_SHA256}" \
+  --expected-trust-registry-wire-sha256 "${TRUST_REGISTRY_WIRE_SHA256}" \
   --output-root /srv/vulngym/inputs/test-replay \
   > /srv/vulngym/control/test-replay-build-summary.json
 ```
@@ -98,6 +99,9 @@ python -B -m vulngym_agent.replay_batch_plan_cli build-split \
   --authoring-index-file /srv/vulngym/control/frozen-authoring-index.json \
   --expected-authoring-index-sha256 "${AUTHORING_INDEX_SHA256}" \
   --expected-authoring-index-wire-sha256 "${AUTHORING_INDEX_WIRE_SHA256}" \
+  --trust-registry-file /srv/vulngym/control/replay-trust-registry-v2.json \
+  --expected-trust-registry-sha256 "${TRUST_REGISTRY_SHA256}" \
+  --expected-trust-registry-wire-sha256 "${TRUST_REGISTRY_WIRE_SHA256}" \
   --output-root /srv/vulngym/inputs/train-replay \
   > /srv/vulngym/control/train-replay-build-summary.json
 
@@ -119,6 +123,10 @@ The packaged layout is the existing strict evaluator contract:
 ```
 
 Task order comes from the pinned public benchmark, not filesystem enumeration.
+`build-split` loads only the public registry and rejects an index signed by a
+different self-supplied registry, even when that index's hashes and signature
+are internally consistent. Registry semantic/wire pins must come from the
+independent final-gate policy, not from the replay producer.
 The builder re-reads the complete staging tree before publication and re-reads
 the committed tree afterward. POSIX uses a parent-fd-relative
 `renameat2(RENAME_NOREPLACE)`; Windows uses a no-replace path rename plus
