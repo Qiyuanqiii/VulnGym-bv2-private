@@ -34,6 +34,11 @@ def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
+def _absolute_fixture_path(*parts: str) -> Path:
+    root = Path("C:/") if os.name == "nt" else Path("/")
+    return root.joinpath(*parts)
+
+
 class _FakeAttempt:
     def __init__(self) -> None:
         self._payload = b'{"kind":"attempt","status":"failed_clean"}\n'
@@ -156,7 +161,7 @@ class FinalGateCliTests(unittest.TestCase):
             "--output-root",
             "final-output",
             "--docker-executable",
-            "C:\\docker\\docker.exe",
+            str(_absolute_fixture_path("docker", "docker.exe")),
             "--docker-host",
             "unix:///run/vulngym/docker.sock",
             "--runtime-image-id",

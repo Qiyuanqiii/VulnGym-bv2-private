@@ -1611,6 +1611,9 @@ class SourceAcquisitionContractTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, "git_output_limit")
 
     def test_ssh_environment_is_noninteractive_and_caller_cannot_supply_command(self) -> None:
+        trusted_root = Path("C:/trusted") if os.name == "nt" else Path("/trusted")
+        git_executable = trusted_root / "git.exe"
+        ssh_executable = trusted_root / "ssh.exe"
         with mock.patch.dict(
             "os.environ",
             {
@@ -1620,12 +1623,12 @@ class SourceAcquisitionContractTests(unittest.TestCase):
             clear=False,
         ):
             environment = source_acquisition._git_environment(
-                git_executable=Path("C:/trusted/git.exe"),
+                git_executable=git_executable,
                 github_transport="ssh",
-                ssh_executable=Path("C:/trusted/ssh.exe"),
+                ssh_executable=ssh_executable,
             )
         self.assertNotIn("attacker-controlled", environment["GIT_SSH_COMMAND"])
-        expected_ssh = str(Path("C:/trusted/ssh.exe"))
+        expected_ssh = str(ssh_executable)
         if os.name == "nt":
             expected_ssh = expected_ssh.replace("\\", "/")
         self.assertEqual(

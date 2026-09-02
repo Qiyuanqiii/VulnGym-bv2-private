@@ -252,7 +252,8 @@ class GitHistoryTests(unittest.TestCase):
             except (OSError, NotImplementedError):
                 self.skipTest("creating symlinks is not permitted")
             with self.assertRaisesRegex(
-                RepositoryUnavailable, "must not be a symlink"
+                RepositoryUnavailable,
+                r"^Git metadata is not a bounded direct file$",
             ):
                 self.repository.history_is_shallow()
         finally:
