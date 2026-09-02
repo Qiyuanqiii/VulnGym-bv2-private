@@ -343,6 +343,39 @@ class ReplayTaskSplitExportTests(unittest.TestCase):
             list(self.root.glob(f".{output.name}.replay-task-response-*")), []
         )
 
+    def test_export_interrupt_classifies_the_publication_boundary(self) -> None:
+        before_output = self.root / "export-interrupt-before-publication"
+        with mock.patch.object(
+            cli, "_publish_directory", side_effect=KeyboardInterrupt()
+        ):
+            status, summary, error = self._invoke(
+                *self._export_arguments(before_output)
+            )
+        self.assertEqual(status, cli.EXIT_INTERRUPTED)
+        self.assertIsNone(summary)
+        self.assertIn("error[interrupted]", error)
+        self.assertFalse(before_output.exists())
+
+        after_output = self.root / "export-interrupt-after-publication"
+        publish = cli._publish_directory
+
+        def interrupt_after_publication(*args: object, **kwargs: object) -> object:
+            publish(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(
+            cli,
+            "_publish_directory",
+            side_effect=interrupt_after_publication,
+        ):
+            status, summary, error = self._invoke(
+                *self._export_arguments(after_output)
+            )
+        self.assertEqual(status, cli.EXIT_COMMITTED_UNCERTAIN)
+        self.assertIsNone(summary)
+        self.assertIn("error[committed_uncertain]", error)
+        self.assertTrue(after_output.is_dir())
+
     def test_task_tamper_is_rejected_under_original_external_index_pin(self) -> None:
         output = self.root / "export-tamper"
         status, summary, error = self._invoke(*self._export_arguments(output))
@@ -525,6 +558,39 @@ class ReplayResponseBindingTests(unittest.TestCase):
         self.assertIsNone(summary)
         self.assertIn("output_exists", error)
         self.assertEqual(marker.read_bytes(), b"caller-owned")
+
+    def test_bind_interrupt_classifies_the_publication_boundary(self) -> None:
+        before_output = self.root / "bind-interrupt-before-publication"
+        with mock.patch.object(
+            cli, "_publish_directory", side_effect=KeyboardInterrupt()
+        ):
+            status, summary, error = self._invoke(
+                *self._bind_arguments(before_output)
+            )
+        self.assertEqual(status, cli.EXIT_INTERRUPTED)
+        self.assertIsNone(summary)
+        self.assertIn("error[interrupted]", error)
+        self.assertFalse(before_output.exists())
+
+        after_output = self.root / "bind-interrupt-after-publication"
+        publish = cli._publish_directory
+
+        def interrupt_after_publication(*args: object, **kwargs: object) -> object:
+            publish(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with mock.patch.object(
+            cli,
+            "_publish_directory",
+            side_effect=interrupt_after_publication,
+        ):
+            status, summary, error = self._invoke(
+                *self._bind_arguments(after_output)
+            )
+        self.assertEqual(status, cli.EXIT_COMMITTED_UNCERTAIN)
+        self.assertIsNone(summary)
+        self.assertIn("error[committed_uncertain]", error)
+        self.assertTrue(after_output.is_dir())
 
     def test_response_tamper_fails_original_external_wire_pin(self) -> None:
         output = self.root / "tampered-response"

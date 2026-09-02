@@ -1162,7 +1162,10 @@ def _publish_directory(
     *,
     populate: Callable[[_TrackedStaging], None],
     verify: Callable[[Path], object],
+    mutation_state: list[bool] | None = None,
 ) -> object:
+    if mutation_state is not None:
+        mutation_state[0] = False
     try:
         output = _canonical_new_child(output_root, status=2)
     except SnapshotBatchError as error:
@@ -1246,6 +1249,10 @@ def _publish_directory(
                 "publication_changed", "staging root identity changed"
             )
         try:
+            if mutation_state is not None:
+                # From this point until an exact post-failure classification,
+                # an interrupt may have raced with the no-replace rename.
+                mutation_state[0] = True
             if parent_descriptor is not None:
                 _rename_directory_noreplace(
                     Path(staging.root.name),
@@ -1289,6 +1296,8 @@ def _publish_directory(
                 staging_identity == staging.root_identity
                 and output_identity != staging.root_identity
             ):
+                if mutation_state is not None:
+                    mutation_state[0] = False
                 if isinstance(error, FileExistsError):
                     raise ReplayTaskResponseError(
                         "output_exists", "output was created concurrently"
@@ -1502,7 +1511,9 @@ def _build_index(
     return index, wires
 
 
-def _export_split(args: argparse.Namespace) -> DiscoveryTaskSplitExportIndexV1:
+def _export_split(
+    args: argparse.Namespace, *, mutation_state: list[bool] | None = None
+) -> DiscoveryTaskSplitExportIndexV1:
     _require_key_id(args.key_id)
     try:
         first_public = load_verified_task_export(
@@ -1573,7 +1584,10 @@ def _export_split(args: argparse.Namespace) -> DiscoveryTaskSplitExportIndexV1:
         )
 
     published = _publish_directory(
-        output_root, populate=populate, verify=verify
+        output_root,
+        populate=populate,
+        verify=verify,
+        mutation_state=mutation_state,
     )
     if (
         type(published) is not VerifiedDiscoveryTaskSplitExportV1
@@ -1619,7 +1633,9 @@ def _read_pinned_response_body(
     return _strict_json_object_line(payload), payload
 
 
-def _bind_response(args: argparse.Namespace) -> tuple[
+def _bind_response(
+    args: argparse.Namespace, *, mutation_state: list[bool] | None = None
+) -> tuple[
     ReplayAuthoringResponseV1, str, str
 ]:
     pending, pending_wire = _read_pinned_pending(
@@ -1660,7 +1676,10 @@ def _bind_response(args: argparse.Namespace) -> tuple[
         )
 
     published = _publish_directory(
-        output_root, populate=populate, verify=verify
+        output_root,
+        populate=populate,
+        verify=verify,
+        mutation_state=mutation_state,
     )
     if type(published) is not ReplayAuthoringResponseV1 or published != envelope:
         raise ReplayTaskResponseError(
@@ -1751,12 +1770,11 @@ def _write_error(code: str) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    committed = False
+    mutation_state = [False]
     try:
         args = _parser().parse_args(argv)
         if args.command == "export-split":
-            index = _export_split(args)
-            committed = True
+            index = _export_split(args, mutation_state=mutation_state)
             result = _export_summary("export-split", "published", index)
         elif args.command == "verify-export":
             verified = read_discovery_task_split_export_v1(
@@ -1766,8 +1784,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             result = _export_summary("verify-export", "verified", verified.index)
         elif args.command == "bind-response":
-            response, pending_wire, body_wire = _bind_response(args)
-            committed = True
+            response, pending_wire, body_wire = _bind_response(
+                args, mutation_state=mutation_state
+            )
             result = _response_summary(
                 "bind-response",
                 "published",
@@ -1785,12 +1804,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         _write_stdout(result)
     except KeyboardInterrupt:
-        _write_error("committed_uncertain" if committed else "interrupted")
-        return EXIT_COMMITTED_UNCERTAIN if committed else EXIT_INTERRUPTED
-    except ReplayTaskResponseError as error:
-        publication_may_exist = error.committed or committed
         _write_error(
-            error.code if error.committed or not committed else "committed_uncertain"
+            "committed_uncertain" if mutation_state[0] else "interrupted"
+        )
+        return (
+            EXIT_COMMITTED_UNCERTAIN
+            if mutation_state[0]
+            else EXIT_INTERRUPTED
+        )
+    except ReplayTaskResponseError as error:
+        publication_may_exist = error.committed or mutation_state[0]
+        _write_error(
+            error.code
+            if error.committed or not mutation_state[0]
+            else "committed_uncertain"
         )
         return (
             EXIT_COMMITTED_UNCERTAIN
@@ -1798,11 +1825,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             else EXIT_REJECTED
         )
     except (SnapshotBatchError, TrustedInputError, OSError, TypeError, ValueError):
-        _write_error("committed_uncertain" if committed else "input_rejected")
-        return EXIT_COMMITTED_UNCERTAIN if committed else EXIT_REJECTED
+        _write_error(
+            "committed_uncertain" if mutation_state[0] else "input_rejected"
+        )
+        return (
+            EXIT_COMMITTED_UNCERTAIN
+            if mutation_state[0]
+            else EXIT_REJECTED
+        )
     except Exception:
-        _write_error("committed_uncertain" if committed else "internal_error")
-        return EXIT_COMMITTED_UNCERTAIN if committed else EXIT_REJECTED
+        _write_error(
+            "committed_uncertain" if mutation_state[0] else "internal_error"
+        )
+        return (
+            EXIT_COMMITTED_UNCERTAIN
+            if mutation_state[0]
+            else EXIT_REJECTED
+        )
     return EXIT_SUCCESS
 
 
