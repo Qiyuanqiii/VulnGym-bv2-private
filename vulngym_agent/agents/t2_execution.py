@@ -16,7 +16,7 @@ import re
 from types import MappingProxyType
 
 from vulngym_agent.agents.model_runtime import StructuredModelBackend
-from vulngym_agent.agents.t2_inputs import T2TaskInputV1
+from vulngym_agent.agents.t2_inputs import parse_t2_task_input
 from vulngym_agent.agents.t2_toolbox import (
     LOCAL_T2_TOOL_NAMES,
     LocalT2Toolbox,
@@ -181,7 +181,7 @@ class LocalT2ContextFactory:
     ) -> ProducerAttemptController:
         # Parse before consulting trusted configuration.  Every real attempt
         # therefore crosses the same strict, path-free T2 input boundary.
-        task_input = T2TaskInputV1.from_task(task)
+        task_input = parse_t2_task_input(task)
         checked_plan = self._validate_attempt_plan(
             task, attempt=attempt, mode=mode, plan=plan
         )

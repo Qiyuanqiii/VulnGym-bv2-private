@@ -251,7 +251,8 @@ class LocalStructuredT2ProducerTests(unittest.TestCase):
             report_id=REPORT_ID,
             entry_id=ENTRY_ID,
             inputs={
-                "contract_version": 1,
+                "contract_version": 2,
+                "expected_vulnerable_commit": self.vulnerable_commit,
                 "input_line": 1,
                 "repo_url": REPO_URL,
                 "package": {
@@ -268,6 +269,24 @@ class LocalStructuredT2ProducerTests(unittest.TestCase):
                 },
             },
         )
+
+    def test_v2_rejects_advisory_parent_that_differs_from_public_snapshot(
+        self,
+    ) -> None:
+        task = self._task()
+        value = task.to_dict()
+        value["inputs"]["expected_vulnerable_commit"] = "f" * 40
+        mismatched = RunTask.from_dict(value)
+
+        draft, projection, _ = self._generate(
+            _ScriptedBackend(), task=mismatched
+        )
+
+        self.assertIsInstance(draft, ProductionDeferredDraft)
+        assert isinstance(draft, ProductionDeferredDraft)
+        self.assertEqual(draft.stage, "resolve_commit")
+        self.assertEqual(draft.reason_code, "vulnerable_commit_mismatch")
+        self.assertIn("git_parents", projection.tool_names)
 
     def _factory(self, backend: _ScriptedBackend) -> LocalT2ContextFactory:
         return LocalT2ContextFactory(
@@ -354,6 +373,11 @@ class LocalStructuredT2ProducerTests(unittest.TestCase):
             ("plan", "semantic_judge", "reflection"),
         )
 
+        plan = next(request for request in backend.requests if request.stage == "plan")
+        self.assertEqual(
+            plan.payload["expected_vulnerable_commit"],
+            self.vulnerable_commit,
+        )
         semantic = next(
             request for request in backend.requests if request.stage == "semantic_judge"
         )

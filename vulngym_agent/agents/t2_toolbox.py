@@ -54,7 +54,7 @@ from vulngym_agent.tools.git import (
     validate_repo_relative_path,
 )
 
-from .t2_inputs import T2TaskInputV1
+from .t2_inputs import T2TaskInput, parse_t2_task_input
 
 
 # Keep single strings below ToolArtifact's per-string bound and leave ample
@@ -187,15 +187,13 @@ class LocalT2Toolbox:
     def __init__(
         self,
         task: RunTask,
-        task_input: T2TaskInputV1,
+        task_input: T2TaskInput,
         package_root: str | Path,
         repo_path: str | Path,
     ) -> None:
         if not isinstance(task, RunTask):
             raise ValueError("task must be a RunTask")
-        if not isinstance(task_input, T2TaskInputV1):
-            raise ValueError("task_input must be a T2TaskInputV1")
-        if T2TaskInputV1.from_task(task) != task_input:
+        if parse_t2_task_input(task) != task_input:
             raise ValueError("task_input must exactly match task.inputs")
 
         self.task = task

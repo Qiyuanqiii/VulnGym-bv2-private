@@ -14,7 +14,13 @@ from .model_runtime import (
     StructuredModelBackend,
 )
 from .t1_validator import T1DeterministicValidator, T1ValidationOutcome
-from .t2_inputs import T2Hints, T2TaskInputV1
+from .t2_inputs import (
+    T2Hints,
+    T2TaskInput,
+    T2TaskInputV1,
+    T2TaskInputV2,
+    parse_t2_task_input,
+)
 from .t2_producer import T2Producer
 from .t2_toolbox import LOCAL_T2_TOOL_NAMES, LocalT2Toolbox
 
@@ -92,5 +98,8 @@ __all__ = [
     "T1ValidationOutcome",
     "T2Hints",
     "T2Producer",
+    "T2TaskInput",
     "T2TaskInputV1",
+    "T2TaskInputV2",
+    "parse_t2_task_input",
 ]

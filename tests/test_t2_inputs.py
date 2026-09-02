@@ -7,7 +7,11 @@ import unittest
 
 from jsonschema.validators import validator_for
 
-from vulngym_agent.agents.t2_inputs import T2TaskInputV1
+from vulngym_agent.agents.t2_inputs import (
+    T2TaskInputV1,
+    T2TaskInputV2,
+    parse_t2_task_input,
+)
 from vulngym_agent.orchestrator import RunTask
 
 
@@ -173,6 +177,37 @@ class T2TaskInputTests(unittest.TestCase):
         ):
             with self.subTest(mutation=mutation):
                 self.assertTrue(list(validator.iter_errors(mutation)))
+
+    def test_v2_binds_the_expected_vulnerable_snapshot_commit(self) -> None:
+        inputs = _inputs()
+        inputs["contract_version"] = 2
+        inputs["expected_vulnerable_commit"] = "b" * 40
+        task = _task(inputs)
+
+        parsed = parse_t2_task_input(task)
+
+        self.assertIsInstance(parsed, T2TaskInputV2)
+        self.assertEqual(parsed.expected_vulnerable_commit, "b" * 40)
+        self.assertEqual(parsed.to_dict(), inputs)
+        with self.assertRaisesRegex(ValueError, "keys differ"):
+            T2TaskInputV1.from_task(task)
+
+        schema = json.loads(
+            (ROOT / "schemas" / "t2_task_v2.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        validator_type = validator_for(schema)
+        validator_type.check_schema(schema)
+        validator = validator_type(schema)
+        self.assertEqual(list(validator.iter_errors(parsed.to_dict())), [])
+
+        for replacement in ("B" * 40, "b" * 39, True, None):
+            with self.subTest(replacement=replacement):
+                changed = deepcopy(inputs)
+                changed["expected_vulnerable_commit"] = replacement
+                with self.assertRaises(ValueError):
+                    parse_t2_task_input(_task(changed))
 
 
 if __name__ == "__main__":

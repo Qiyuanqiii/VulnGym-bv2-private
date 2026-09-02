@@ -51,7 +51,7 @@ from vulngym_agent.orchestrator.producer_context import ProducerExecutionContext
 from vulngym_agent.tools import ToolResult
 
 from .model_runtime import ModelResult
-from .t2_inputs import T2TaskInputV1
+from .t2_inputs import T2TaskInput, T2TaskInputV2, parse_t2_task_input
 
 
 _MAX_SEMANTIC_CANDIDATES = 64
@@ -392,7 +392,7 @@ class LocalStructuredT2Producer:
         ):
             raise ValueError("context does not identify the initial generation round")
         try:
-            task_input = T2TaskInputV1.from_task(task)
+            task_input = parse_t2_task_input(task)
         except (TypeError, ValueError):
             if task.report_id is None or task.entry_id is None:
                 raise
@@ -431,40 +431,42 @@ class LocalStructuredT2Producer:
             )
 
     def _generate(
-        self, run: _Attempt, task_input: T2TaskInputV1
+        self, run: _Attempt, task_input: T2TaskInput
     ) -> Mapping[str, Any]:
         allowed_modes = (
             ("sink", "guard")
             if task_input.hints.critical_mode == "auto"
             else (task_input.hints.critical_mode,)
         )
-        plan = run.model_call(
-            "plan",
-            {
-                "contract_version": 1,
-                "task_id": run.task.task_id,
-                "report_id": run.task.report_id,
-                "entry_id": run.task.entry_id,
-                "inputs_sha256": canonical_sha256(run.task.inputs),
-                "repo_url": task_input.repo_url,
-                "package": task_input.package.to_dict(),
-                "hints": task_input.hints.to_dict(),
-                "allowed_critical_modes": list(allowed_modes),
-                "required_sequence": [
-                    "local_advisory",
-                    "advisory_facts",
-                    "local_repo",
-                    "single_fix",
-                    "single_parent",
-                    "ancestry",
-                    "declared_path_diffs",
-                    "critical_candidates",
-                    "entry_candidates",
-                    "schema_validation",
-                    "reflection",
-                ],
-            },
-        )
+        plan_payload: dict[str, Any] = {
+            "contract_version": 1,
+            "task_id": run.task.task_id,
+            "report_id": run.task.report_id,
+            "entry_id": run.task.entry_id,
+            "inputs_sha256": canonical_sha256(run.task.inputs),
+            "repo_url": task_input.repo_url,
+            "package": task_input.package.to_dict(),
+            "hints": task_input.hints.to_dict(),
+            "allowed_critical_modes": list(allowed_modes),
+            "required_sequence": [
+                "local_advisory",
+                "advisory_facts",
+                "local_repo",
+                "single_fix",
+                "single_parent",
+                "ancestry",
+                "declared_path_diffs",
+                "critical_candidates",
+                "entry_candidates",
+                "schema_validation",
+                "reflection",
+            ],
+        }
+        if isinstance(task_input, T2TaskInputV2):
+            plan_payload["expected_vulnerable_commit"] = (
+                task_input.expected_vulnerable_commit
+            )
+        plan = run.model_call("plan", plan_payload)
         plan_response = self._exact_response(
             plan, frozenset({"action", "critical_mode"}), "plan"
         )
@@ -567,6 +569,18 @@ class LocalStructuredT2Producer:
                 ("the advisory fix must have exactly one vulnerable parent",),
             )
         vulnerable_commit = parents[0]
+        if (
+            isinstance(task_input, T2TaskInputV2)
+            and vulnerable_commit != task_input.expected_vulnerable_commit
+        ):
+            raise _Stop(
+                "resolve_commit",
+                "vulnerable_commit_mismatch",
+                (
+                    "the advisory-derived vulnerable parent differs from the "
+                    "answer-free benchmark snapshot pin",
+                ),
+            )
         ancestry = run.tool_call(
             "version_ancestry",
             {
@@ -1002,7 +1016,7 @@ class LocalStructuredT2Producer:
         ):
             raise ValueError("context does not identify the active repair round")
         try:
-            task_input = T2TaskInputV1.from_task(task)
+            task_input = parse_t2_task_input(task)
             previous = freeze_entry_candidate(previous_entry)
         except (TypeError, ValueError):
             if task.report_id is None or task.entry_id is None:
@@ -1041,7 +1055,7 @@ class LocalStructuredT2Producer:
     def _repair(
         self,
         run: _Attempt,
-        task_input: T2TaskInputV1,
+        task_input: T2TaskInput,
         previous: Mapping[str, Any],
         plan: RepairPlan,
     ) -> Mapping[str, Any]:
@@ -1193,6 +1207,11 @@ class LocalStructuredT2Producer:
             candidate.get("report_id") != run.task.report_id
             or candidate.get("entry_id") != run.task.entry_id
             or candidate.get("repo_url") != task_input.repo_url
+            or (
+                isinstance(task_input, T2TaskInputV2)
+                and candidate.get("commit")
+                != task_input.expected_vulnerable_commit
+            )
             or candidate.get("origin") != ORIGIN
             or type(candidate.get("verify")) is not int
             or candidate.get("verify") != 0
@@ -1200,7 +1219,10 @@ class LocalStructuredT2Producer:
             raise _Stop(
                 "repair",
                 "task_binding_changed",
-                ("repair must preserve task identity, origin, repository, and verify=0",),
+                (
+                    "repair must preserve task identity, origin, repository, "
+                    "the benchmark snapshot commit, and verify=0",
+                ),
             )
 
         validation = run.tool_call("validate_schema", {"candidate": candidate})

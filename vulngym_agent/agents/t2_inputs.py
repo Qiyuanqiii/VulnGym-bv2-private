@@ -262,4 +262,116 @@ class T2TaskInputV1:
         }
 
 
-__all__ = ["T2Hints", "T2TaskInputV1"]
+@dataclass(frozen=True, slots=True)
+class T2TaskInputV2:
+    """A benchmark-bound T2 task with an explicit vulnerable snapshot pin.
+
+    Version 1 remains readable for historical replays.  New benchmark work
+    must use this contract so the advisory-derived parent cannot silently
+    drift away from the answer-free public task's ``repo_url + commit``.
+    """
+
+    input_line: int
+    repo_url: str
+    expected_vulnerable_commit: str
+    package: PackageSpec
+    hints: T2Hints
+    contract_version: int = 2
+
+    def __post_init__(self) -> None:
+        if type(self.contract_version) is not int or self.contract_version != 2:
+            raise ValueError("contract_version must be integer 2")
+        # Reuse the complete v1 validation surface for all common fields.
+        T2TaskInputV1(
+            input_line=self.input_line,
+            repo_url=self.repo_url,
+            package=self.package,
+            hints=self.hints,
+        )
+        object.__setattr__(
+            self,
+            "expected_vulnerable_commit",
+            validate_commit_sha(self.expected_vulnerable_commit),
+        )
+
+    @classmethod
+    def from_task(cls, task: RunTask) -> "T2TaskInputV2":
+        if not isinstance(task, RunTask):
+            raise ValueError("task must be a RunTask")
+        if task.report_id is None or task.entry_id is None:
+            raise ValueError("real T2 tasks require report_id and entry_id anchors")
+        value = task.inputs
+        _strict_keys(
+            value,
+            expected=frozenset(
+                {
+                    "contract_version",
+                    "expected_vulnerable_commit",
+                    "input_line",
+                    "repo_url",
+                    "package",
+                    "hints",
+                }
+            ),
+            name="T2 task inputs",
+        )
+        package_value = value["package"]
+        hints_value = value["hints"]
+        if not isinstance(package_value, Mapping):
+            raise ValueError("package must be a JSON object")
+        if not isinstance(hints_value, Mapping):
+            raise ValueError("hints must be a JSON object")
+        _strict_keys(
+            package_value,
+            expected=frozenset({"advisory", "references", "patches"}),
+            name="T2 package",
+        )
+        return cls(
+            contract_version=value["contract_version"],
+            input_line=value["input_line"],
+            repo_url=value["repo_url"],
+            expected_vulnerable_commit=value["expected_vulnerable_commit"],
+            package=PackageSpec(
+                advisory=package_value.get("advisory"),
+                references=package_value.get("references", ()),
+                patches=package_value.get("patches", ()),
+            ),
+            hints=T2Hints.from_dict(hints_value),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "contract_version": self.contract_version,
+            "expected_vulnerable_commit": self.expected_vulnerable_commit,
+            "input_line": self.input_line,
+            "repo_url": self.repo_url,
+            "package": self.package.to_dict(),
+            "hints": self.hints.to_dict(),
+        }
+
+
+T2TaskInput = T2TaskInputV1 | T2TaskInputV2
+
+
+def parse_t2_task_input(task: RunTask) -> T2TaskInput:
+    """Parse exactly one supported version without accepting key supersets."""
+
+    if not isinstance(task, RunTask):
+        raise ValueError("task must be a RunTask")
+    version = task.inputs.get("contract_version")
+    if type(version) is not int:
+        raise ValueError("contract_version must be an integer")
+    if version == 1:
+        return T2TaskInputV1.from_task(task)
+    if version == 2:
+        return T2TaskInputV2.from_task(task)
+    raise ValueError("unsupported T2 task contract_version")
+
+
+__all__ = [
+    "T2Hints",
+    "T2TaskInput",
+    "T2TaskInputV1",
+    "T2TaskInputV2",
+    "parse_t2_task_input",
+]

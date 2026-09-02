@@ -105,6 +105,7 @@ class T1DeterministicValidator:
         expected_repo_url: str | None = None,
         expected_report_id: str | None = None,
         expected_entry_id: str | None = None,
+        expected_vulnerable_commit: str | None = None,
     ) -> None:
         if expected_repo_url is not None and (
             not isinstance(expected_repo_url, str) or not expected_repo_url
@@ -120,12 +121,20 @@ class T1DeterministicValidator:
             or re.fullmatch(r"entry-[0-9]{5}", expected_entry_id) is None
         ):
             raise ValueError("expected_entry_id must be a formal Entry ID or None")
+        if expected_vulnerable_commit is not None and (
+            not isinstance(expected_vulnerable_commit, str)
+            or re.fullmatch(r"[0-9a-f]{40}", expected_vulnerable_commit) is None
+        ):
+            raise ValueError(
+                "expected_vulnerable_commit must be a lower-case commit or None"
+            )
         self._repository = repository
         self._repository_note = repository_note
         self._package_result = package_result
         self._expected_repo_url = expected_repo_url
         self._expected_report_id = expected_report_id
         self._expected_entry_id = expected_entry_id
+        self._expected_vulnerable_commit = expected_vulnerable_commit
         self._line_tolerance = line_tolerance
         self._evidence_scope = "FACT"
         self._evidence_sequence = 0
@@ -348,6 +357,15 @@ class T1DeterministicValidator:
             evidence_items,
             missing,
             advisory_facts.fix_commits if advisory_facts is not None else (),
+        )
+        self._validate_task_bound_field(
+            "commit",
+            candidate,
+            self._expected_vulnerable_commit,
+            report_id,
+            fields,
+            evidence_items,
+            missing,
         )
         self._validate_location(
             "entry_point", candidate, report_id, fields, evidence_items, missing

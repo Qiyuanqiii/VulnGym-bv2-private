@@ -187,6 +187,7 @@ class T1BatchTests(unittest.TestCase):
             expected_repo_url="https://github.com/example/expected",
             expected_report_id="GHSA-AAAA-BBBB-CCCC",
             expected_entry_id="entry-99999",
+            expected_vulnerable_commit="f" * 40,
         )
 
         outcome = validator.validate(candidate)
@@ -196,6 +197,7 @@ class T1BatchTests(unittest.TestCase):
             "repo_url": "https://github.com/example/expected",
             "report_id": "GHSA-AAAA-BBBB-CCCC",
             "entry_id": "entry-99999",
+            "commit": "f" * 40,
         }
         for name, value in expected.items():
             with self.subTest(field=name):

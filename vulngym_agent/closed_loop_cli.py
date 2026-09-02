@@ -40,7 +40,7 @@ from vulngym_agent.agents.model_runtime import (
 from vulngym_agent.agents.real_t2_producer import LocalStructuredT2Producer
 from vulngym_agent.agents.t1_validator import T1DeterministicValidator
 from vulngym_agent.agents.t2_execution import LocalT2ContextFactory
-from vulngym_agent.agents.t2_inputs import T2TaskInputV1
+from vulngym_agent.agents.t2_inputs import T2TaskInputV2, parse_t2_task_input
 from vulngym_agent.evidence import (
     DEFAULT_MAX_FILE_BYTES,
     DEFAULT_MAX_PACKAGE_BYTES,
@@ -253,7 +253,7 @@ def _parse_task_value(value: Any, *, input_line: int) -> RunTask:
     if not isinstance(value, Mapping):
         raise ValueError("task line must be a JSON object")
     task = RunTask.from_dict(value)
-    task_input = T2TaskInputV1.from_task(task)
+    task_input = parse_t2_task_input(task)
     if task_input.input_line != input_line:
         raise ValueError("task inputs.input_line does not match the physical line")
     return task
@@ -846,7 +846,7 @@ class LocalT1ValidatorFactory:
         )
 
     def __call__(self, task: RunTask) -> T1DeterministicValidator:
-        task_input = T2TaskInputV1.from_task(task)
+        task_input = parse_t2_task_input(task)
         repo_path = self._repo_map.get(task_input.repo_url)
         repository: GitRepository | None = None
         repository_note: str | None = None
@@ -889,6 +889,11 @@ class LocalT1ValidatorFactory:
             expected_repo_url=task_input.repo_url,
             expected_report_id=task.report_id,
             expected_entry_id=task.entry_id,
+            expected_vulnerable_commit=(
+                task_input.expected_vulnerable_commit
+                if isinstance(task_input, T2TaskInputV2)
+                else None
+            ),
         )
 
 
