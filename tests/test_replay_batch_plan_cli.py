@@ -32,7 +32,11 @@ import vulngym_agent.replay_authoring_receipt as receipt_module
 import vulngym_agent.replay_batch_plan_cli as cli
 
 
-RUNTIME_TMP = Path(r"D:\VulnGym-bv2-runtime\tmp")
+RUNTIME_TMP = (
+    Path(r"D:\VulnGym-bv2-runtime\tmp")
+    if os.name == "nt"
+    else Path(tempfile.gettempdir()) / "VulnGym-bv2-runtime" / "tmp"
+).resolve()
 TRUST_SLOTS = (
     ("actor-approval", "author"),
     ("actor-approval", "critic"),
@@ -72,7 +76,7 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
     def setUp(self) -> None:
         RUNTIME_TMP.mkdir(parents=True, exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=RUNTIME_TMP)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.benchmark = self.root / "benchmark"
         self.benchmark.mkdir(mode=0o700)
         self.tasks = {
@@ -96,6 +100,9 @@ class ReplayBatchPlanCliTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_temporary_root_is_absolute(self) -> None:
+        self.assertTrue(self.root.is_absolute())
 
     @staticmethod
     def _tasks(split: str) -> tuple[SnapshotTaskSpec, ...]:

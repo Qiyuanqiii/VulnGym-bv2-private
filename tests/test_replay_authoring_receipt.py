@@ -50,7 +50,11 @@ import vulngym_agent.replay_authoring_receipt_cli as receipt_cli
 import vulngym_agent.replay_batch_plan_cli as batch_cli
 
 
-RUNTIME_TMP = Path(r"D:\VulnGym-bv2-runtime\tmp")
+RUNTIME_TMP = (
+    Path(r"D:\VulnGym-bv2-runtime\tmp")
+    if os.name == "nt"
+    else Path(tempfile.gettempdir()) / "VulnGym-bv2-runtime" / "tmp"
+).resolve()
 TASK_ID = "VG-TEST-0123456789ABCDEF0123"
 REPO_URL = "https://github.com/example/replay-receipt"
 COMMIT = "1" * 40
@@ -134,7 +138,7 @@ def _summary(task_id: str, ordinal: int = 1) -> ReplayAuthoringSummaryV1:
 class ReplayAuthoringReceiptTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = _temporary()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.snapshot_key = _key("snapshot")
         self.signing_keys = _signing_keys()
         self.trust_registry = _registry(self.signing_keys)
@@ -189,6 +193,9 @@ class ReplayAuthoringReceiptTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_temporary_root_is_absolute(self) -> None:
+        self.assertTrue(self.root.is_absolute())
 
     def _approvals(
         self, observation: ReplayClosureObservationV2 | None = None
@@ -522,7 +529,7 @@ class ReplayAuthoringReceiptTests(unittest.TestCase):
 class ReplayAuthoringIndexTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = _temporary()
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.benchmark = self.root / "benchmark"
         self.receipts = self.root / "receipts"
         self.benchmark.mkdir(mode=0o700)
