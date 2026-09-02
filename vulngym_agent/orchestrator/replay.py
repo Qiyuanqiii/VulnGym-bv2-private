@@ -262,6 +262,55 @@ class VerifiedTaskEntries:
         object.__setattr__(self, "entries", entries)
 
 
+@dataclass(frozen=True, slots=True)
+class VerifiedTaskPrediction:
+    """One terminal T2 candidate paired with its exact T1 report.
+
+    This projection may retain a schema-valid candidate whose terminal status
+    is ``manual_review``.  It does not weaken the replay publication contract:
+    the replay bundle's own ``entries.jsonl`` remains finalized/correct-only.
+    """
+
+    task_id: str
+    input_line: int
+    status: str
+    entry: Mapping[str, Any] | None = None
+    validation: ValidationReport | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.task_id, str) or not _TASK_ID_RE.fullmatch(
+            self.task_id
+        ):
+            raise ValueError("task_id must be a valid task identifier")
+        _positive_input_line(self.input_line)
+        if not isinstance(self.status, str) or self.status not in TERMINAL_STATUSES:
+            raise ValueError("status must be a terminal run status")
+        entry = self.entry
+        if entry is not None:
+            entry = ProductionOutcome(candidate=entry).candidate
+            object.__setattr__(self, "entry", entry)
+        report = self.validation
+        if report is not None and not isinstance(report, ValidationReport):
+            raise ValueError("validation must be a ValidationReport or None")
+        if report is not None and report.input_line != self.input_line:
+            raise ValueError("validation input_line must match the task input line")
+        if entry is not None and report is not None and (
+            report.report_id != entry["report_id"]
+            or report.entry_id != entry["entry_id"]
+        ):
+            raise ValueError("submission Entry and T1 validation identities differ")
+        if self.status == "finalized" and (
+            entry is None or report is None or report.verdict != "correct"
+        ):
+            raise ValueError(
+                "a finalized prediction requires an Entry and correct validation"
+            )
+
+    @property
+    def complete(self) -> bool:
+        return self.entry is not None and self.validation is not None
+
+
 def _freeze_verified_tasks(
     tasks: Iterable[VerifiedTaskEntries],
 ) -> tuple[VerifiedTaskEntries, ...]:
@@ -284,6 +333,28 @@ def _freeze_verified_tasks(
     return frozen
 
 
+def _freeze_verified_predictions(
+    tasks: Iterable[VerifiedTaskPrediction],
+) -> tuple[VerifiedTaskPrediction, ...]:
+    frozen = tuple(tasks)
+    if any(not isinstance(task, VerifiedTaskPrediction) for task in frozen):
+        raise ValueError(
+            "predictions must contain only VerifiedTaskPrediction values"
+        )
+    task_ids = [task.task_id for task in frozen]
+    input_lines = [task.input_line for task in frozen]
+    if len(task_ids) != len(set(task_ids)):
+        raise ValueError("prediction task IDs must be unique")
+    if input_lines != sorted(set(input_lines)):
+        raise ValueError("prediction input lines must be strictly increasing")
+    entry_ids = [
+        task.entry["entry_id"] for task in frozen if task.entry is not None
+    ]
+    if len(entry_ids) != len(set(entry_ids)):
+        raise ValueError("prediction Entry IDs must be unique")
+    return frozen
+
+
 @dataclass(frozen=True, slots=True)
 class ReplayBundle:
     """Compact result of an offline artifact read and integrity check."""
@@ -292,6 +363,7 @@ class ReplayBundle:
     root_records: tuple[Mapping[str, Any], ...]
     record_counts: Mapping[str, int]
     verified_tasks: tuple[VerifiedTaskEntries, ...] = ()
+    verified_predictions: tuple[VerifiedTaskPrediction, ...] = ()
 
     def __post_init__(self) -> None:
         roots = tuple(MappingProxyType(dict(item)) for item in self.root_records)
@@ -301,6 +373,11 @@ class ReplayBundle:
         )
         object.__setattr__(
             self, "verified_tasks", _freeze_verified_tasks(self.verified_tasks)
+        )
+        object.__setattr__(
+            self,
+            "verified_predictions",
+            _freeze_verified_predictions(self.verified_predictions),
         )
 
     @property
@@ -343,6 +420,31 @@ class VerifiedFormalEntries:
     @property
     def task_ids(self) -> tuple[str, ...]:
         return tuple(task.task_id for task in self.tasks)
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedSubmissionPredictions:
+    """Narrow integrity-checked terminal candidates for submission export."""
+
+    dataset_sha256: str
+    tasks: tuple[VerifiedTaskPrediction, ...]
+    input_failure_count: int = 0
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.dataset_sha256, "dataset_sha256")
+        object.__setattr__(
+            self, "tasks", _freeze_verified_predictions(self.tasks)
+        )
+        if (
+            isinstance(self.input_failure_count, bool)
+            or not isinstance(self.input_failure_count, int)
+            or self.input_failure_count < 0
+        ):
+            raise ValueError("input_failure_count must be a non-negative integer")
+
+    @property
+    def complete_tasks(self) -> tuple[VerifiedTaskPrediction, ...]:
+        return tuple(task for task in self.tasks if task.complete)
 
 
 @dataclass(slots=True)
@@ -2986,6 +3088,53 @@ def read_closed_loop_artifacts(
         raise ReplayArtifactError(
             "published formal Entry has no verified state root"
         )
+    verified_predictions: list[VerifiedTaskPrediction] = []
+    for root_record in root_records:
+        if root_record["root_kind"] != "state":
+            continue
+        state_record = index[root_record["root_record_id"]]
+        state = state_record.selected["state"]
+        status = state["status"]
+        candidate_value = state.get("candidate")
+        report_value = state.get("last_validation")
+        validation_history = state.get("validation_history")
+        candidate_sha256 = state.get("candidate_sha256")
+        validation_candidate_sha256 = (
+            validation_history[-1].get("candidate_sha256")
+            if isinstance(validation_history, list) and validation_history
+            and isinstance(validation_history[-1], Mapping)
+            else None
+        )
+        # A failed run can retain an accepted repair candidate alongside the
+        # previous round's last_validation when construction of the next T1
+        # validator fails.  Never project that stale pair as one prediction.
+        # Only successful terminal validation states are submission-eligible.
+        pair_is_current = (
+            status in {"finalized", "manual_review"}
+            and candidate_value is not None
+            and report_value is not None
+            and isinstance(candidate_sha256, str)
+            and candidate_sha256 == validation_candidate_sha256
+        )
+        try:
+            report = (
+                None
+                if not pair_is_current
+                else _validation_report_from_dict(report_value)
+            )
+            verified_predictions.append(
+                VerifiedTaskPrediction(
+                    task_id=state_record.task_id,
+                    input_line=state_record.input_line,
+                    status=status,
+                    entry=candidate_value if pair_is_current else None,
+                    validation=report,
+                )
+            )
+        except (TypeError, ValueError) as error:
+            raise ReplayArtifactError(
+                "terminal state has an invalid submission prediction"
+            ) from error
     counts[_MANIFEST_FILE] = manifest_summary["line_count"]
     manifest = ReplayManifest(
         dataset_sha256=dataset_sha256,
@@ -3003,6 +3152,7 @@ def read_closed_loop_artifacts(
         root_records=tuple(root_records),
         record_counts=counts,
         verified_tasks=tuple(verified_tasks),
+        verified_predictions=tuple(verified_predictions),
     )
 
 
@@ -3046,6 +3196,43 @@ def read_verified_formal_entries(
     return VerifiedFormalEntries(
         dataset_sha256=bundle.manifest.dataset_sha256,
         tasks=bundle.verified_tasks,
+        input_failure_count=bundle.manifest.input_failures,
+    )
+
+
+def read_verified_submission_predictions(
+    bundle_dir: str | os.PathLike[str],
+    *,
+    expected_dataset_sha256: str,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+    limits: ReplayLimits | None = None,
+) -> VerifiedSubmissionPredictions:
+    """Return terminal candidates and T1 reports from one pinned replay bundle.
+
+    A trusted dataset digest is mandatory because local replay integrity alone
+    does not authenticate who produced the run.  No task inputs, prompts, model
+    responses, repository paths, or evidence-package contents cross this
+    projection boundary.
+    """
+
+    try:
+        _require_sha256(expected_dataset_sha256, "expected_dataset_sha256")
+    except ValueError as error:
+        raise ReplayArtifactError(
+            "expected_dataset_sha256 must be a lower-case SHA-256 digest"
+        ) from error
+    bundle = read_closed_loop_artifacts(
+        bundle_dir,
+        protected_paths=protected_paths,
+        limits=limits,
+    )
+    if bundle.manifest.dataset_sha256 != expected_dataset_sha256:
+        raise ReplayArtifactError(
+            "replay dataset SHA-256 does not match expected digest"
+        )
+    return VerifiedSubmissionPredictions(
+        dataset_sha256=bundle.manifest.dataset_sha256,
+        tasks=bundle.verified_predictions,
         input_failure_count=bundle.manifest.input_failures,
     )
 
@@ -3100,9 +3287,12 @@ __all__ = [
     "ReplayManifest",
     "ReplayRecord",
     "VerifiedFormalEntries",
+    "VerifiedSubmissionPredictions",
     "VerifiedTaskEntries",
+    "VerifiedTaskPrediction",
     "read_closed_loop_artifacts",
     "read_verified_formal_entries",
+    "read_verified_submission_predictions",
     "verify_closed_loop_artifacts",
     "write_closed_loop_artifacts",
 ]

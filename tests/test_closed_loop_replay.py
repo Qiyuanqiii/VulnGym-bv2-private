@@ -25,6 +25,7 @@ from vulngym_agent.orchestrator import (
     canonical_json,
     canonical_sha256,
     read_closed_loop_artifacts,
+    read_verified_submission_predictions,
     verify_closed_loop_artifacts,
     write_closed_loop_artifacts,
 )
@@ -93,6 +94,17 @@ class ClosedLoopReplayTests(unittest.TestCase):
         return ClosedLoopOrchestrator(
             Producer(), no_validator, FixedProducerContextFactory()
         ).run(self.task)
+
+    def _manual_review(self) -> Any:
+        outcome, _ = self._fixture._run(
+            orchestrator_fixtures._FakeProducer(self.entry),
+            [
+                orchestrator_fixtures._report(
+                    self.entry, {"trace": "uncertain"}, label="uncertain"
+                )
+            ],
+        )
+        return outcome
 
     def _finalized_for_task(self, task: RunTask, input_line: int) -> Any:
         report = replace(
@@ -187,6 +199,110 @@ class ClosedLoopReplayTests(unittest.TestCase):
                     bundle.record_counts["deferred.jsonl"], expected_deferred
                 )
                 self.assertEqual(bundle.root_records[0]["root_kind"], "state")
+
+    def test_pinned_submission_projection_keeps_honest_manual_review(self) -> None:
+        outcome = self._manual_review()
+        self.assertEqual(outcome.status, "manual_review")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "artifacts"
+            manifest = write_closed_loop_artifacts(
+                output, [ReplayRecord(7, self.task, outcome)]
+            )
+
+            projected = read_verified_submission_predictions(
+                output, expected_dataset_sha256=manifest.dataset_sha256
+            )
+
+            self.assertEqual(projected.dataset_sha256, manifest.dataset_sha256)
+            self.assertEqual(projected.input_failure_count, 0)
+            self.assertEqual(len(projected.tasks), 1)
+            task = projected.tasks[0]
+            self.assertTrue(task.complete)
+            self.assertEqual(task.task_id, self.task.task_id)
+            self.assertEqual(task.input_line, 7)
+            self.assertEqual(task.status, "manual_review")
+            self.assertEqual(canonical_sha256(task.entry), canonical_sha256(self.entry))
+            self.assertEqual(task.validation.verdict, "uncertain")
+            self.assertEqual(manifest.entry_count, 0)
+            self.assertEqual((output / "entries.jsonl").read_bytes(), b"")
+
+            with self.assertRaisesRegex(
+                ReplayArtifactError, "does not match expected digest"
+            ):
+                read_verified_submission_predictions(
+                    output, expected_dataset_sha256="0" * 64
+                )
+
+    def test_submission_projection_retains_incomplete_deferred_task(self) -> None:
+        class BrokenFactory:
+            def __call__(self, task: Any) -> Any:
+                raise RuntimeError("validator unavailable")
+
+        validator_failed = ClosedLoopOrchestrator(
+            orchestrator_fixtures._FakeProducer(self.entry),
+            BrokenFactory(),
+            FixedProducerContextFactory(),
+        ).run(self.task)
+        for label, outcome in (
+            ("deferred", self._deferred()),
+            ("validator-failed", validator_failed),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
+                output = Path(temporary) / "artifacts"
+                manifest = write_closed_loop_artifacts(
+                    output, [ReplayRecord(7, self.task, outcome)]
+                )
+
+                projected = read_verified_submission_predictions(
+                    output, expected_dataset_sha256=manifest.dataset_sha256
+                )
+
+                self.assertEqual(len(projected.tasks), 1)
+                self.assertFalse(projected.tasks[0].complete)
+                self.assertIsNone(projected.tasks[0].entry)
+                self.assertIsNone(projected.tasks[0].validation)
+
+    def test_submission_projection_never_pairs_repair_with_stale_report(self) -> None:
+        repaired = deepcopy(self.entry)
+        repaired["vuln_title"] = "Accepted repair without a validator"
+        first_report = orchestrator_fixtures._report(
+            self.entry, {"vuln_title": "incorrect"}, label="bad"
+        )
+
+        class FirstOnlyValidatorFactory:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def __call__(self, task: Any) -> Any:
+                self.calls += 1
+                if self.calls == 1:
+                    return orchestrator_fixtures._SequenceValidatorFactory(
+                        [first_report], task
+                    )(task)
+                raise RuntimeError("repair validator unavailable")
+
+        outcome = ClosedLoopOrchestrator(
+            orchestrator_fixtures._FakeProducer(self.entry, [repaired]),
+            FirstOnlyValidatorFactory(),
+            FixedProducerContextFactory(),
+        ).run(self.task)
+        self.assertEqual(outcome.status, "failed")
+        self.assertEqual(outcome.entry["vuln_title"], repaired["vuln_title"])
+        self.assertEqual(outcome.report, first_report)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "artifacts"
+            manifest = write_closed_loop_artifacts(
+                output, [ReplayRecord(7, self.task, outcome)]
+            )
+            projected = read_verified_submission_predictions(
+                output, expected_dataset_sha256=manifest.dataset_sha256
+            )
+
+        self.assertEqual(len(projected.tasks), 1)
+        self.assertFalse(projected.tasks[0].complete)
+        self.assertIsNone(projected.tasks[0].entry)
+        self.assertIsNone(projected.tasks[0].validation)
 
     def test_sensitive_text_is_omitted_but_benign_path_text_is_preserved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
