@@ -14,6 +14,7 @@ from vulngym_agent.agents.model_runtime import ModelRequest
 from vulngym_agent.agents.real_t2_producer import LocalStructuredT2Producer
 from vulngym_agent.agents.t1_validator import T1ValidationOutcome
 from vulngym_agent.agents.t2_execution import LocalT2ContextFactory
+from vulngym_agent.closed_loop_cli import LocalT1ValidatorFactory
 from vulngym_agent.models import FieldValidation, ValidationReport
 from vulngym_agent.orchestrator.budget import Budget, Limits
 from vulngym_agent.orchestrator.contracts import (
@@ -382,6 +383,91 @@ class LocalStructuredT2ProducerTests(unittest.TestCase):
         self.assertNotIn(str(self.repository), portable)
         self.assertNotIn("package_root", portable)
         self.assertNotIn("repo_path", portable)
+
+    def test_full_entry_lane_runs_real_t2_into_real_t1_with_in_memory_sidecars(
+        self,
+    ) -> None:
+        try:
+            from jsonschema import Draft202012Validator
+        except ImportError:  # pragma: no cover - optional developer dependency
+            self.skipTest("jsonschema is not installed")
+
+        backend = _ScriptedBackend()
+        task = self._task()
+        outcome = ClosedLoopOrchestrator(
+            LocalStructuredT2Producer(),
+            LocalT1ValidatorFactory(
+                self.package_root,
+                {REPO_URL: self.repository},
+            ),
+            self._factory(backend),
+            limits=Limits(
+                max_llm_calls=8,
+                max_tool_calls=80,
+                max_repair_iterations=0,
+            ),
+        ).run(task)
+
+        self.assertEqual(outcome.status, "manual_review")
+        self.assertIsNotNone(outcome.entry)
+        self.assertIsNotNone(outcome.report)
+        self.assertEqual(len(outcome.production_outcomes), 1)
+        self.assertEqual(len(outcome.validation_outcomes), 1)
+        self.assertEqual(
+            outcome.state.stop_reason,
+            "validation_uncertain",
+        )
+
+        candidate = _plain(outcome.entry)
+        self.assertEqual(set(candidate), set(ENTRY_FIELDS))
+        self.assertEqual(candidate["commit"], self.vulnerable_commit)
+        self.assertIs(type(candidate["verify"]), int)
+        self.assertEqual(candidate["verify"], 0)
+        self.assertEqual(
+            candidate,
+            _plain(outcome.production_outcomes[0].candidate),
+        )
+
+        validation = outcome.validation_outcomes[0]
+        self.assertEqual(outcome.report, validation.report)
+        report = validation.report.to_dict()
+        evidence = [item.to_dict() for item in validation.evidence]
+        self.assertTrue(evidence)
+        schema_root = Path(__file__).resolve().parents[1] / "schemas"
+        entry_schema = json.loads(
+            (schema_root / "entry.schema.json").read_text(encoding="utf-8")
+        )
+        validation_schema = json.loads(
+            (schema_root / "validation.schema.json").read_text(encoding="utf-8")
+        )
+        evidence_schema = json.loads(
+            (schema_root / "evidence.schema.json").read_text(encoding="utf-8")
+        )
+        Draft202012Validator(entry_schema).validate(candidate)
+        Draft202012Validator(validation_schema).validate(report)
+        evidence_validator = Draft202012Validator(evidence_schema)
+        for item in evidence:
+            evidence_validator.validate(item)
+
+        self.assertEqual(report["report_id"], candidate["report_id"])
+        self.assertEqual(report["entry_id"], candidate["entry_id"])
+        self.assertEqual(report["input_line"], task.inputs["input_line"])
+        for item in evidence:
+            self.assertEqual(item["report_id"], candidate["report_id"])
+            self.assertEqual(item["entry_id"], candidate["entry_id"])
+
+        referenced = {
+            evidence_id
+            for field in report["fields"].values()
+            for evidence_id in field.get("evidence_refs", [])
+        }
+        self.assertEqual(referenced, {item["evidence_id"] for item in evidence})
+        self.assertEqual(report["verdict"], "uncertain")
+        self.assertEqual(report["fields"]["schema"]["status"], "correct")
+        self.assertEqual(
+            [request.stage for request in backend.requests],
+            ["plan", "semantic_judge", "reflection"],
+        )
 
     def test_generate_defers_when_advisory_names_multiple_fix_commits(self) -> None:
         self._write_advisory((self.fix_commit, self.vulnerable_commit))
