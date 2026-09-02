@@ -40,6 +40,13 @@ MAX_MAPPING_FIELDS = 32
 _HUNK_RE = re.compile(
     r"^@@ -([0-9]+)(?:,([0-9]+))? \+([0-9]+)(?:,([0-9]+))? @@"
 )
+_FIX_ADDED_GUARD_RE = re.compile(
+    r"^\s*(?:if\b|unless\b|assert\b|require\s*\(|(?:validate|verify|"
+    r"check|authorize|authorise|deny|reject)[A-Za-z0-9_]*\s*\(|return\b|"
+    r"raise\b|throw\b|break\s*;?\s*$|continue\s*;?\s*$|"
+    r"goto\s+(?:fail|error|cleanup)\b|abort\s*\()",
+    re.IGNORECASE,
+)
 _CANDIDATE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _MISSING = object()
 
@@ -49,8 +56,9 @@ class PatchCandidateProtocol(Protocol):
 
     ``mode`` may be the resolver modes (``sink``/``guard``) or the patch
     analyzer labels ``dangerous_call``/``early_return``.  ``change_kind`` must
-    describe which side supplied ``code``; only ``removed`` and ``changed`` can
-    become a vulnerable-version location.
+    describe which side supplied ``code``; ``removed``/``changed`` candidates
+    must overlap replaced old-side code, while ``context`` guard candidates
+    must be bounded to an old-side hunk context line beside a fix-added guard.
     """
 
     candidate_id: str
@@ -332,17 +340,29 @@ def _canonical_candidate_mode(mode: str) -> CriticalMode | None:
     return None
 
 
-def _removed_line_numbers(diff: TextFileDiff) -> frozenset[int]:
-    """Extract old-side removed line numbers from our in-process unified diff."""
+def _old_side_line_sets(diff: TextFileDiff) -> tuple[frozenset[int], frozenset[int]]:
+    """Extract old-side replaced lines and guarded context lines from a diff."""
 
     removed: set[int] = set()
+    guard_context: set[int] = set()
     old_line: int | None = None
     in_hunk = False
+    hunk_context: list[int] = []
+    hunk_has_added_guard = False
+
+    def finish_hunk() -> None:
+        if hunk_has_added_guard:
+            guard_context.update(hunk_context)
+
     for line in diff.unified_diff.splitlines():
         match = _HUNK_RE.match(line)
         if match is not None:
+            if in_hunk:
+                finish_hunk()
             old_line = int(match.group(1))
             in_hunk = True
+            hunk_context = []
+            hunk_has_added_guard = False
             continue
         if not in_hunk or old_line is None:
             continue
@@ -350,14 +370,21 @@ def _removed_line_numbers(diff: TextFileDiff) -> frozenset[int]:
             removed.add(old_line)
             old_line += 1
         elif line.startswith(" "):
+            if line[1:].strip():
+                hunk_context.append(old_line)
             old_line += 1
-        elif line.startswith("+") or line.startswith("\\"):
+        elif line.startswith("+"):
+            if _FIX_ADDED_GUARD_RE.search(line[1:]) is not None:
+                hunk_has_added_guard = True
+        elif line.startswith("\\"):
             continue
         else:
             # Only headers may occur outside a hunk.  Unexpected content after
             # a hunk means the generated diff cannot safely support line facts.
             raise ValueError("generated unified diff contains an invalid hunk line")
-    return frozenset(removed)
+    if in_hunk:
+        finish_hunk()
+    return frozenset(removed), frozenset(guard_context)
 
 
 class CriticalOperationResolver:
@@ -613,7 +640,7 @@ class CriticalOperationResolver:
             fact_status: ValidationStatus = "correct"
             evidence = (
                 f"Git corroborated {len(provisional)} {requested_mode} location "
-                "candidate(s) on the vulnerable/removed side. These facts do not "
+                "candidate(s) on the vulnerable/diff-bounded old side. These facts do not "
                 "establish the final vulnerability semantic role."
             )
             missing = (
@@ -679,13 +706,16 @@ class CriticalOperationResolver:
                 "Candidate quotes fix-added code, which cannot be the required location in the vulnerable commit.",
                 "fix_only_added_candidate",
             )
-        if candidate.change_kind not in {"removed", "changed"}:
+        uses_guard_context = (
+            candidate.change_kind == "context" and requested_mode == "guard"
+        )
+        if candidate.change_kind not in {"removed", "changed"} and not uses_guard_context:
             return self._refuted(
                 candidate,
                 requested_mode,
                 vulnerable_text,
                 fix_text,
-                "Candidate is not identified as vulnerable-side removed/changed code.",
+                "Candidate is not identified as vulnerable-side changed code or a guarded old-side context line.",
                 "candidate_not_old_changed_side",
             )
         if candidate.old_line is None:
@@ -805,7 +835,7 @@ class CriticalOperationResolver:
                 source_fact_status="correct",
             )
         try:
-            removed_lines = _removed_line_numbers(cached)
+            removed_lines, guard_context_lines = _old_side_line_sets(cached)
         except ValueError as error:
             evidence = f"Generated diff could not support safe old-side line facts: {error}."
             return self._assessment(
@@ -827,14 +857,26 @@ class CriticalOperationResolver:
         assert location.matched_start is not None
         assert location.matched_end is not None
         matched_span = set(range(location.matched_start, location.matched_end + 1))
-        if not matched_span.intersection(removed_lines):
+        accepted_old_lines = guard_context_lines if uses_guard_context else removed_lines
+        if not matched_span.intersection(accepted_old_lines):
+            old_side_description = (
+                "an old-side context line in a hunk with a fix-added guard"
+                if uses_guard_context
+                else "any removed/replaced old-side line"
+            )
+            error_code = (
+                "candidate_not_in_guard_context"
+                if uses_guard_context
+                else "candidate_not_in_removed_side"
+            )
             return self._refuted(
                 candidate,
                 requested_mode,
                 vulnerable_text,
                 fix_text,
-                "Candidate source exists, but its resolved vulnerable-version span does not overlap any removed/replaced old-side line in the exact diff.",
-                "candidate_not_in_removed_side",
+                "Candidate source exists, but its resolved vulnerable-version span "
+                f"does not overlap {old_side_description} in the exact diff.",
+                error_code,
                 transition_fact_status="correct",
                 source_fact_status="correct",
                 in_removed=False,
@@ -854,6 +896,11 @@ class CriticalOperationResolver:
             f"Patch/source facts do not prove this location is the actual vulnerability {requested_mode}; "
             "the patch-analyzer reason is treated as an untrusted claim."
         )
+        old_side_description = (
+            "an old-side context line in a hunk with a fix-added guard"
+            if uses_guard_context
+            else "removed/replaced old-side code"
+        )
         return self._assessment(
             candidate,
             requested_mode,
@@ -868,7 +915,7 @@ class CriticalOperationResolver:
             evidence=(
                 f"Git proves {path!r} changed from the vulnerable commit to the fix, "
                 f"and committed lines {location.matched_start}-{location.matched_end} "
-                "contain the candidate and overlap removed/replaced old-side code. "
+                f"contain the candidate and overlap {old_side_description}. "
                 f"{semantic_gap}"
             ),
             counterevidence=(semantic_gap,),

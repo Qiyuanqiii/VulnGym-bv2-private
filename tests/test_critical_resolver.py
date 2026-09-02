@@ -155,6 +155,33 @@ class CriticalResolverTests(unittest.TestCase):
         self.assertEqual(result.provisional_candidate_ids, ("guard-1",))
         self.assertFalse(result.candidates[0].semantic_role_verified)
 
+    def test_guard_mode_accepts_old_context_near_fix_added_guard(self) -> None:
+        candidate = CriticalPatchCandidate(
+            candidate_id="guard-context-1",
+            mode="guard",
+            file="src/render.py",
+            change_kind="context",
+            old_line=1,
+            new_line=1,
+            code="def render(value):",
+            reason="old-side context beside a fix-added guard",
+        )
+
+        result = self._resolve([candidate], mode="guard")
+
+        self.assertEqual((result.status, result.fact_status), ("uncertain", "correct"))
+        self.assertEqual(result.provisional_candidate_ids, ("guard-context-1",))
+        self.assertEqual(
+            result.unique_provisional_location.to_dict(),
+            {
+                "file": "src/render.py",
+                "line": 1,
+                "code": "def render(value):",
+            },
+        )
+        self.assertTrue(result.candidates[0].in_removed_or_changed_side)
+        self.assertIn("fix-added guard", result.candidates[0].evidence)
+
     def test_fix_added_guard_is_refuted_without_inventing_vulnerable_line(self) -> None:
         result = self._resolve(
             [

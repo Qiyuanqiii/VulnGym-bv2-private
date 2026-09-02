@@ -102,9 +102,21 @@ class PatchAnalyzerTests(unittest.TestCase):
             [line.new_line for line in changed.hunks[0].lines],
             [None, 10, 11, 12, 13, 14],
         )
-        self.assertEqual(len(result.guard_candidates), 1)
+        self.assertEqual(len(result.guard_candidates), 2)
         self.assertEqual(len(result.early_return_candidates), 2)
         self.assertEqual(len(result.removed_dangerous_calls), 1)
+        self.assertIn(
+            ("guard", "context", 11, "    # retained"),
+            {
+                (
+                    item.mode,
+                    item.change_kind,
+                    item.old_line,
+                    item.code,
+                )
+                for item in result.guard_candidates
+            },
+        )
         self.assertTrue(all(not item.semantic_verified for item in result.candidates))
         self.assertIn("semantic role unverified", result.removed_dangerous_calls[0].reason)
 

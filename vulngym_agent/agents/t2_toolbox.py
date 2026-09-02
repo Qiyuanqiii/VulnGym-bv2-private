@@ -103,7 +103,7 @@ LOCAL_T2_TOOL_CONTRACT_IDS = MappingProxyType(
         "git_diff": "vulngym.local-t2.git_diff@1",
         "version_ancestry": "vulngym.local-t2.version_ancestry@1",
         "dataflow_candidate_search": (
-            "vulngym.local-t2.dataflow_candidate_search@1"
+            "vulngym.local-t2.dataflow_candidate_search@2"
         ),
         "route_recognition": "vulngym.local-t2.route_recognition@1",
         "validate_schema": "vulngym.local-t2.validate_schema@1",

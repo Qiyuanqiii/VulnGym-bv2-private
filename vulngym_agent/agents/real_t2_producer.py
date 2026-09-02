@@ -669,7 +669,7 @@ class LocalStructuredT2Producer:
                 if (
                     assessment.get("fact_status") != "correct"
                     or assessment.get("in_removed_or_changed_side") is not True
-                    or assessment.get("change_kind") not in {"removed", "changed"}
+                    or assessment.get("change_kind") not in {"removed", "changed", "context"}
                     or assessment.get("vulnerable_commit") != vulnerable_commit
                     or assessment.get("fix_commit") != fix_commit
                     or location.get("file") != source_path

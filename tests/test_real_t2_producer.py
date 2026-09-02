@@ -507,18 +507,25 @@ class LocalStructuredT2ProducerTests(unittest.TestCase):
         self.assertEqual(draft.reason_code, "ambiguous_fix_commit")
         self.assertEqual(projection.model_stages, ("plan",))
 
-    def test_generate_defers_when_guard_exists_only_on_fixed_side(self) -> None:
+    def test_generate_can_use_old_context_for_fix_added_guard(self) -> None:
         backend = _ScriptedBackend(critical_mode="guard")
         draft, projection, _ = self._generate(
             backend,
             task=self._task(critical_mode="guard"),
         )
 
-        self.assertIsInstance(draft, ProductionDeferredDraft)
-        assert isinstance(draft, ProductionDeferredDraft)
-        self.assertEqual(draft.stage, "resolve_critical")
-        self.assertEqual(draft.reason_code, "guard_only_exists_on_fix_side")
-        self.assertEqual(projection.model_stages, ("plan",))
+        self.assertIsInstance(draft, ProductionDraft)
+        semantic = next(
+            request for request in backend.requests if request.stage == "semantic_judge"
+        )
+        self.assertEqual(
+            {item["change_kind"] for item in semantic.payload["critical_candidates"]},
+            {"context"},
+        )
+        self.assertEqual(
+            projection.model_stages,
+            ("plan", "semantic_judge", "reflection"),
+        )
 
     def test_generate_defers_without_a_vulnerable_side_sink_candidate(self) -> None:
         self._replace_fix_with_benign_change()

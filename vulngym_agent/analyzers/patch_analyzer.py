@@ -118,7 +118,7 @@ class PatchCandidate:
     candidate_id: str
     mode: CandidateMode
     file: str
-    change_kind: Literal["added", "removed"]
+    change_kind: Literal["context", "added", "removed"]
     old_line: int | None
     new_line: int | None
     code: str
@@ -623,11 +623,48 @@ def _parse_text(
     )
 
 
+def _nearest_context_line(hunk: PatchHunk, line_index: int) -> PatchLine | None:
+    candidates = [
+        (abs(index - line_index), 0 if index < line_index else 1, index, line)
+        for index, line in enumerate(hunk.lines)
+        if line.change_kind == "context" and line.old_line is not None and line.code.strip()
+    ]
+    if not candidates:
+        return None
+    return min(candidates)[3]
+
+
 def _candidates(files: Iterable[ChangedFile], max_candidates: int) -> tuple[PatchCandidate, ...]:
     candidates: list[PatchCandidate] = []
+    context_keys: set[tuple[str, int, str]] = set()
+
+    def append_candidate(
+        mode: CandidateMode,
+        changed_file: ChangedFile,
+        line: PatchLine,
+        reason: str,
+    ) -> None:
+        candidates.append(
+            PatchCandidate(
+                f"patch-candidate-{len(candidates) + 1:06d}",
+                mode,
+                changed_file.path,
+                line.change_kind,  # type: ignore[arg-type]
+                line.old_line,
+                line.new_line,
+                line.code,
+                reason,
+            )
+        )
+        if len(candidates) > max_candidates:
+            raise PatchLimitExceeded(
+                "patch exceeds configured lexical-candidate limit of "
+                f"{max_candidates}"
+            )
+
     for changed_file in files:
         for hunk in changed_file.hunks:
-            for line in hunk.lines:
+            for index, line in enumerate(hunk.lines):
                 modes: list[tuple[CandidateMode, str]] = []
                 if line.change_kind == "added" and _GUARD_RE.search(line.code):
                     modes.append(
@@ -651,23 +688,30 @@ def _candidates(files: Iterable[ChangedFile], max_candidates: int) -> tuple[Patc
                         )
                     )
                 for mode, reason in modes:
-                    candidates.append(
-                        PatchCandidate(
-                            f"patch-candidate-{len(candidates) + 1:06d}",
-                            mode,
-                            changed_file.path,
-                            line.change_kind,
-                            line.old_line,
-                            line.new_line,
-                            line.code,
-                            reason,
-                        )
+                    append_candidate(mode, changed_file, line, reason)
+                if (
+                    line.change_kind == "added"
+                    and (
+                        _GUARD_RE.search(line.code) is not None
+                        or _EARLY_RETURN_RE.search(line.code) is not None
                     )
-                    if len(candidates) > max_candidates:
-                        raise PatchLimitExceeded(
-                            "patch exceeds configured lexical-candidate limit of "
-                            f"{max_candidates}"
-                        )
+                ):
+                    context = _nearest_context_line(hunk, index)
+                    if context is not None:
+                        assert context.old_line is not None
+                        key = (changed_file.path, context.old_line, context.code)
+                        if key not in context_keys:
+                            context_keys.add(key)
+                            append_candidate(
+                                "guard",
+                                changed_file,
+                                context,
+                                (
+                                    "old-side context in a hunk containing a "
+                                    "fix-added guard-like line; semantic role "
+                                    "unverified"
+                                ),
+                            )
     return tuple(candidates)
 
 
