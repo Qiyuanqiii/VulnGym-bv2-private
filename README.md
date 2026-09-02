@@ -327,6 +327,8 @@ reviewed, path-free advisory-package assignment. It rejects source-identity
 overrides and Entry answer fields, pins both inputs by semantic and exact-wire
 digests, and rebuilds the bundle during formal verification. See
 [`docs/lane_a_task_bundle_runbook.md`](docs/lane_a_task_bundle_runbook.md).
+The upstream offline advisory-to-assignment step is documented in
+[`docs/lane_a_assignment_materializer_runbook.md`](docs/lane_a_assignment_materializer_runbook.md).
 
 The trusted repository
 map is a separate strict JSON document and uses canonical GitHub URLs plus

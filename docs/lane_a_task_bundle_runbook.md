@@ -14,7 +14,9 @@ The public task file has exactly these keys:
 
 It is the sole authority for `task_id`, `repo_url`, `commit`, `split`, and `instruction_id`.
 
-The separately cleared advisory assignment file has exactly these keys:
+The separately cleared advisory assignment file has exactly these keys. It can
+be produced offline from public metadata and pre-fetched GHSA records by the
+[`lane_a_assignment_materializer`](lane_a_assignment_materializer_runbook.md):
 
 ```json
 {"entry_id":"entry-00001","hints":{"critical_mode":"auto","entry_symbols":[],"fix_commits":[],"project":"example","source_paths":["src/example.py"]},"package":{"advisory":"advisory/item.json","patches":[],"references":[]},"report_id":"GHSA-AAAA-BBBB-CCCC","task_id":"VG-TEST-00000000000000000001"}
