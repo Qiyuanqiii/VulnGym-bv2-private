@@ -43,24 +43,23 @@ Historical number ranges remain stable for audit purposes:
 - governance: #103-#106.
 
 The active tracker was consolidated after the initial exhaustive breakdown.
-There are now 21 open Issues; the repository- and batch-level records remain
+There are now 12 open Issues; the repository- and batch-level records remain
 closed, archived sub-issues under their aggregate owner:
 
 | Active layer | Issues |
 | --- | --- |
 | Epic | #7 |
-| Open phases | #9, #11, #12, #13, #14 |
-| Engineering | #29, #30, #31, #33, #34, #36 |
-| Source aggregate | #60 |
+| Open phases | #12, #13, #14 |
 | Replay aggregate | #90 |
 | Native runtime and gates | #91, #92, #94, #95 |
 | Evaluation and release | #97, #99, #102 |
 
-Governance phase #8 and benchmark/T2 phase #10 are complete. Source details
-#38-#59 are archived under #60, replay details #61-#89 under #90, and the other
-superseded leaf Issues are archived under their active aggregate. This keeps
-the main view human-readable while retaining the fixed task IDs and earlier
-acceptance criteria for audit.
+Governance #8, engineering #9, benchmark/T2 #10, source phase #11, and source
+aggregate #60 are complete. Source details #38-#59 are archived under #60,
+replay details #61-#89 under #90, and the superseded engineering leaves are
+closed or archived under their completed phase. This keeps the main view
+human-readable while retaining the fixed task IDs and earlier acceptance
+criteria for audit.
 
 ## Dependency direction
 

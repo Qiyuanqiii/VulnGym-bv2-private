@@ -35,6 +35,11 @@ profile 并执行投影；`native_linux_final_gate_preflight` 只做正式主机
 仓库当前没有 wheel/console-script 安装包，从固定 commit 的只读 checkout 运行，要求
 Python 3.10 或更高。
 
+新制备的 Lane A task 使用 `T2TaskInputV2`：公开 task 的 `repo_url + commit` 作为
+独立 snapshot pin，既要等于公告 fix 推导出的唯一脆弱父提交，也由 T1 再次核对。
+终态 replay 通过 `submission_prediction_cli` 投影；verify 必须携带外部 replay 与
+submission digest 重读源 replay 并逐题比较，不能让输出 manifest 自证。
+
 ## 2. Planner、工具、prompt 与反幻觉约束
 
 Lane A 的模型协议不是一次性 prompt。`plan` 先选择 analyze/defer 与 critical mode；

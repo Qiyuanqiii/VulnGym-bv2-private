@@ -313,10 +313,16 @@ relative POSIX paths under the trusted package root; no local root belongs in a
 task):
 
 ```json
-{"task_id":"task:ghsa-w7xj","report_id":"GHSA-W7XJ-8FX7-WFCH","entry_id":"entry-00057","inputs":{"contract_version":1,"input_line":1,"repo_url":"https://github.com/open-webui/open-webui","package":{"advisory":"advisories/GHSA-W7XJ-8FX7-WFCH.json","references":[],"patches":["patches/GHSA-W7XJ-8FX7-WFCH.diff"]},"hints":{"project":"open-webui","fix_commits":[],"source_paths":["src/lib/components/common/RichTextInput.svelte"],"entry_symbols":[],"critical_mode":"auto"}}}
+{"task_id":"task:ghsa-w7xj","report_id":"GHSA-W7XJ-8FX7-WFCH","entry_id":"entry-00057","inputs":{"contract_version":2,"expected_vulnerable_commit":"0123456789abcdef0123456789abcdef01234567","input_line":1,"repo_url":"https://github.com/open-webui/open-webui","package":{"advisory":"advisories/GHSA-W7XJ-8FX7-WFCH.json","references":[],"patches":["patches/GHSA-W7XJ-8FX7-WFCH.diff"]},"hints":{"project":"open-webui","fix_commits":[],"source_paths":["src/lib/components/common/RichTextInput.svelte"],"entry_symbols":[],"critical_mode":"auto"}}}
 ```
 
 `inputs.input_line` must equal the physical line number. The trusted repository
+snapshot pin in `expected_vulnerable_commit` must equal the answer-free public
+task's `commit`; T2 also requires it to equal the unique vulnerable parent
+derived from the advisory fix. Contract v1 remains readable only for historical
+replays; new benchmark tasks use contract v2.
+
+The trusted repository
 map is a separate strict JSON document and uses canonical GitHub URLs plus
 absolute local roots:
 
@@ -385,6 +391,36 @@ bundle = read_closed_loop_artifacts("/srv/vulngym/runs/run-001")
 manifest = verify_closed_loop_artifacts("/srv/vulngym/runs/run-001")
 print(bundle.manifest.dataset_sha256, manifest.entry_count)
 ```
+
+Project a complete terminal Lane A replay into the three-file submission
+surface, then independently re-read the original replay before accepting it:
+
+Formal export is deliberately Linux/POSIX-only because publication requires
+descriptor-relative filesystem operations and atomic no-replace rename.
+Windows remains supported for the read-only `verify` command and rejects
+`export` before reading the replay or changing output.
+
+```bash
+python -m vulngym_agent.submission_prediction_cli export \
+  --replay-dir /srv/vulngym/runs/run-001 \
+  --replay-dataset-sha256 <trusted-replay-dataset-sha256> \
+  --expected-task-count 20 \
+  --output-dir /srv/vulngym/submissions/test-001
+
+python -m vulngym_agent.submission_prediction_cli verify \
+  --submission-dir /srv/vulngym/submissions/test-001 \
+  --replay-dir /srv/vulngym/runs/run-001 \
+  --source-replay-dataset-sha256 <trusted-replay-dataset-sha256> \
+  --submission-sha256 <external-submission-sha256> \
+  --expected-task-count 20
+```
+
+The export contains `entries.jsonl`, `validation.jsonl`, and
+`submission_manifest.json`. It includes complete `finalized` and
+`manual_review` candidate/report pairs, but never turns a non-correct report
+into a pass. See
+[`docs/submission_prediction_runbook.md`](docs/submission_prediction_runbook.md)
+for the trust boundary, no-replace recovery rules, and protected-path options.
 
 Artifacts intentionally retain bounded, public or otherwise cleared Evidence
 snippets and the Schema-required Entry code snippets. Keep bundles in the
