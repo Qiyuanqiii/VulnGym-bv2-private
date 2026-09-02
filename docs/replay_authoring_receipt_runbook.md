@@ -17,11 +17,37 @@ Version 2 closes five independent chains:
 
 ## 1. Provision and pin the public-key trust registry
 
-Provision six independent raw 32-byte Ed25519 private keys. Private material
-must remain with its single signing step: readback keys are loaded only by
-`readback`, actor keys only by `approve`, and the index key only by
-`build-index`. `seal-receipt` and the formal batch reader load no Ed25519
-private key.
+Provision six independent raw 32-byte Ed25519 private keys with the dedicated
+CLI. Private material must remain with its single signing step: readback keys
+are loaded only by `readback`, actor keys only by `approve`, and the index key
+only by `build-index`. `seal-receipt` and the formal batch reader load no
+Ed25519 private key.
+
+Create an owner-only private directory first on POSIX (`umask 077` and
+`install -d -m 700 /srv/vulngym/keys`). Then invoke `generate-slot` exactly
+once for each fixed purpose/role/key-ID assignment. For example:
+
+```bash
+python -B -m vulngym_agent.replay_trust_registry_cli generate-slot \
+  --purpose actor-approval \
+  --role author \
+  --key-id author-2026-01 \
+  --private-key-file /srv/vulngym/keys/author-2026-01.ed25519 \
+  --registration-file /srv/vulngym/control/author-2026-01.registration.json
+```
+
+The command creates both files without replacement. The private file is
+exactly 32 raw bytes and its value is never printed. The separate registration
+is canonical JSON containing only the public key and its public identity.
+Repeat for the six slots below with distinct key IDs and distinct output
+paths.
+
+Provisioning exits `2` only when no publication is known to remain. Exit `11`
+means a newly created file could not be safely removed, its final identity is
+uncertain, or the public success summary could not be delivered after the file
+was published: preserve every involved path, inspect it under the expected
+public identity, and never retry blindly. Exit `130` means interruption before
+a publication was confirmed.
 
 Create one canonical `vulngym.replay-authoring-trust-registry.v2` JSON line
 with exactly this order:
@@ -40,6 +66,48 @@ Each entry contains `purpose`, `role`, `key_id`, canonical base64 of the raw
 `replay_ed25519_public_key_fingerprint_v2` value. Key IDs, raw public keys,
 and fingerprints must be globally unique, so cross-purpose reuse is rejected.
 The registry includes `registry_sha256`, computed by `ReplayTrustRegistryV2`.
+
+Pass the six registration files to `assemble-registry` in exactly the order
+shown above. The option is intentionally repeated rather than discovered from
+a directory:
+
+```bash
+python -B -m vulngym_agent.replay_trust_registry_cli assemble-registry \
+  --registry-file /srv/vulngym/control/replay-trust-registry-v2.json \
+  --registration-file /srv/vulngym/control/author.registration.json \
+  --registration-file /srv/vulngym/control/critic.registration.json \
+  --registration-file /srv/vulngym/control/reviewer.registration.json \
+  --registration-file /srv/vulngym/control/test-readback.registration.json \
+  --registration-file /srv/vulngym/control/train-readback.registration.json \
+  --registration-file /srv/vulngym/control/index.registration.json
+```
+
+The registry is also created without replacement. Successful stdout contains
+only its public semantic/wire pins and the six public fingerprints. Transfer
+those pins through the independent operator/final-gate control channel before
+using them; a producer must not select its own expected pins. Check a private
+key against that pinned registry before releasing it to its signing step:
+
+```bash
+python -B -m vulngym_agent.replay_trust_registry_cli verify-slot \
+  --purpose actor-approval \
+  --role author \
+  --key-id author-2026-01 \
+  --private-key-file /srv/vulngym/keys/author-2026-01.ed25519 \
+  --trust-registry-file /srv/vulngym/control/replay-trust-registry-v2.json \
+  --expected-trust-registry-sha256 "${TRUST_REGISTRY_SHA256}" \
+  --expected-trust-registry-wire-sha256 "${TRUST_REGISTRY_WIRE_SHA256}"
+```
+
+On Windows, Python cannot reliably establish or prove a secure DACL. Before
+generation, the operator **must** create a dedicated non-reparse key directory,
+disable unwanted inherited ACEs, and grant access only to the intended signing
+identity plus explicitly approved recovery principals. Inspect the effective
+ACL with `icacls D:\VulnGym\keys` before generation and inspect every generated
+key with `icacls D:\VulnGym\keys\*.ed25519` afterward; do not use a key until
+that review passes. The CLI still rejects symlinks/junctions/reparse points,
+hard-linked or non-regular key files, changed path identities, and existing
+destinations, but those checks are not a substitute for the DACL review.
 
 Retain both `registry_sha256` and SHA-256 of the exact registry file in a
 separate trusted control channel. Every command receives the same three
