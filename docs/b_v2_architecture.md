@@ -559,6 +559,7 @@ Bonus 后置为完整 trace、多语言 AST/轻量数据流、系统性错误归
 - `EntryPointSearcher` 只读取调用者显式提供的不可变 Git blob，支持 Python、JS/TS、Java、Go、Ruby、PHP 的 route/RPC/CLI/handler/export 结构线索，并执行文件数、总字节和候选数预算。它不枚举仓库，也不声称运行时可达性或到达 Critical 的调用图已经证明。
 - `T1DeterministicValidator` 已组合以上三层：Patch 解析失败被隔离到单条记录，字段仍保留可读证据与完整 evidence refs；结构事实绝不把 Entry/Critical 字段提升为语义 `correct`。以上仍是确定性 T1 基础设施，不是完整的语义 T1。
 - `T2TaskInputV2` 是新基准任务的严格、版本化、无本机路径契约；它把无答案公开任务的 `repo_url + commit` 固定为 `expected_vulnerable_commit`，T2 必须将其与公告 fix 的唯一脆弱父提交核对，T1 也独立验证同一 commit 锚点。V1 只为历史 replay 保留读取兼容。公告/patch 相对路径、规范化 GitHub URL 和有界 hints 都视为不受信任务数据；本地资料根、仓库映射、模型后端和凭据只存在于受信进程配置中。
+- Lane A task-bundle 控制面只把无答案公开 task 与单独复核的公告包 assignment 按同一物理顺序合并；两份输入都需外部 semantic/wire pin，assignment 不能覆盖 `repo_url/commit/split/instruction_id`，也不能携带 Entry 答案字段。正式 verify 重新读取两份输入并逐字节重建 RunTask bundle。
 - `ProducerExecutionContext` 由 Orchestrator 持有的 attempt controller 签发，`LocalT2ContextFactory` 才能把无路径任务绑定到受信本地根、固定工具注册表和模型后端。Producer 不能自行扩大工具 allowlist、伪造调用记录或绕过工具/模型预算；调用记录与预算事件按 task、attempt、policy scope 和事件序号闭合。
 - `RunTask`、`ProductionOutcome` / `ProductionDeferred`、`ToolCallRecord` / `ModelCallRecord`、`RepairPlan`、`Budget` 与 sanitized `RunState` 已形成严格契约。无法建立唯一证据、模型拒绝、预算不足或契约/工具失败时产生显式 defer，而不是拼出部分 Entry。
 - `RepairPlan` 对 repair/dependent/locked 字段做完整分区，并以 canonical SHA-256 锁定不可改字段。版本化 repair tool policy 对各字段给出固定 `required_checks` 与 `allowed_tools`：工具权限只能收窄，必需检查不能删减；空 allowlist 明确表示 deny-all。任何缺少受信验证器或权限的必需检查都 fail closed 为 defer。

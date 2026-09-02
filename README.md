@@ -322,6 +322,12 @@ task's `commit`; T2 also requires it to equal the unique vulnerable parent
 derived from the advisory fix. Contract v1 remains readable only for historical
 replays; new benchmark tasks use contract v2.
 
+`lane_a_task_bundle_cli` combines that answer-free public row with a separately
+reviewed, path-free advisory-package assignment. It rejects source-identity
+overrides and Entry answer fields, pins both inputs by semantic and exact-wire
+digests, and rebuilds the bundle during formal verification. See
+[`docs/lane_a_task_bundle_runbook.md`](docs/lane_a_task_bundle_runbook.md).
+
 The trusted repository
 map is a separate strict JSON document and uses canonical GitHub URLs plus
 absolute local roots:

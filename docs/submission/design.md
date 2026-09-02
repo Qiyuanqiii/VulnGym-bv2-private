@@ -37,6 +37,8 @@ Python 3.10 或更高。
 
 新制备的 Lane A task 使用 `T2TaskInputV2`：公开 task 的 `repo_url + commit` 作为
 独立 snapshot pin，既要等于公告 fix 推导出的唯一脆弱父提交，也由 T1 再次核对。
+task-bundle 构建器只接受另行审核的公告包 assignment，并以两份输入的外部
+semantic/wire digest 与物理顺序闭合，禁止 assignment 覆盖公开 source identity。
 终态 replay 通过 `submission_prediction_cli` 投影；verify 必须携带外部 replay 与
 submission digest 重读源 replay 并逐题比较，不能让输出 manifest 自证。
 
