@@ -1,0 +1,55 @@
+{
+  "kind": "vulngym.issue-90.offline-authoring-progress.v1",
+  "generated_at": "2026-09-02T23:52:51.6845468+08:00",
+  "branch": "codex/b-v2-source-discovery",
+  "base_head": "cb44e47116b58c8c72aaf9d4fe72a777cbd18fd8",
+  "scope": {
+    "runtime_root": "D:/VulnGym-bv2-runtime",
+    "source_workspace_policy": "D:/GitProjects/VulnGym read-only",
+    "producer_workspace": "D:/GitProjects/VulnGym-bv2-producer",
+    "forbidden_inputs": [
+      "benchmark private",
+      "gold",
+      "selection_lock",
+      "raw source-map"
+    ],
+    "network_policy": "ordinary git/gh only; no protected scan/browser path"
+  },
+  "status": {
+    "published_final_test_tasks": 1,
+    "closed_unpublished_test_drafts": 1,
+    "slow_test_tasks_preserved_for_later_optimization": 1
+  },
+  "closed_unpublished_test_drafts": [
+    {
+      "task_id": "VG-TEST-26F8F5FA4550E8212E09",
+      "attempt": "auto2",
+      "status": "closed",
+      "d2_bytes": 167918,
+      "d3_bytes": 5349,
+      "closed_readback_elapsed_seconds": 280.511
+    }
+  ],
+  "published_final_test_tasks": [
+    {
+      "task_id": "VG-TEST-01014F9B8FE057D708F5",
+      "attempt": "VG-TEST-01014F9B8FE057D708F5-a2",
+      "status": "published"
+    }
+  ],
+  "slow_test_tasks_preserved_for_later_optimization": [
+    {
+      "task_id": "VG-TEST-1B60A6A2AEDA7FCF9C01",
+      "repo": "https://github.com/openclaw/openclaw",
+      "note": "D2/D3 draft can close but publish/readback is too slow with the current openclaw transcript shape; preserved attempts should not be deleted."
+    }
+  ],
+  "new_local_tools": [
+    "scripts/author_replay_batch_offline.py",
+    "tests/test_author_replay_batch_offline.py"
+  ],
+  "verification": {
+    "python_compile": "passed",
+    "unittest": "python -B -m unittest tests.test_author_replay_batch_offline -q passed"
+  }
+}
