@@ -145,6 +145,7 @@ class T1BatchTests(unittest.TestCase):
         outcome = self.validator().validate(candidate)
 
         self.assertEqual(outcome.report.verdict, "uncertain")
+        self.assertTrue(set(ENTRY_FIELDS).issubset(outcome.report.fields))
         for name in ("commit", "entry_point", "critical_operation"):
             with self.subTest(field=name):
                 field = outcome.report.fields[name]
@@ -178,6 +179,37 @@ class T1BatchTests(unittest.TestCase):
         self.assertFalse(set(candidate) & SIDECAR_NAMES)
         self.assertFalse(set(candidate["entry_point"]) & SIDECAR_NAMES)
         self.assertFalse(set(candidate["critical_operation"]) & SIDECAR_NAMES)
+
+    def test_trusted_task_anchors_are_validated_field_by_field(self) -> None:
+        candidate = self.candidate()
+        validator = T1DeterministicValidator(
+            GitRepository(self.repo_path),
+            expected_repo_url="https://github.com/example/expected",
+            expected_report_id="GHSA-AAAA-BBBB-CCCC",
+            expected_entry_id="entry-99999",
+        )
+
+        outcome = validator.validate(candidate)
+
+        self.assertEqual(outcome.report.verdict, "incorrect")
+        expected = {
+            "repo_url": "https://github.com/example/expected",
+            "report_id": "GHSA-AAAA-BBBB-CCCC",
+            "entry_id": "entry-99999",
+        }
+        for name, value in expected.items():
+            with self.subTest(field=name):
+                field = outcome.report.fields[name]
+                self.assertEqual(field.status, "incorrect")
+                self.assertEqual(field.suggested_fix, value)
+        self.assertEqual(outcome.report.fields["origin"].status, "correct")
+        self.assertEqual(outcome.report.fields["verify"].status, "correct")
+        referenced = {
+            evidence_id
+            for field in outcome.report.fields.values()
+            for evidence_id in field.evidence_refs
+        }
+        self.assertEqual(referenced, {item.evidence_id for item in outcome.evidence})
 
     def test_missing_file_and_wrong_code_are_deterministically_incorrect(self) -> None:
         mutations = (

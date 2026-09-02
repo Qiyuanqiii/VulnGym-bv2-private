@@ -886,6 +886,9 @@ class LocalT1ValidatorFactory:
             line_tolerance=self._line_tolerance,
             repository_note=repository_note,
             package_result=package_result,
+            expected_repo_url=task_input.repo_url,
+            expected_report_id=task.report_id,
+            expected_entry_id=task.entry_id,
         )
 
 

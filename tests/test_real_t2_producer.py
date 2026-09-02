@@ -452,6 +452,10 @@ class LocalStructuredT2ProducerTests(unittest.TestCase):
         self.assertEqual(report["report_id"], candidate["report_id"])
         self.assertEqual(report["entry_id"], candidate["entry_id"])
         self.assertEqual(report["input_line"], task.inputs["input_line"])
+        self.assertTrue(set(ENTRY_FIELDS).issubset(report["fields"]))
+        for name in ("entry_id", "repo_url", "report_id", "origin", "verify"):
+            with self.subTest(field=name):
+                self.assertEqual(report["fields"][name]["status"], "correct")
         for item in evidence:
             self.assertEqual(item["report_id"], candidate["report_id"])
             self.assertEqual(item["entry_id"], candidate["entry_id"])

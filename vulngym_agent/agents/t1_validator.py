@@ -15,6 +15,7 @@ import re
 from typing import Any, Mapping
 
 from vulngym_agent.adapters import ENTRY_FIELDS, SchemaAdapter
+from vulngym_agent.adapters.schema_adapter import ORIGIN
 from vulngym_agent.analyzers import PatchAnalysis, PatchAnalysisError, analyze_patch
 from vulngym_agent.evidence import PackageLoadResult, extract_advisory_facts
 from vulngym_agent.models import EvidenceItem, FieldValidation, ValidationReport
@@ -101,10 +102,30 @@ class T1DeterministicValidator:
         line_tolerance: int = 5,
         repository_note: str | None = None,
         package_result: PackageLoadResult | None = None,
+        expected_repo_url: str | None = None,
+        expected_report_id: str | None = None,
+        expected_entry_id: str | None = None,
     ) -> None:
+        if expected_repo_url is not None and (
+            not isinstance(expected_repo_url, str) or not expected_repo_url
+        ):
+            raise ValueError("expected_repo_url must be a non-empty string or None")
+        if expected_report_id is not None and (
+            not isinstance(expected_report_id, str)
+            or _REPORT_ID_RE.fullmatch(expected_report_id) is None
+        ):
+            raise ValueError("expected_report_id must be an upper-case GHSA ID or None")
+        if expected_entry_id is not None and (
+            not isinstance(expected_entry_id, str)
+            or re.fullmatch(r"entry-[0-9]{5}", expected_entry_id) is None
+        ):
+            raise ValueError("expected_entry_id must be a formal Entry ID or None")
         self._repository = repository
         self._repository_note = repository_note
         self._package_result = package_result
+        self._expected_repo_url = expected_repo_url
+        self._expected_report_id = expected_report_id
+        self._expected_entry_id = expected_entry_id
         self._line_tolerance = line_tolerance
         self._evidence_scope = "FACT"
         self._evidence_sequence = 0
@@ -274,6 +295,50 @@ class T1DeterministicValidator:
             )
         missing.extend(advisory_validation.missing_information)
 
+        self._validate_task_bound_field(
+            "entry_id",
+            candidate,
+            self._expected_entry_id,
+            report_id,
+            fields,
+            evidence_items,
+            missing,
+        )
+        self._validate_task_bound_field(
+            "repo_url",
+            candidate,
+            self._expected_repo_url,
+            report_id,
+            fields,
+            evidence_items,
+            missing,
+        )
+        self._validate_task_bound_field(
+            "report_id",
+            candidate,
+            self._expected_report_id,
+            report_id,
+            fields,
+            evidence_items,
+            missing,
+        )
+        self._validate_fixed_field(
+            "origin",
+            candidate,
+            ORIGIN,
+            report_id,
+            fields,
+            evidence_items,
+        )
+        self._validate_fixed_field(
+            "verify",
+            candidate,
+            0,
+            report_id,
+            fields,
+            evidence_items,
+        )
+
         patch_analyses, patch_notes = self._analyze_local_patches()
 
         self._validate_commit(
@@ -315,6 +380,7 @@ class T1DeterministicValidator:
         self._validate_trace(candidate, report_id, fields, evidence_items, missing)
 
         for name, description in (
+            ("project", "项目名是否准确对应公告和仓库身份"),
             ("vuln_title", "漏洞标题是否准确概括公告核心"),
             ("vuln_category_l1", "一级漏洞分类是否符合公告与源码语义"),
             ("vuln_category_l2", "二级漏洞分类是否符合公告与源码语义"),
@@ -330,8 +396,120 @@ class T1DeterministicValidator:
                 )
         missing.append("公告、补丁与源码三方语义证据，用于标题和分类判断")
 
+        for name in ENTRY_FIELDS:
+            if name not in fields:
+                fields[name] = self._field(
+                    "uncertain",
+                    0.2,
+                    f"{name} 通过了整体结构检查，但当前确定性证据不足以逐字段确认其事实准确性。",
+                    "schema",
+                    report_id,
+                    evidence_items,
+                )
+                missing.append(f"可独立核验 {name} 的公开事实或任务绑定")
+
         report = self._report(report_id, entry_id, input_line, fields, missing)
         return T1ValidationOutcome(report, tuple(evidence_items))
+
+    def _validate_task_bound_field(
+        self,
+        name: str,
+        candidate: Mapping[str, Any],
+        expected: Any,
+        report_id: str | None,
+        fields: dict[str, FieldValidation],
+        evidence_items: list[EvidenceItem],
+        missing: list[str],
+    ) -> None:
+        existing = fields.get(name)
+        actual = candidate.get(name)
+        if expected is None:
+            if existing is None:
+                fields[name] = self._field(
+                    "uncertain",
+                    0.5,
+                    f"{name} 的结构合法，但当前调用未提供独立的受信任务锚点。",
+                    "schema",
+                    report_id,
+                    evidence_items,
+                )
+                missing.append(f"受信任务中的 {name} 锚点")
+            return
+        if actual != expected:
+            anchored = self._field(
+                "incorrect",
+                1.0,
+                f"候选 {name} 与受信任务锚点不一致。",
+                "schema",
+                report_id,
+                evidence_items,
+                suggested_fix=expected,
+            )
+            fields[name] = self._merge_field_evidence(existing, anchored)
+            return
+        if existing is not None and existing.status == "incorrect":
+            return
+        anchored = self._field(
+            "correct",
+            1.0,
+            f"候选 {name} 与受信任务锚点逐字节一致。",
+            "schema",
+            report_id,
+            evidence_items,
+        )
+        fields[name] = self._merge_field_evidence(existing, anchored)
+
+    @staticmethod
+    def _merge_field_evidence(
+        prior: FieldValidation | None,
+        current: FieldValidation,
+    ) -> FieldValidation:
+        if prior is None:
+            return current
+        return FieldValidation(
+            status=current.status,
+            confidence=current.confidence,
+            evidence=f"{prior.evidence} {current.evidence}",
+            evidence_refs=tuple(
+                dict.fromkeys((*prior.evidence_refs, *current.evidence_refs))
+            ),
+            suggested_fix=(
+                current.suggested_fix
+                if current.suggested_fix is not None
+                else prior.suggested_fix
+            ),
+        )
+
+    def _validate_fixed_field(
+        self,
+        name: str,
+        candidate: Mapping[str, Any],
+        expected: Any,
+        report_id: str | None,
+        fields: dict[str, FieldValidation],
+        evidence_items: list[EvidenceItem],
+    ) -> None:
+        if name in fields and fields[name].status == "incorrect":
+            return
+        if candidate.get(name) == expected:
+            fields[name] = self._field(
+                "correct",
+                1.0,
+                f"{name} 等于正式 T2 契约要求的固定值。",
+                "schema",
+                report_id,
+                evidence_items,
+            )
+        else:
+            fields[name] = self._field(
+                "incorrect",
+                1.0,
+                f"{name} 不等于正式 T2 契约要求的固定值。",
+                "schema",
+                report_id,
+                evidence_items,
+                suggested_fix=expected,
+            )
 
     def _validate_commit(
         self,
