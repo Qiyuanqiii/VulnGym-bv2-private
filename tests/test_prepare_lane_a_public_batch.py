@@ -354,8 +354,12 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
         )
 
         self.assertEqual(result["summary"]["status_counts"], {"prepared": 1})
+        self.assertEqual(result["summary"]["fallback_plan_counts"], {"strict_ready": 1})
+        self.assertEqual(result["summary"]["fallback_policy_version"], 1)
         task = result["tasks"][0]
         self.assertEqual(task["status"], "prepared")
+        self.assertEqual(task["fallback_plan"]["action"], "strict_ready")
+        self.assertTrue(task["fallback_plan"]["automatable_candidate"])
         self.assertEqual(
             task["passes"],
             [{"fix_commit": self.fix, "report_id": alternate_report}],
@@ -365,6 +369,33 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             [{"code": "fix_candidate_missing", "report_id": self.report_id}],
         )
         self.assertFalse((self.outputs / "diagnose").exists())
+
+    def test_diagnose_plans_missing_fix_reference_fallback(self) -> None:
+        result = prep.diagnose_lane_a_public_batch(
+            public_tasks_file=self.tasks_file,
+            public_reports_file=self.reports_file,
+            local_repo_root=self.repo_root,
+            task_ids=[self.task_id],
+            advisory_fetcher=lambda _ghsa: self._advisory(
+                references=["https://github.com/example/repo/issues/1"]
+            ),
+        )
+
+        self.assertEqual(
+            result["summary"]["fallback_plan_counts"],
+            {"local_graph_child_policy_candidate": 1},
+        )
+        task = result["tasks"][0]
+        self.assertEqual(task["status"], "blocked")
+        self.assertEqual(
+            task["fallback_plan"],
+            {
+                "action": "local_graph_child_policy_candidate",
+                "automatable_candidate": True,
+                "blocker_codes": ["fix_candidate_missing"],
+                "policy_version": 1,
+            },
+        )
 
     def test_forbidden_input_name_is_rejected_without_reading_it(self) -> None:
         forbidden = self.inputs / "test_gold.jsonl"

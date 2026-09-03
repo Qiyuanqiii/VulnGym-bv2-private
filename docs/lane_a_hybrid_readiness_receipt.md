@@ -48,6 +48,22 @@ Observed blocker taxonomy:
 | Public train | `fix_candidate_unavailable` | 5 |
 | Public train | `gh_response_invalid` | 1 |
 
+Fallback action plan from the same diagnosis:
+
+| Split | Action | Count |
+| --- | --- | ---: |
+| Public test | `strict_ready` | 8 |
+| Public test | `identifier_subset_policy_candidate` | 3 |
+| Public test | `local_graph_child_policy_candidate` | 4 |
+| Public test | `mixed_public_anchor_policy_candidate` | 2 |
+| Public test | `refresh_local_repository` | 2 |
+| Public test | `refresh_public_metadata` | 1 |
+| Public train | `strict_ready` | 14 |
+| Public train | `identifier_subset_policy_candidate` | 7 |
+| Public train | `local_graph_child_policy_candidate` | 23 |
+| Public train | `refresh_local_repository` | 5 |
+| Public train | `refresh_public_metadata` | 1 |
+
 These blockers are materialization gaps, not T1/T2 runtime failures. The main
 follow-up is to add a second, reviewer-auditable materialization policy for
 public advisories that do not expose the exact direct-fix-parent shape currently

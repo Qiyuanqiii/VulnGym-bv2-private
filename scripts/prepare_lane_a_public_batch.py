@@ -63,6 +63,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 
 CONTRACT_VERSION: Final[int] = 1
 KIND: Final[str] = "vulngym.lane-a-public-batch-preparation.v1"
+FALLBACK_POLICY_VERSION: Final[int] = 1
 TASKS_FILENAME: Final[str] = "tasks.jsonl"
 REPORTS_FILENAME: Final[str] = "reports.jsonl"
 GHSA_CACHE_FILENAME: Final[str] = "ghsa-cache.jsonl"
@@ -548,6 +549,62 @@ def _select_materializer_anchor(
     )
 
 
+def _fallback_action(blocker_codes: Sequence[str], status: str) -> str:
+    codes = frozenset(blocker_codes)
+    if status == "prepared":
+        return "strict_ready"
+    if status == "ambiguous" or codes & {
+        "ambiguous_fix_candidate",
+        "ambiguous_report_candidate",
+    }:
+        return "manual_anchor_review"
+    if codes <= {"advisory_missing", "gh_failed", "gh_response_invalid"}:
+        return "refresh_public_metadata"
+    if codes <= {"fix_candidate_unavailable"}:
+        return "refresh_local_repository"
+    if codes <= {"advisory_identifier_mismatch"}:
+        return "identifier_subset_policy_candidate"
+    if codes <= {"fix_candidate_missing"}:
+        return "local_graph_child_policy_candidate"
+    if codes <= {"fix_parent_mismatch"}:
+        return "parent_window_policy_candidate"
+    if codes <= {"advisory_identifier_mismatch", "fix_candidate_missing"}:
+        return "mixed_public_anchor_policy_candidate"
+    return "manual_materialization_review"
+
+
+def _fallback_plan_for_diagnosis(diagnosis: Mapping[str, object]) -> dict[str, object]:
+    blockers = diagnosis.get("blockers")
+    if not isinstance(blockers, (list, tuple)):
+        blockers = ()
+    blocker_codes = tuple(
+        sorted(
+            {
+                str(item["code"])
+                for item in blockers
+                if isinstance(item, Mapping) and isinstance(item.get("code"), str)
+            }
+        )
+    )
+    status = str(diagnosis.get("status", "blocked"))
+    action = _fallback_action(blocker_codes, status)
+    return {
+        "action": action,
+        "automatable_candidate": action
+        in {
+            "strict_ready",
+            "refresh_public_metadata",
+            "refresh_local_repository",
+            "identifier_subset_policy_candidate",
+            "local_graph_child_policy_candidate",
+            "parent_window_policy_candidate",
+            "mixed_public_anchor_policy_candidate",
+        },
+        "blocker_codes": list(blocker_codes),
+        "policy_version": FALLBACK_POLICY_VERSION,
+    }
+
+
 def _canonical_wires(
     tasks: Sequence[BenchmarkTask],
     reports: Sequence[Mapping[str, Any]],
@@ -811,6 +868,7 @@ def diagnose_lane_a_public_batch(
 
     task_results: list[dict[str, object]] = []
     blocker_counts: dict[str, int] = {}
+    fallback_plan_counts: dict[str, int] = {}
     for task in tasks:
         task_advisories = {
             report["report_id"]: advisories_by_ghsa[report["report_id"]]
@@ -841,6 +899,10 @@ def diagnose_lane_a_public_batch(
         for item in blockers:
             code = str(item["code"])
             blocker_counts[code] = blocker_counts.get(code, 0) + 1
+        fallback_plan = _fallback_plan_for_diagnosis(diagnosis)
+        diagnosis["fallback_plan"] = fallback_plan
+        action = str(fallback_plan["action"])
+        fallback_plan_counts[action] = fallback_plan_counts.get(action, 0) + 1
         task_results.append(diagnosis)
 
     status_counts: dict[str, int] = {}
@@ -854,6 +916,8 @@ def diagnose_lane_a_public_batch(
             "advisory_count": len(advisories_by_ghsa),
             "advisory_error_count": len(advisory_errors),
             "blocker_counts": dict(sorted(blocker_counts.items())),
+            "fallback_plan_counts": dict(sorted(fallback_plan_counts.items())),
+            "fallback_policy_version": FALLBACK_POLICY_VERSION,
             "report_count": len(reports),
             "repository_count": len(repositories),
             "split": tasks[0].split,
