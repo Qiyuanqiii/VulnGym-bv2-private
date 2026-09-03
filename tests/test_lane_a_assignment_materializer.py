@@ -243,6 +243,39 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
             **self._pins(),
         )
 
+    def test_build_selects_unique_valid_report_even_when_not_first(self) -> None:
+        self.cache[0]["references"] = ["https://github.com/example/repo/issues/1"]
+        self.cache[1]["references"] = [self._commit_url(self.fix)]
+        self._write_inputs()
+
+        self._build()
+
+        output = self.output_root / "output"
+        assignment = json.loads((output / ASSIGNMENTS_FILENAME).read_bytes())
+        self.assertEqual(assignment["report_id"], "GHSA-2222-2222-2222")
+        self.assertEqual(assignment["entry_id"], "entry-00003")
+        self.assertEqual(assignment["hints"]["fix_commits"], [self.fix])
+        audit = json.loads((output / COVERAGE_AUDIT_FILENAME).read_bytes())
+        self.assertEqual(audit["selected_report_id"], "GHSA-2222-2222-2222")
+        self.assertEqual(
+            audit["not_run"],
+            [
+                {
+                    "entry_ids": ["entry-00001", "entry-00002"],
+                    "report_id": "GHSA-1111-1111-1111",
+                }
+            ],
+        )
+
+    def test_distinct_valid_report_fixes_fail_closed(self) -> None:
+        self.cache[1]["references"] = [self._commit_url(self.alternate_fix)]
+        self._write_inputs()
+
+        with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
+            self._build()
+
+        self.assertEqual(caught.exception.code, "ambiguous_report_candidate")
+
     def test_output_feeds_task_bundle_and_evidence_loader(self) -> None:
         materialized = self.output_root / "materialized"
         self._build("materialized")

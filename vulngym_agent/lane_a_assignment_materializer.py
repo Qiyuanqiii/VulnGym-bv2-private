@@ -234,6 +234,14 @@ class LaneAAssignmentMaterializationManifestV1:
     coverage_audit_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class _AnchorSelection:
+    report: _Report
+    entry_id: str
+    candidate_fix_commits: tuple[str, ...]
+    fix_commit: str
+
+
 def _parse_report(value: object) -> _Report:
     if type(value) is not dict or frozenset(value) != _REPORT_KEYS:
         raise _error("report_fields", "public report fields differ")
@@ -597,6 +605,76 @@ def _patch_bytes(repository: GitRepository, before: str, after: str, paths: tupl
     return "".join(parts).encode("utf-8")
 
 
+def _try_anchor_selection(
+    task: BenchmarkTask,
+    report: _Report,
+    advisory: _Advisory,
+    repository: GitRepository,
+) -> tuple[_AnchorSelection | None, str | None]:
+    actual_identifiers = {item["value"] for item in advisory.identifiers}
+    if actual_identifiers != set(report.vuln_ids):
+        return None, "advisory_identifier_mismatch"
+    candidates = _candidate_commits(advisory, task.repo_url)
+    if not candidates:
+        return None, "fix_candidate_missing"
+    matching: list[str] = []
+    for candidate in candidates:
+        try:
+            parents = repository.commit_parents(candidate)
+        except GitFactError:
+            return None, "fix_candidate_unavailable"
+        if parents == (task.commit,):
+            matching.append(candidate)
+    if len(matching) != 1:
+        return (
+            None,
+            "ambiguous_fix_candidate" if len(matching) > 1 else "fix_parent_mismatch",
+        )
+    return (
+        _AnchorSelection(
+            report=report,
+            entry_id=report.entry_ids[0],
+            candidate_fix_commits=candidates,
+            fix_commit=matching[0],
+        ),
+        None,
+    )
+
+
+def _select_anchor(
+    task: BenchmarkTask,
+    reports: Sequence[_Report],
+    advisories: Mapping[str, _Advisory],
+    repository: GitRepository,
+) -> _AnchorSelection:
+    selections: list[_AnchorSelection] = []
+    failures: list[str] = []
+    for report in reports:
+        advisory = advisories.get(report.report_id)
+        if advisory is None:
+            failures.append("advisory_missing")
+            continue
+        selection, failure = _try_anchor_selection(
+            task, report, advisory, repository
+        )
+        if selection is None:
+            assert failure is not None
+            failures.append(failure)
+            continue
+        selections.append(selection)
+    distinct_fixes = sorted({selection.fix_commit for selection in selections})
+    if len(distinct_fixes) > 1:
+        raise _error(
+            "ambiguous_report_candidate",
+            "selected reports bind to multiple valid fix commits",
+        )
+    if selections:
+        return sorted(selections, key=lambda item: item.report.report_id)[0]
+    if failures:
+        raise _error(failures[0], "no selected report has a valid public anchor")
+    raise _error("advisory_missing", "a selected report is absent from the advisory cache")
+
+
 def _file_record(path: str, payload: bytes, kind: str) -> dict[str, object]:
     return {
         "byte_count": len(payload),
@@ -627,11 +705,6 @@ def _build_payloads(inputs: _Inputs) -> tuple[dict[str, bytes], LaneAAssignmentM
         )
         if not reports:
             raise _error("report_missing", "a public task has no exact normalized report match")
-        selected = reports[0]
-        entry_id = selected.entry_ids[0]
-        advisory = inputs.advisories.get(selected.report_id)
-        if advisory is None:
-            raise _error("advisory_missing", "a selected report is absent from the advisory cache")
         repo_key = _repo_key(task.repo_url)
         repo_path = inputs.repo_paths.get(repo_key)
         if repo_path is None:
@@ -654,23 +727,12 @@ def _build_payloads(inputs: _Inputs) -> tuple[dict[str, bytes], LaneAAssignmentM
                 raise _error("repository_unsafe", "an offline repository snapshot is unavailable or unsafe") from None
             repositories[repo_key] = repository
             repo_seals[repo_key] = initial_seal
-        candidates = _candidate_commits(advisory, task.repo_url)
-        if not candidates:
-            raise _error("fix_candidate_missing", "selected advisory has no same-repository 40-hex commit URL")
-        matching: list[str] = []
-        for candidate in candidates:
-            try:
-                parents = repository.commit_parents(candidate)
-            except GitFactError:
-                raise _error("fix_candidate_unavailable", "an accepted fix candidate is absent from the offline repository") from None
-            if parents == (task.commit,):
-                matching.append(candidate)
-        if len(matching) != 1:
-            raise _error(
-                "ambiguous_fix_candidate" if len(matching) > 1 else "fix_parent_mismatch",
-                "selected advisory does not have exactly one single-parent fix of the vulnerable commit",
-            )
-        fix_commit = matching[0]
+        anchor = _select_anchor(task, reports, inputs.advisories, repository)
+        selected = anchor.report
+        entry_id = anchor.entry_id
+        advisory = inputs.advisories[selected.report_id]
+        candidates = anchor.candidate_fix_commits
+        fix_commit = anchor.fix_commit
         try:
             source_paths = _changed_source_paths(repository, task.commit, fix_commit)
             patch = _patch_bytes(repository, task.commit, fix_commit, source_paths)

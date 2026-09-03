@@ -23,6 +23,12 @@ fix commit whose single parent is the vulnerable checkout. This is deliberately
 narrow: it prevents accidental use of hidden evaluator facts, but it does not
 cover every public advisory style.
 
+The preparer and offline materializer now use the same strict candidate
+selection rule: if several public reports share a task snapshot, the selected
+anchor must be the unique report candidate whose public advisory and local Git
+facts satisfy the strict rule. A lexicographically earlier but non-anchorable
+report is audited as not run instead of causing a later materialization failure.
+
 | Split | Tasks | Strict-ready | Blocked | Strict-ready rate |
 | --- | ---: | ---: | ---: | ---: |
 | Public test | 20 | 8 | 12 | 40.0% |
