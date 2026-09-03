@@ -68,6 +68,11 @@ class EntryPointSearchTests(unittest.TestCase):
             "docs/readme.md": "dangerous is documented here\n",
             "src/non_utf8.py": b"def handler(x):\n    return dangerous(\xff)\n",
             "src/large.py": "@app.get('/')\ndef route():\n    return dangerous('x')\n" + "# padding\n" * 100,
+            "src/plain.ts": (
+                "const value = input.trim();\n"
+                "const normalized = value.toLowerCase();\n"
+                "return normalized;\n"
+            ),
         }
         for name, content in files.items():
             path = cls.repo_path / Path(*name.split("/"))
@@ -157,6 +162,25 @@ class EntryPointSearchTests(unittest.TestCase):
         self.assertEqual(result.status, "uncertain")
         self.assertEqual(result.candidates[0].matched_clue, "path:src/critical.py")
         self.assertFalse(result.candidates[0].direct_critical_reference)
+
+    def test_same_file_critical_path_without_marker_gets_review_anchor(self) -> None:
+        result = EntryPointSearcher(self.repository).search(
+            self.commit,
+            paths=["src/plain.ts"],
+            critical_paths=["src/plain.ts"],
+        )
+        self.assertEqual(result.status, "uncertain")
+        self.assertEqual(result.fact_status, "correct")
+        self.assertEqual(len(result.candidates), 1)
+        candidate = result.candidates[0]
+        self.assertEqual(candidate.kind, "handler")
+        self.assertEqual(candidate.path, "src/plain.ts")
+        self.assertEqual(candidate.line, 1)
+        self.assertFalse(candidate.explicit_external_binding)
+        self.assertTrue(candidate.direct_critical_reference)
+        self.assertEqual(candidate.matched_clue, "path:src/plain.ts")
+        self.assertFalse(candidate.runtime_reachability_verified)
+        self.assertFalse(candidate.semantic_role_verified)
 
     def test_non_utf8_and_unsupported_files_are_uncertain_with_reasons(self) -> None:
         result = self.search(["src/non_utf8.py", "docs/readme.md"])

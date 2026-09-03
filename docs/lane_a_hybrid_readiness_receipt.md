@@ -201,6 +201,7 @@ Authoring summaries:
 | --- | ---: | --- | ---: | --- | --- |
 | `test11` | 11 | true | 27 | `manual_review=11` | `incorrect=2`, `uncertain=6` |
 | `train23` | 23 | true | 61 | `manual_review=23` | `incorrect=2`, `uncertain=17` |
+| `train24-v2-review-anchor` | 24 | true | 64 | `manual_review=24` | `incorrect=2`, `uncertain=18` |
 | `identifier-subset-v2/test1` | 1 | true | 3 | `manual_review=1` | `uncertain=1` |
 | `identifier-subset-v2/train4` | 4 | true | 12 | `manual_review=4` | `incorrect=1`, `uncertain=3` |
 | `strict-v2/train-43ac81` | 1 | true | 1 | `manual_review=1` | none |
@@ -211,6 +212,7 @@ Closed-loop runner summaries:
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `test11` | 11 | 11 | 11 | 0 | 0 | ok |
 | `train23` | 23 | 23 | 23 | 0 | 0 | ok |
+| `train24-v2-review-anchor` | 24 | 24 | 24 | 0 | 0 | ok |
 | `identifier-subset-v2/test1` | 1 | 1 | 1 | 0 | 0 | ok |
 | `identifier-subset-v2/train4` | 4 | 4 | 4 | 0 | 0 | ok |
 | `strict-v2/train-43ac81` | 1 | 1 | 1 | 0 | 0 | ok |
@@ -221,9 +223,15 @@ Reviewer evidence summaries:
 | --- | ---: | ---: | --- |
 | `test11` | 8 | 3 | `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a` |
 | `train23` | 19 | 4 | `a1c49ec59abbbe0df612826594026a436158aab2c34a5c126f89ba7bf2ca8d72` |
+| `train24-v2-review-anchor` | 20 | 4 | `161cdcd470bb1d5629b533355c4e553e61c8cf5645f28b4c343018d82adf3c62` |
 | `identifier-subset-v2/test1` | 1 | 0 | `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652` |
 | `identifier-subset-v2/train4` | 4 | 0 | `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0` |
 | `strict-v2/train-43ac81` | 0 | 1 | `86fad1282f1b5f25f26c3b19fc0bffd15cd3798d2d6d95e5a120f284f0737e0b` |
+
+The current non-duplicated 40-task covered set is `test11`,
+`train24-v2-review-anchor`, `identifier-subset-v2/test1`, and
+`identifier-subset-v2/train4`: 33 complete candidate/report pairs, 7
+producer-deferred or incomplete rows, and 0 finalized rows.
 
 Expanded batch digests:
 
@@ -231,6 +239,7 @@ Expanded batch digests:
 | --- | --- | --- | --- | --- | --- | --- |
 | `test11` | `bac85d8812aa6264304526ab9450ad5bd76834b186a621d7f3abe6a78b2b1bd1` | `41c43389faa823a115890637bb4b85cf770dde8b87defde751b53e6efb18c57b` | `be4fdb904065063cc61f5a36b8c5a24454e7eea280a3256cda2ef0e84ca171de` | `e4d17d173ccd24f1536bf7383548a16db56f7e9dd4a6c1f352a0c0452fe862d2` | `b10e2da85b42b23cab02b7ecc222605aa425f4cfcb374823c625df1c86baff0f` | `a8e96613c0f7dfd4e93d1f17ed79b7c487ce273cdd8cea6463cace41f6e98538` |
 | `train23` | `da63ac0c59111570dfd66647736f41a84ab6641c09acb56a01bb8916823e4655` | `c2d30c379a8742d251c2d82c575da6c358add86f7d2046cf5af0e47c0a444cc0` | `5e8ddfe00aa29e1711932649b9695a30678864600b00fa2a45202a2e56f5b745` | `6f77234e1a1a73155ad8dfa07a2279ada65ef7eb2c3b6b3242c6464ca1eb5475` | `f21c634627a8d04b152e375b294f321ce66e0549e7adef7aa9dfa7359c7d18ae` | `be0fa4b02530d1003e813f2ec98ad5f5bf18a2f845c148245b86a81e3d2cbc92` |
+| `train24-v2-review-anchor` | `689ee3419e18cb7cd8518cb7d09e6a78b183a1aa9c39389153931228df32e563` | `a2b6f487a6bd1208728d91777f605c5834ba50c35fba6fd9843e46eb7c21925b` | `b779ff87595f80a916cac4da6440e1a5b90a78ec17ce8b8dc5fb813631fb52c9` | `0c063d86c11dc6efb76f7d2b61e6123d1d4b88c0063da3dbaf080fe7a88cd506` | `a6df0c7d01b550b48a717fbc372dd64c859b4241de299d287f4e299cb832e973` | `e3ded47d4e6fe8629f907a775ec23f06099fdcc594e291745d63937c55277ff5` |
 | `identifier-subset-v2/test1` | `fe8f6458f2b66e646fafb47fe1cbd0c87e7c387068a7c86e530fd4eefa94af9c` | `c2151999e0c68a6c38c6f02ea5c6dfe9c189169251ee948b57585f6bf5a5763d` | `c8b40e284877579b5254277f3132a7fe06123067d6877a3af35ec9703397b20b` | `e1fae809c8139c71f7c05ab8996584ba9be7d208f15ffcca9a68b883ee9fd089` | `c2259ac296e48d3a2a648f4ad7d5178a783ca2db376ba7f88fad7cf6e2525004` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | `identifier-subset-v2/train4` | `58508e0083b0e96b086aea5d8c296fd63e3356e84e867c92e08e11c0ca1914c2` | `797f75f8df8bca392d30c542fb494793ec5b4e6b137e4e540607312eb973e5fe` | `cf487d6767064b6d7d6a81c0aebc631d3a385f8cb6577342deec948428d2b351` | `d8540ad5841ed9e866ea0e51360b0b67f611babc80ae36cddb4fbe3d147ea796` | `d4b608305e004a8ae6c5e2a66784799c0f5d22ffaa1670d48aa39570979d712f` | `83dc9d5425336b24d2b81a2c092bbd273b04ae9e384c750d7902d2fa879d95a2` |
 | `strict-v2/train-43ac81` | `6ff129a830443d3e0a6a09e60259ea4c117e37438372c9d6652eb49ea2f5aa91` | `2143c8cfdbcbaf3f8da159eed584fbb402a7710f2a70562ea6f21bd68295b068` | `82277e4f72a9e873aaa9b322f81444758ab0a19967cdabc9afeee90fb811f430` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | `abc2089b78a11c0ee41c1af4cfc1c028f286341c8ff6e2cb16b2a7833620a82c` |
@@ -241,7 +250,11 @@ identifier-subset v2 incremental scan covered `61` generated files, excluding
 trusted local repo-map configuration files, and found `0` restricted marker or
 local-path hits. The strict-v2 `train-43ac81` incremental scan covered `26`
 generated files, excluding trusted local repo-map configuration files, and found
-`0` restricted marker or local-path hits.
+`0` restricted marker or local-path hits. The `train24-v2-review-anchor` replay
+is the current consolidated training view; it improves one Flowise task
+(`VG-TRAIN-46D6453D5B4663CF0D13`) from incomplete to complete `manual_review`
+by using a same-file review anchor, while the four remaining incomplete rows
+remain stopped at `guard_only_exists_on_fix_side`.
 
 ## Artifact digests
 
@@ -295,12 +308,12 @@ two workstreams:
 
 ## Publication note
 
-`submission_prediction_cli export` is designed to use native POSIX filesystem
-semantics for atomic no-replace publication. On Windows it correctly rejects the
-formal export path with `platform_unsupported`. This is a packaging constraint,
-not a batch-data failure. Formal final export should run on native Linux or
-another supported POSIX environment, while Windows can continue to run the
-closed-loop and readback checks. The exact export/verify command matrix is in
+`submission_prediction_cli export` now supports both native POSIX hosts and
+Windows-native hosts. POSIX uses descriptor-relative publication where
+available; Windows uses private staging, no-replace final rename, and
+post-publication readback. Export remains stricter than review: incomplete
+replays are rejected with `incomplete_predictions` instead of producing a
+partial submission bundle. The exact export/verify command matrix is in
 `docs/submission/submission_prediction_posix_export_runbook.md`.
 
 ## Next acceptance work

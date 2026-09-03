@@ -425,6 +425,41 @@ def _relation(
     return False, False, None
 
 
+def _same_file_review_anchor(
+    path: str,
+    lines: Sequence[str],
+    critical_paths: Sequence[str],
+) -> EntryPointCandidate | None:
+    if path not in set(critical_paths):
+        return None
+    for index, line in enumerate(lines):
+        if not line.strip():
+            continue
+        return EntryPointCandidate(
+            "uncertain",
+            "correct",
+            path,
+            index + 1,
+            index + 1,
+            _language(path) or "unknown",
+            "handler",
+            None,
+            False,
+            True,
+            f"path:{path}",
+            False,
+            False,
+            line[:_MAX_SNIPPET_CHARS],
+            (
+                "No explicit entry/export construct was found in the selected "
+                "file, but the file itself is the critical path. This is a "
+                "same-file review anchor only; runtime reachability and "
+                "vulnerability semantics remain unproved."
+            ),
+        )
+    return None
+
+
 class EntryPointSearcher:
     """Search an explicit path allow-list at one immutable commit."""
 
@@ -530,6 +565,7 @@ class EntryPointSearcher:
             except UnicodeDecodeError:
                 issues.append(EntryPointSearchIssue("uncertain", "non_utf8_source", path, "Immutable source blob is not valid UTF-8 text.")); continue
             searched.append(path); lines = text.splitlines()
+            path_candidate_start = len(candidates)
             for marker in _markers(language, lines):
                 end, scope_text = _scope(lines, marker)
                 related, direct, matched = _relation(path, scope_text, text, critical_path_values, symbol_values)
@@ -554,6 +590,10 @@ class EntryPointSearcher:
                 ))
             if truncated:
                 issues.append(EntryPointSearchIssue("uncertain", "max_candidates_exceeded", path, f"Candidate output was truncated at {self.max_candidates}.")); break
+            if len(candidates) == path_candidate_start and len(candidates) < self.max_candidates:
+                anchor = _same_file_review_anchor(path, lines, critical_path_values)
+                if anchor is not None:
+                    candidates.append(anchor)
 
         incomplete = bool(issues) or truncated
         if incomplete: status, fact_status = "uncertain", "uncertain"
