@@ -115,6 +115,12 @@ Formal export anchors for the latest complete replay batches:
 | `test11-v3-authz-scope` | `f06618b509afb7843ddcbfa94e6585cff76c22b56fe79e06d2ec0fbc1e3c557e` |
 | `train24-v5-unsafe-option` | `48aebd686a749d8b25c95facb8445206910c4056d13ea366d54420f02a5cbcb8` |
 
+The four latest covered-set exports can be combined into one 40-line package
+with `submission_prediction_cli combine`. Its combined source-set SHA-256 is
+`7ae810b9b157c071b77f494d69dacbbad9b062297cfb75af6c2c4f80d870ab48`; its
+submission SHA-256 is
+`0ff24779c984e82f4f83773d3f9b1694a8a4a4bb2c0134c5c6eeaa89b1430508`.
+
 The next engineering choice is therefore not whether the pipeline runs. It
 does. The choice is how aggressively to promote semantic facts:
 

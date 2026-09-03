@@ -332,6 +332,17 @@ test/training replays in the current non-duplicated covered set, all 40 covered
 tasks now have complete candidate/report pairs, 0 are producer-deferred or
 incomplete, and 0 are finalized.
 
+The current covered-set exports can now be mechanically combined with
+`submission_prediction_cli combine`. The combined package rebases local
+sub-batch `entry_id` and `input_line` values into a single 40-line order and
+publishes a path-free manifest. Readback of the combined package succeeded with
+source-set SHA-256
+`7ae810b9b157c071b77f494d69dacbbad9b062297cfb75af6c2c4f80d870ab48`,
+submission SHA-256
+`0ff24779c984e82f4f83773d3f9b1694a8a4a4bb2c0134c5c6eeaa89b1430508`,
+`status_counts={"manual_review":40}`, and
+`verdict_counts={"incorrect":5,"uncertain":35}`.
+
 ## Artifact digests
 
 These digests identify the sanitized public artifacts for the 8-task strict

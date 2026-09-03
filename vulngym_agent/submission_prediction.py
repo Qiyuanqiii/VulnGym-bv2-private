@@ -200,6 +200,27 @@ class SubmissionPredictionBundle:
 
 
 @dataclass(frozen=True, slots=True)
+class SubmissionPredictionExportInput:
+    directory: Path
+    source_replay_dataset_sha256: str
+    submission_sha256: str
+    task_count: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "directory",
+            _absolute_path(self.directory, "input submission directory"),
+        )
+        _require_sha256(
+            self.source_replay_dataset_sha256,
+            "source_replay_dataset_sha256",
+        )
+        _require_sha256(self.submission_sha256, "submission_sha256")
+        _require_count(self.task_count, "task_count")
+
+
+@dataclass(frozen=True, slots=True)
 class _TrustedPathGuard:
     path: Path
     is_directory: bool
@@ -305,6 +326,137 @@ def _build_payloads(
         files=files,
         tasks=tuple(task_bindings),
         submission_sha256=submission_sha256,
+    )
+    payloads["submission_manifest.json"] = _line(manifest.to_dict())
+    return payloads, manifest
+
+
+def _source_set_digest(inputs: Sequence[SubmissionPredictionExportInput]) -> str:
+    core = {
+        "contract_version": SUBMISSION_PREDICTION_CONTRACT_VERSION,
+        "kind": "vulngym.submission-prediction-source-set.v1",
+        "inputs": [
+            {
+                "source_replay_dataset_sha256": (
+                    item.source_replay_dataset_sha256
+                ),
+                "submission_sha256": item.submission_sha256,
+                "task_count": item.task_count,
+            }
+            for item in inputs
+        ],
+    }
+    return canonical_sha256(core)
+
+
+def _rebase_report(
+    report: ValidationReport, *, entry_id: str, input_line: int
+) -> ValidationReport:
+    return ValidationReport(
+        report_id=report.report_id,
+        verdict=report.verdict,
+        fields=report.fields,
+        summary=report.summary,
+        missing_information=report.missing_information,
+        entry_id=entry_id,
+        input_line=input_line,
+    )
+
+
+def _build_combined_payloads(
+    bundles: Sequence[SubmissionPredictionBundle],
+    *,
+    source_set_sha256: str,
+    expected_task_count: int,
+) -> tuple[dict[str, bytes], SubmissionPredictionManifest]:
+    source_digest = _require_sha256(source_set_sha256, "source_set_sha256")
+    expected = _require_count(expected_task_count, "expected_task_count")
+    observed = sum(bundle.manifest.task_count for bundle in bundles)
+    if observed != expected:
+        raise SubmissionPredictionError(
+            "task_count_mismatch", "combined submission task count differs"
+        )
+
+    entry_lines: list[bytes] = []
+    validation_lines: list[bytes] = []
+    task_bindings: list[dict[str, Any]] = []
+    statuses: Counter[str] = Counter()
+    verdicts: Counter[str] = Counter()
+    seen_task_ids: set[str] = set()
+    for bundle in bundles:
+        for binding, source_entry, source_report in zip(
+            bundle.manifest.tasks,
+            bundle.entries,
+            bundle.validations,
+            strict=True,
+        ):
+            task_id = binding["task_id"]
+            if task_id in seen_task_ids:
+                raise SubmissionPredictionError(
+                    "duplicate_task", "combined submission repeats a task"
+                )
+            seen_task_ids.add(task_id)
+            input_line = len(entry_lines) + 1
+            entry_id = f"entry-{input_line:05d}"
+            entry = ProductionOutcome(
+                candidate={**dict(source_entry), "entry_id": entry_id}
+            ).candidate
+            report = _rebase_report(
+                source_report, entry_id=entry_id, input_line=input_line
+            )
+            if (
+                report.report_id != entry["report_id"]
+                or report.entry_id != entry["entry_id"]
+                or report.input_line != input_line
+                or binding["status"] not in {"finalized", "manual_review"}
+                or (binding["status"] == "finalized" and report.verdict != "correct")
+            ):
+                raise SubmissionPredictionError(
+                    "identity_mismatch",
+                    "combined submission task binding differs",
+                )
+            entry_sha256 = canonical_sha256(entry)
+            validation_sha256 = canonical_sha256(report)
+            entry_lines.append(_line(entry))
+            validation_lines.append(_line(report.to_dict()))
+            statuses[binding["status"]] += 1
+            verdicts[report.verdict] += 1
+            task_bindings.append(
+                {
+                    "task_id": task_id,
+                    "input_line": input_line,
+                    "status": binding["status"],
+                    "verdict": report.verdict,
+                    "entry_id": entry_id,
+                    "report_id": entry["report_id"],
+                    "entry_sha256": entry_sha256,
+                    "validation_sha256": validation_sha256,
+                }
+            )
+
+    payloads = {
+        "entries.jsonl": b"".join(entry_lines),
+        "validation.jsonl": b"".join(validation_lines),
+    }
+    files = {name: _summary(payload) for name, payload in payloads.items()}
+    core = {
+        "contract_version": SUBMISSION_PREDICTION_CONTRACT_VERSION,
+        "kind": "vulngym.submission-predictions.v1",
+        "source_replay_dataset_sha256": source_digest,
+        "task_count": expected,
+        "status_counts": dict(sorted(statuses.items())),
+        "verdict_counts": dict(sorted(verdicts.items())),
+        "files": files,
+        "tasks": task_bindings,
+    }
+    manifest = SubmissionPredictionManifest(
+        source_replay_dataset_sha256=source_digest,
+        task_count=expected,
+        status_counts=core["status_counts"],
+        verdict_counts=core["verdict_counts"],
+        files=files,
+        tasks=tuple(task_bindings),
+        submission_sha256=canonical_sha256(core),
     )
     payloads["submission_manifest.json"] = _line(manifest.to_dict())
     return payloads, manifest
@@ -1721,7 +1873,7 @@ def _publish_payloads(
     output: Path,
     payloads: Mapping[str, bytes],
     expected_manifest: SubmissionPredictionManifest,
-    predictions: VerifiedSubmissionPredictions,
+    predictions: VerifiedSubmissionPredictions | None,
     *,
     parent_guard: tuple[
         tuple[Path, tuple[int, int, int, int]], ...
@@ -1791,11 +1943,17 @@ def _publish_payloads(
             expected=expected_manifest.task_count,
             expected_submission_sha256=expected_manifest.submission_sha256,
         )
-        _assert_bundle_matches_source(
-            before,
-            predictions,
-            expected_task_count=expected_manifest.task_count,
-        )
+        if predictions is None:
+            if before.manifest.to_dict() != expected_manifest.to_dict():
+                raise SubmissionPredictionError(
+                    "manifest_mismatch", "submission manifest binding differs"
+                )
+        else:
+            _assert_bundle_matches_source(
+                before,
+                predictions,
+                expected_task_count=expected_manifest.task_count,
+            )
         _assert_directory_chain(parent_guard)
         _assert_trusted_path_guards(trusted_guards)
         _assert_semantic_path_disjoint(
@@ -1887,11 +2045,17 @@ def _publish_payloads(
             expected=expected_manifest.task_count,
             expected_submission_sha256=expected_manifest.submission_sha256,
         )
-        _assert_bundle_matches_source(
-            after,
-            predictions,
-            expected_task_count=expected_manifest.task_count,
-        )
+        if predictions is None:
+            if after.manifest.to_dict() != expected_manifest.to_dict():
+                raise SubmissionPredictionError(
+                    "manifest_mismatch", "submission manifest binding differs"
+                )
+        else:
+            _assert_bundle_matches_source(
+                after,
+                predictions,
+                expected_task_count=expected_manifest.task_count,
+            )
         if after.manifest.to_dict() != before.manifest.to_dict():
             raise SubmissionPredictionError(
                 "publication_uncertain",
@@ -2012,14 +2176,97 @@ def write_submission_predictions(
     )
 
 
+def combine_submission_prediction_exports(
+    output_dir: str | os.PathLike[str],
+    inputs: Sequence[SubmissionPredictionExportInput],
+    *,
+    expected_task_count: int,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+) -> SubmissionPredictionManifest:
+    """Combine already verified submission-export directories.
+
+    The combined package is a path-free projection over pinned export inputs.
+    It rebases ``entry_id`` and ``input_line`` to the combined JSONL line order
+    so independently exported sub-batches cannot collide.
+    """
+
+    if not inputs:
+        raise SubmissionPredictionError(
+            "missing_input", "combined submission requires at least one input"
+        )
+    expected = _require_count(expected_task_count, "expected_task_count")
+    normalized = tuple(
+        item
+        if isinstance(item, SubmissionPredictionExportInput)
+        else SubmissionPredictionExportInput(**dict(item))  # type: ignore[arg-type]
+        for item in inputs
+    )
+    output = _absolute_path(output_dir, "submission output directory")
+    protected = _normalize_protected_paths(protected_paths)
+    for item in normalized:
+        _assert_no_path_overlap(
+            output,
+            item.directory,
+            protected,
+            submission_exists=False,
+        )
+    parent_guard = _guard_directory_chain(output.parent)
+    trusted_guards = (
+        *(
+            _capture_trusted_path_guard(
+                item.directory, require_directory=True
+            )
+            for item in normalized
+        ),
+        *(
+            _capture_trusted_path_guard(path, require_directory=False)
+            for path in protected
+        ),
+    )
+    _assert_semantic_path_disjoint(
+        parent_guard, trusted_guards, submission_exists=False
+    )
+    bundles = tuple(
+        read_submission_predictions(
+            item.directory,
+            expected_source_replay_dataset_sha256=(
+                item.source_replay_dataset_sha256
+            ),
+            expected_task_count=item.task_count,
+            expected_submission_sha256=item.submission_sha256,
+        )
+        for item in normalized
+    )
+    _assert_trusted_path_guards(trusted_guards)
+    _assert_directory_chain(parent_guard)
+    _assert_semantic_path_disjoint(
+        parent_guard, trusted_guards, submission_exists=False
+    )
+    payloads, expected_manifest = _build_combined_payloads(
+        bundles,
+        source_set_sha256=_source_set_digest(normalized),
+        expected_task_count=expected,
+    )
+    return _publish_payloads(
+        output,
+        payloads,
+        expected_manifest,
+        None,
+        parent_guard=parent_guard,
+        trusted_guards=trusted_guards,
+    )
+
+
 __all__ = [
     "SUBMISSION_PREDICTION_CONTRACT_VERSION",
     "SUBMISSION_PREDICTION_FILES",
     "SUBMISSION_REVIEW_EVIDENCE_CONTRACT_VERSION",
     "SubmissionPredictionBundle",
     "SubmissionPredictionError",
+    "SubmissionPredictionExportInput",
     "SubmissionPredictionManifest",
     "build_submission_review_evidence",
+    "combine_submission_prediction_exports",
     "read_submission_predictions",
     "verify_submission_predictions",
     "write_submission_predictions",

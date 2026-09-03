@@ -139,6 +139,14 @@ python -B -m vulngym_agent.closed_loop_cli \
   `d6aa6c769a09c1dc70e4a25de1030a868dc546e28cdde3130140a76cf4729694`，
   `identifier-subset-v2/train4` 的 `submission_sha256`
   `a4d9eb33443053da3000e94f5d5a2cf514981a718adf3e4401b46d68f6015534`。
+- 新增 `submission_prediction_cli combine`，可把上述 4 个已 pin 的
+  complete 子批次合并成当前 40 条 covered-set 包，并重新编号
+  `entry_id`/`input_line`。合并包 readback 已通过：combined source-set
+  `7ae810b9b157c071b77f494d69dacbbad9b062297cfb75af6c2c4f80d870ab48`，
+  submission
+  `0ff24779c984e82f4f83773d3f9b1694a8a4a4bb2c0134c5c6eeaa89b1430508`，
+  `status_counts={"manual_review":40}`，
+  `verdict_counts={"incorrect":5,"uncertain":35}`。
 - TODO：按 `docs/submission/submission_prediction_posix_export_runbook.md`
   对当前 covered set 的剩余 complete=tasks replay 执行 `export` 和双 pin
   `verify`；继续扩大到全量 20 test + 50 train，或将无法机械证明的字段作为

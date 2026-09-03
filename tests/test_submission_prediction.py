@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
+from dataclasses import replace
 import io
 import json
 import os
@@ -26,7 +27,9 @@ from vulngym_agent.orchestrator import (
 from vulngym_agent.submission_prediction import (
     SUBMISSION_PREDICTION_FILES,
     SubmissionPredictionError,
+    SubmissionPredictionExportInput,
     build_submission_review_evidence,
+    combine_submission_prediction_exports,
     read_submission_predictions,
     verify_submission_predictions,
     write_submission_predictions,
@@ -223,6 +226,32 @@ class SubmissionPredictionTests(unittest.TestCase):
         )
         return replay, manifest, predictions
 
+    def _source_replay_for(self, replay: Path, task, outcome, *, input_line: int):
+        manifest = write_closed_loop_artifacts(
+            replay, [ReplayRecord(input_line, task, outcome)]
+        )
+        predictions = read_verified_submission_predictions(
+            replay, expected_dataset_sha256=manifest.dataset_sha256
+        )
+        return replay, manifest, predictions
+
+    def _manual_review_for(self, entry, task):
+        runner = ClosedLoopOrchestrator(
+            orchestrator_fixtures._FakeProducer(entry),
+            orchestrator_fixtures._SequenceValidatorFactory(
+                [
+                    orchestrator_fixtures._report(
+                        entry, {"trace": "uncertain"}, label=task.task_id
+                    )
+                ],
+                task,
+            ),
+            FixedProducerContextFactory(),
+        )
+        outcome = runner.run(task)
+        self.assertEqual(outcome.status, "manual_review")
+        return outcome
+
     def test_manual_review_exports_one_complete_honest_pair(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -275,6 +304,133 @@ class SubmissionPredictionTests(unittest.TestCase):
                 canonical_sha256(checked.entries[0]), canonical_sha256(self.entry)
             )
             self.assertEqual(checked.validations[0].verdict, "uncertain")
+
+    def test_combine_rebases_entry_ids_and_input_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            replay_a, source_a, _ = self._source_replay_for(
+                root / "source-replay-a",
+                self.task,
+                self._manual_review(),
+                input_line=7,
+            )
+            export_a = root / "export-a"
+            manifest_a = write_submission_predictions(
+                export_a,
+                replay_a,
+                expected_source_replay_dataset_sha256=source_a.dataset_sha256,
+                expected_task_count=1,
+            )
+
+            entry_b = deepcopy(self.entry)
+            entry_b["entry_id"] = "entry-00002"
+            task_b = replace(
+                self.task,
+                task_id="task:closed-loop-002",
+                entry_id=entry_b["entry_id"],
+            )
+            replay_b, source_b, _ = self._source_replay_for(
+                root / "source-replay-b",
+                task_b,
+                self._manual_review_for(entry_b, task_b),
+                input_line=7,
+            )
+            export_b = root / "export-b"
+            manifest_b = write_submission_predictions(
+                export_b,
+                replay_b,
+                expected_source_replay_dataset_sha256=source_b.dataset_sha256,
+                expected_task_count=1,
+            )
+
+            combined = root / "combined"
+            manifest = combine_submission_prediction_exports(
+                combined,
+                (
+                    SubmissionPredictionExportInput(
+                        export_a,
+                        source_a.dataset_sha256,
+                        manifest_a.submission_sha256,
+                        1,
+                    ),
+                    SubmissionPredictionExportInput(
+                        export_b,
+                        source_b.dataset_sha256,
+                        manifest_b.submission_sha256,
+                        1,
+                    ),
+                ),
+                expected_task_count=2,
+            )
+
+            checked = read_submission_predictions(
+                combined,
+                expected_source_replay_dataset_sha256=(
+                    manifest.source_replay_dataset_sha256
+                ),
+                expected_task_count=2,
+                expected_submission_sha256=manifest.submission_sha256,
+            )
+            self.assertEqual(
+                [entry["entry_id"] for entry in checked.entries],
+                ["entry-00001", "entry-00002"],
+            )
+            self.assertEqual(
+                [report.input_line for report in checked.validations],
+                [1, 2],
+            )
+            self.assertEqual(
+                [task["task_id"] for task in checked.manifest.tasks],
+                ["task:closed-loop-001", "task:closed-loop-002"],
+            )
+            manifest_text = (combined / "submission_manifest.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn(str(root), manifest_text)
+
+    def test_cli_combine_emits_path_free_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            replay, source_manifest, _ = self._source_replay(
+                root, self._manual_review()
+            )
+            export = root / "export"
+            manifest = write_submission_predictions(
+                export,
+                replay,
+                expected_source_replay_dataset_sha256=(
+                    source_manifest.dataset_sha256
+                ),
+                expected_task_count=1,
+            )
+            output = root / "combined"
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    [
+                        "combine",
+                        "--output-dir",
+                        str(output),
+                        "--input-submission-dir",
+                        str(export),
+                        "--input-source-replay-dataset-sha256",
+                        source_manifest.dataset_sha256,
+                        "--input-submission-sha256",
+                        manifest.submission_sha256,
+                        "--input-task-count",
+                        "1",
+                        "--expected-task-count",
+                        "1",
+                    ]
+                )
+
+            self.assertEqual(code, 0, stderr.getvalue())
+            summary = json.loads(stdout.getvalue())
+            self.assertEqual(summary["operation"], "combine")
+            self.assertEqual(summary["task_count"], 1)
+            self.assertTrue(output.is_dir())
+            self.assertNotIn(str(root), stdout.getvalue())
 
     def test_incomplete_deferred_task_is_rejected_without_output(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

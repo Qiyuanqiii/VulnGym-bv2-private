@@ -11,7 +11,9 @@ from typing import Any, Final, Sequence
 
 from vulngym_agent.submission_prediction import (
     SubmissionPredictionError,
+    SubmissionPredictionExportInput,
     build_submission_review_evidence,
+    combine_submission_prediction_exports,
     verify_submission_predictions,
     write_submission_predictions,
 )
@@ -131,6 +133,37 @@ def _parser() -> argparse.ArgumentParser:
         help="trusted local path whose spelling must not occur in replay artifacts",
     )
     _add_common_count(review)
+
+    combine = subparsers.add_parser(
+        "combine", help="combine pinned submission exports"
+    )
+    combine.add_argument("--output-dir", required=True, type=Path)
+    combine.add_argument(
+        "--input-submission-dir", action="append", required=True, type=Path
+    )
+    combine.add_argument(
+        "--input-source-replay-dataset-sha256",
+        action="append",
+        required=True,
+        type=_sha256,
+    )
+    combine.add_argument(
+        "--input-submission-sha256",
+        action="append",
+        required=True,
+        type=_sha256,
+    )
+    combine.add_argument(
+        "--input-task-count", action="append", required=True, type=_count
+    )
+    combine.add_argument(
+        "--protected-path",
+        action="append",
+        default=[],
+        type=Path,
+        help="trusted local path whose spelling must not occur in replay artifacts",
+    )
+    _add_common_count(combine)
     return parser
 
 
@@ -185,6 +218,57 @@ def _run_export(
         raise
 
 
+def _combine_inputs(
+    args: argparse.Namespace,
+) -> tuple[SubmissionPredictionExportInput, ...]:
+    directories = tuple(args.input_submission_dir)
+    source_digests = tuple(args.input_source_replay_dataset_sha256)
+    submission_digests = tuple(args.input_submission_sha256)
+    counts = tuple(args.input_task_count)
+    if not (
+        len(directories)
+        == len(source_digests)
+        == len(submission_digests)
+        == len(counts)
+    ):
+        raise SubmissionPredictionError(
+            "input_argument_mismatch",
+            "combine input arguments must have matching counts",
+        )
+    return tuple(
+        SubmissionPredictionExportInput(
+            directory=directory,
+            source_replay_dataset_sha256=source_digest,
+            submission_sha256=submission_digest,
+            task_count=count,
+        )
+        for directory, source_digest, submission_digest, count in zip(
+            directories, source_digests, submission_digests, counts, strict=True
+        )
+    )
+
+
+def _run_combine(
+    args: argparse.Namespace, mutation_state: list[bool]
+) -> Any:
+    """Run combine without a false-uncommitted window after it returns."""
+
+    mutation_state[0] = True
+    try:
+        return combine_submission_prediction_exports(
+            args.output_dir,
+            _combine_inputs(args),
+            expected_task_count=args.expected_task_count,
+            protected_paths=args.protected_path,
+        )
+    except SubmissionPredictionError as error:
+        mutation_state[0] = error.committed
+        raise
+    except BaseException:
+        mutation_state[0] = False
+        raise
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     mutation_state = [False]
     arguments_parsed = False
@@ -193,6 +277,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments_parsed = True
         if args.operation == "export":
             manifest = _run_export(args, mutation_state)
+            _canonical_stdout(_summary(args.operation, manifest))
+        elif args.operation == "combine":
+            manifest = _run_combine(args, mutation_state)
             _canonical_stdout(_summary(args.operation, manifest))
         elif args.operation == "verify":
             bundle = verify_submission_predictions(
