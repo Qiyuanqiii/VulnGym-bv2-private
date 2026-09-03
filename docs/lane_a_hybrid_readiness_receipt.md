@@ -76,14 +76,47 @@ Local commit-graph fallback probe:
 The probe is intentionally graph-only: it identifies whether a blocked task has
 exactly one local single-parent child commit of the vulnerable checkout, but it
 does not inspect or publish source paths during broad diagnosis. The 14
-`unique_direct_child` tasks are therefore the next high-confidence automation
-candidates; each still needs the formal materializer to validate source diffs
-before it can join a real T2-to-T1 batch.
+`unique_direct_child` tasks are therefore high-confidence automation
+candidates, but each still needs the formal materializer to validate source
+diffs before it can join a real T2-to-T1 batch.
 
-These blockers are materialization gaps, not T1/T2 runtime failures. The main
-follow-up is to add a second, reviewer-auditable materialization policy for
-public advisories that do not expose the exact direct-fix-parent shape currently
-required.
+## Local direct-child fallback materialization
+
+A narrow fallback policy is now implemented for tasks whose public advisory has
+no GitHub commit reference at all. The policy remains fail-closed: it requires
+exact public identifier equality and exactly one local single-parent child of
+the vulnerable checkout. If any candidate advisory in the task group contains a
+GitHub commit reference, the strict public-reference policy keeps precedence.
+
+Validation of the 14 graph candidates produced 13 usable fallback
+materializations. One training candidate, `VG-TRAIN-640FF6DE344026468477`,
+was rejected with `non_source_diff` and remains out of the automatic batch.
+
+| Split | Fallback graph candidates | Fallback materialized | Rejected |
+| --- | ---: | ---: | ---: |
+| Public test | 3 | 3 | 0 |
+| Public train | 11 | 10 | 1 |
+| Total | 14 | 13 | 1 |
+
+Current machine-materializable coverage with the strict and fallback policies
+combined:
+
+| Split | Tasks | Strict-ready | Fallback materialized | Total materializable | Rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Public test | 20 | 8 | 3 | 11 | 55.0% |
+| Public train | 50 | 14 | 10 | 24 | 48.0% |
+| Total | 70 | 22 | 13 | 35 | 50.0% |
+
+Fallback materialization digests:
+
+| Batch | Tasks | Materialization SHA-256 | Manifest wire SHA-256 |
+| --- | ---: | --- | --- |
+| `test3` | 3 | `130188977378e0d71a45485ca9799a95b02cd3fc38a635aa00b3446c34db4b0a` | `eed9c4ea32dad976716c70a56dbb355f36e0f54d9be0ee49d773cfda6197981f` |
+| `train10` | 10 | `f8e266ed412e0933ff9cd03c255bdccabbb72d086f7f10d03a2852a3e0ce0ab1` | `b92ca1f4bac6d603e1e51bb36e0890042888e6a0aa39c8135bb5b90ab0fad131` |
+
+The remaining blockers are materialization gaps, not T1/T2 runtime failures.
+They need separate reviewer-auditable policies or refresh steps before they can
+be safely added to automated batches.
 
 ## Real T2-to-T1 batch result
 
@@ -177,11 +210,14 @@ closed-loop and readback checks.
 
 ## Next acceptance work
 
-1. Add fallback public materialization for the 14 blocked tasks whose local
-   commit-graph probe found a unique direct child, without using hidden
-   evaluator material.
+1. Merge strict and fallback-materialized tasks into expanded Lane A batches
+   and run the real T2-to-T1 closed loop for 11 public test tasks and 24 public
+   training tasks.
 2. Use the reviewer evidence export on every expanded batch and archive the
    resulting `review_evidence_sha256` with the batch receipt.
 3. Add narrow T1 promotions only where evidence is exact and reproducible. Do
    not globally lower the finalized threshold and do not auto-finalize records
    with known incorrect entry-point evidence.
+4. Continue the remaining 35-task materialization backlog through identifier
+   subset policy, local repository refresh, public metadata refresh, and manual
+   review where no direct-child policy can be justified.

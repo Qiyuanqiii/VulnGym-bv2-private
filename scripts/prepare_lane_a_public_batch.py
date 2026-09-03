@@ -445,11 +445,20 @@ def _same_repo_candidates(advisory: Mapping[str, Any], repo_url: str) -> tuple[s
     return tuple(sorted(candidates))
 
 
+def _has_github_commit_reference(advisory: Mapping[str, Any]) -> bool:
+    return any(
+        _COMMIT_URL_RE.fullmatch(reference) is not None
+        for reference in advisory["references"]
+    )
+
+
 def _validate_materializer_anchor(
     task: BenchmarkTask,
     report: Mapping[str, Any],
     advisory: Mapping[str, Any],
     repository: GitRepository,
+    *,
+    allow_local_direct_child_fallback: bool = False,
 ) -> str:
     actual_identifiers = {item["value"] for item in advisory["identifiers"]}
     if actual_identifiers != set(report["vuln_ids"]):
@@ -459,6 +468,24 @@ def _validate_materializer_anchor(
         )
     candidates = _same_repo_candidates(advisory, task.repo_url)
     if not candidates:
+        if (
+            allow_local_direct_child_fallback
+            and not _has_github_commit_reference(advisory)
+        ):
+            try:
+                children = repository.direct_child_commits(task.commit)
+            except GitFactError:
+                raise _error(
+                    "fix_candidate_unavailable",
+                    "a local direct-child fix candidate cannot be inspected",
+                ) from None
+            if len(children) == 1:
+                return children[0]
+            if len(children) > 1:
+                raise _error(
+                    "ambiguous_fix_candidate",
+                    "the selected advisory has multiple local direct-child fix candidates",
+                )
         raise _error(
             "fix_candidate_missing",
             "the selected advisory has no same-repository 40-hex commit reference",
@@ -532,19 +559,43 @@ def _select_materializer_anchor(
     reports: Sequence[Mapping[str, Any]],
     advisories_by_ghsa: Mapping[str, Mapping[str, Any]],
     repository: GitRepository,
+    *,
+    allow_local_direct_child_fallback: bool = False,
 ) -> str:
-    diagnosis = _materializer_anchor_diagnosis(
-        task, reports, advisories_by_ghsa, repository
+    passes: list[dict[str, str]] = []
+    blockers: list[dict[str, str]] = []
+    task_allows_local_direct_child = allow_local_direct_child_fallback and not any(
+        _has_github_commit_reference(advisory)
+        for report in reports
+        if (advisory := advisories_by_ghsa.get(str(report["report_id"]))) is not None
     )
-    passes = tuple(diagnosis["passes"])
-    if diagnosis["status"] == "prepared" and passes:
-        return str(sorted(passes, key=lambda item: item["report_id"])[0]["fix_commit"])
-    blockers = tuple(diagnosis["blockers"])
-    if diagnosis["status"] == "ambiguous":
+    for report in reports:
+        report_id = str(report["report_id"])
+        advisory = advisories_by_ghsa.get(report_id)
+        if advisory is None:
+            blockers.append({"code": "advisory_missing", "report_id": report_id})
+            continue
+        try:
+            fix_commit = _validate_materializer_anchor(
+                task,
+                report,
+                advisory,
+                repository,
+                allow_local_direct_child_fallback=task_allows_local_direct_child,
+            )
+        except LaneAPublicBatchError as exc:
+            blockers.append({"code": exc.code, "report_id": report_id})
+            continue
+        passes.append({"fix_commit": fix_commit, "report_id": report_id})
+
+    distinct_fixes = sorted({item["fix_commit"] for item in passes})
+    if len(distinct_fixes) > 1:
         raise _error(
             "ambiguous_report_candidate",
             "the selected task has multiple public report anchors with different fixes",
         )
+    if passes:
+        return str(sorted(passes, key=lambda item: item["report_id"])[0]["fix_commit"])
     if blockers:
         raise _error(
             str(blockers[0]["code"]),
@@ -818,6 +869,7 @@ def prepare_lane_a_public_batch(
     task_ids: Sequence[str],
     output_dir: Path,
     advisory_fetcher: AdvisoryFetcher | None = None,
+    allow_local_direct_child_fallback: bool = False,
 ) -> dict[str, object]:
     """Prepare and atomically publish one explicit public Lane A batch."""
 
@@ -855,6 +907,7 @@ def prepare_lane_a_public_batch(
             reports_by_task[task.task_id],
             by_ghsa,
             repositories[task.repo_url.casefold()].repository,
+            allow_local_direct_child_fallback=allow_local_direct_child_fallback,
         )
 
     try:
@@ -883,6 +936,7 @@ def prepare_lane_a_public_batch(
         "pins": pins,
         "summary": {
             "advisory_count": len(advisories),
+            "allow_local_direct_child_fallback": allow_local_direct_child_fallback,
             "fix_commits": [
                 {"fix_commit": fix_commits[task.task_id], "task_id": task.task_id}
                 for task in tasks
@@ -1031,6 +1085,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-repo-root", required=True, type=Path)
     parser.add_argument("--task-id", action="append", required=True, dest="task_ids")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--allow-local-direct-child-fallback", action="store_true")
     parser.add_argument("--diagnose-only", action="store_true")
     return parser
 
@@ -1054,6 +1109,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 local_repo_root=args.local_repo_root,
                 task_ids=args.task_ids,
                 output_dir=args.output_dir,
+                allow_local_direct_child_fallback=args.allow_local_direct_child_fallback,
             )
     except LaneAPublicBatchError as exc:
         payload = {

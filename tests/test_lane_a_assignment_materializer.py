@@ -267,6 +267,36 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
             ],
         )
 
+    def test_local_direct_child_fallback_materializes_missing_commit_reference(self) -> None:
+        self._git("branch", "-D", "alternate", cwd=self.repo)
+        self.cache[0]["references"] = ["https://github.com/example/repo/issues/1"]
+        self.cache[1]["references"] = ["https://github.com/example/repo/issues/2"]
+        self._write_inputs()
+
+        self._build()
+
+        output = self.output_root / "output"
+        assignment = json.loads((output / ASSIGNMENTS_FILENAME).read_bytes())
+        self.assertEqual(assignment["report_id"], "GHSA-1111-1111-1111")
+        self.assertEqual(assignment["hints"]["fix_commits"], [self.fix])
+        self.assertEqual(assignment["hints"]["source_paths"], ["src/app.py"])
+        audit = json.loads((output / COVERAGE_AUDIT_FILENAME).read_bytes())
+        self.assertEqual(audit["anchor_policy"], "local-direct-child-fallback-v1")
+        self.assertEqual(
+            audit["anchor_candidate_source"],
+            "local_commit_graph_direct_child",
+        )
+
+    def test_local_direct_child_fallback_rejects_ambiguous_children(self) -> None:
+        self.cache[0]["references"] = ["https://github.com/example/repo/issues/1"]
+        self.cache[1]["references"] = ["https://github.com/example/repo/issues/2"]
+        self._write_inputs()
+
+        with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
+            self._build()
+
+        self.assertEqual(caught.exception.code, "ambiguous_fix_candidate")
+
     def test_distinct_valid_report_fixes_fail_closed(self) -> None:
         self.cache[1]["references"] = [self._commit_url(self.alternate_fix)]
         self._write_inputs()

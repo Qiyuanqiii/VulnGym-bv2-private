@@ -1777,6 +1777,63 @@ class GitRepository:
             )
         return result.returncode == 0
 
+    def changed_paths(
+        self,
+        before: object,
+        after: object,
+        *,
+        max_paths: int = DEFAULT_MAX_TREE_ENTRIES,
+        max_output_bytes: int = DEFAULT_MAX_TREE_BYTES,
+    ) -> tuple[str, ...]:
+        """Return repository-relative paths changed between two commit trees."""
+
+        if isinstance(max_paths, bool) or not isinstance(max_paths, int) or max_paths < 1:
+            raise ValueError("max_paths must be a positive integer")
+        if (
+            isinstance(max_output_bytes, bool)
+            or not isinstance(max_output_bytes, int)
+            or max_output_bytes < 1
+        ):
+            raise ValueError("max_output_bytes must be a positive integer")
+        before_commit = self._require_commit(before, operation="diff-tree")
+        after_commit = self._require_commit(after, operation="diff-tree")
+        result = self._run(
+            (
+                "diff-tree",
+                "-r",
+                "--no-commit-id",
+                "--name-only",
+                "-z",
+                "--no-renames",
+                before_commit,
+                after_commit,
+                "--",
+            ),
+            operation="diff-tree",
+            max_stdout_bytes=max_output_bytes,
+        )
+        if not result.stdout:
+            return ()
+        records = result.stdout.split(b"\x00")
+        if records[-1] != b"":
+            raise GitCommandError("diff-tree", 0, "git returned malformed path output")
+        if len(records) - 1 > max_paths:
+            raise GitOutputTooLarge(
+                f"git diff-tree returned more than {max_paths} changed paths"
+            )
+        paths: list[str] = []
+        for raw_path in records[:-1]:
+            try:
+                path = raw_path.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as error:
+                raise GitCommandError(
+                    "diff-tree", 0, "git returned a non-UTF-8 path"
+                ) from error
+            paths.append(validate_repo_relative_path(path))
+        if len(paths) != len(set(paths)):
+            raise GitCommandError("diff-tree", 0, "git returned duplicate paths")
+        return tuple(paths)
+
     def tree_entry(self, commit: str, path: str) -> TreeEntry | None:
         """Return an exact tree entry at *commit*, without recursive guessing."""
 

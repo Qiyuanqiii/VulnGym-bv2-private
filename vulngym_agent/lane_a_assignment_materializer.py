@@ -68,8 +68,12 @@ LaneAAssignmentMaterializerError = LaneATaskBundleError
 CONTRACT_VERSION: Final[int] = 1
 MATERIALIZATION_KIND: Final[str] = "vulngym.lane-a-assignment-materialization.v1"
 POLICY_ID: Final[str] = "lexicographic-report-entry-v1"
+LOCAL_DIRECT_CHILD_POLICY_ID: Final[str] = "local-direct-child-fallback-v1"
 ANCHOR_SEMANTICS: Final[str] = (
     "deterministic_evaluation_anchor_not_finding_provenance"
+)
+LOCAL_DIRECT_CHILD_ANCHOR_SEMANTICS: Final[str] = (
+    "public_identifier_match_with_unique_local_single_parent_child"
 )
 ASSIGNMENTS_FILENAME: Final[str] = "assignments.jsonl"
 COVERAGE_AUDIT_FILENAME: Final[str] = "coverage-audit.jsonl"
@@ -240,6 +244,9 @@ class _AnchorSelection:
     entry_id: str
     candidate_fix_commits: tuple[str, ...]
     fix_commit: str
+    anchor_policy: str
+    anchor_semantics: str
+    candidate_source: str
 
 
 def _parse_report(value: object) -> _Report:
@@ -547,23 +554,27 @@ def _candidate_commits(advisory: _Advisory, repo_url: str) -> tuple[str, ...]:
     return tuple(sorted(candidates))
 
 
+def _has_github_commit_reference(advisory: _Advisory) -> bool:
+    return any(_COMMIT_URL_RE.fullmatch(reference) is not None for reference in advisory.references)
+
+
 def _is_source(path: str) -> bool:
     return PurePosixPath(path).suffix.casefold() in _SOURCE_SUFFIXES
 
 
 def _changed_source_paths(repository: GitRepository, before: str, after: str) -> tuple[str, ...]:
-    before_entries = {item.path: item for item in repository.list_tree_entries(before)}
-    after_entries = {item.path: item for item in repository.list_tree_entries(after)}
+    try:
+        changed_paths = repository.changed_paths(before, after)
+    except GitFactError:
+        raise _error("repository_fact_failed", "changed path facts could not be read") from None
     changed: list[str] = []
-    any_change = False
-    for path in sorted(set(before_entries) | set(after_entries)):
-        old = before_entries.get(path)
-        new = after_entries.get(path)
+    for path in changed_paths:
+        old = repository.tree_entry(before, path)
+        new = repository.tree_entry(after, path)
         old_identity = (old.object_type, old.object_id) if old is not None else None
         new_identity = (new.object_type, new.object_id) if new is not None else None
         if old_identity == new_identity:
             continue
-        any_change = True
         try:
             canonical = validate_repo_relative_path(path)
             canonical.encode("utf-8", errors="strict")
@@ -573,7 +584,7 @@ def _changed_source_paths(repository: GitRepository, before: str, after: str) ->
         regular_new = new is None or (new.object_type == "blob" and new.mode in {"100644", "100755"})
         if _is_source(canonical) and regular_old and regular_new:
             changed.append(canonical)
-    if not any_change:
+    if not changed_paths:
         raise _error("missing_diff", "selected fix commit has no tree changes")
     if not changed:
         raise _error("non_source_diff", "selected fix commit changes no supported source file")
@@ -636,6 +647,9 @@ def _try_anchor_selection(
             entry_id=report.entry_ids[0],
             candidate_fix_commits=candidates,
             fix_commit=matching[0],
+            anchor_policy=POLICY_ID,
+            anchor_semantics=ANCHOR_SEMANTICS,
+            candidate_source="public_advisory_commit_reference",
         ),
         None,
     )
@@ -670,6 +684,67 @@ def _select_anchor(
         )
     if selections:
         return sorted(selections, key=lambda item: item.report.report_id)[0]
+    if any(
+        (advisory := advisories.get(report.report_id)) is not None
+        and _has_github_commit_reference(advisory)
+        for report in reports
+    ):
+        if failures:
+            raise _error(failures[0], "no selected report has a valid public anchor")
+        raise _error("fix_candidate_missing", "no selected report has a public anchor")
+    fallback_selections: list[_AnchorSelection] = []
+    fallback_failures: list[str] = []
+    local_children: tuple[str, ...] | None = None
+    local_child_unavailable = False
+    for report in reports:
+        advisory = advisories.get(report.report_id)
+        if advisory is None:
+            continue
+        actual_identifiers = {item["value"] for item in advisory.identifiers}
+        if actual_identifiers != set(report.vuln_ids):
+            continue
+        if _has_github_commit_reference(advisory):
+            continue
+        if local_children is None and not local_child_unavailable:
+            try:
+                local_children = repository.direct_child_commits(task.commit)
+            except GitFactError:
+                local_child_unavailable = True
+        if local_child_unavailable:
+            fallback_failures.append("fix_candidate_unavailable")
+            continue
+        assert local_children is not None
+        if len(local_children) != 1:
+            fallback_failures.append(
+                "ambiguous_fix_candidate" if len(local_children) > 1 else "fix_candidate_missing"
+            )
+            continue
+        fallback_selections.append(
+            _AnchorSelection(
+                report=report,
+                entry_id=report.entry_ids[0],
+                candidate_fix_commits=local_children,
+                fix_commit=local_children[0],
+                anchor_policy=LOCAL_DIRECT_CHILD_POLICY_ID,
+                anchor_semantics=LOCAL_DIRECT_CHILD_ANCHOR_SEMANTICS,
+                candidate_source="local_commit_graph_direct_child",
+            )
+        )
+    fallback_distinct_fixes = sorted(
+        {selection.fix_commit for selection in fallback_selections}
+    )
+    if len(fallback_distinct_fixes) > 1:
+        raise _error(
+            "ambiguous_report_candidate",
+            "selected fallback reports bind to multiple valid fix commits",
+        )
+    if fallback_selections:
+        return sorted(fallback_selections, key=lambda item: item.report.report_id)[0]
+    if fallback_failures:
+        raise _error(
+            fallback_failures[0],
+            "no selected report has a unique local direct-child anchor",
+        )
     if failures:
         raise _error(failures[0], "no selected report has a valid public anchor")
     raise _error("advisory_missing", "a selected report is absent from the advisory cache")
@@ -803,8 +878,9 @@ def _build_payloads(inputs: _Inputs) -> tuple[dict[str, bytes], LaneAAssignmentM
         ]
         audits.append(
             {
-                "anchor_policy": POLICY_ID,
-                "anchor_semantics": ANCHOR_SEMANTICS,
+                "anchor_candidate_source": anchor.candidate_source,
+                "anchor_policy": anchor.anchor_policy,
+                "anchor_semantics": anchor.anchor_semantics,
                 "not_run": not_run,
                 "selected_entry_id": entry_id,
                 "selected_report_id": selected.report_id,
@@ -814,6 +890,8 @@ def _build_payloads(inputs: _Inputs) -> tuple[dict[str, bytes], LaneAAssignmentM
         selections.append(
             {
                 "advisory_path": advisory_name,
+                "anchor_candidate_source": anchor.candidate_source,
+                "anchor_policy": anchor.anchor_policy,
                 "candidate_fix_commits": list(candidates),
                 "entry_id": entry_id,
                 "fix_commit": fix_commit,

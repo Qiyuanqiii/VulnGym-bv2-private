@@ -189,7 +189,13 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             "summary": "  Public summary  ",
         }
 
-    def _prepare(self, *, output_name: str = "prepared", fetcher=None):
+    def _prepare(
+        self,
+        *,
+        output_name: str = "prepared",
+        fetcher=None,
+        allow_local_direct_child_fallback: bool = False,
+    ):
         return prep.prepare_lane_a_public_batch(
             public_tasks_file=self.tasks_file,
             public_reports_file=self.reports_file,
@@ -197,6 +203,7 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             task_ids=[self.task_id],
             output_dir=self.outputs / output_name,
             advisory_fetcher=fetcher or (lambda _ghsa: self._advisory()),
+            allow_local_direct_child_fallback=allow_local_direct_child_fallback,
         )
 
     def test_prepares_exact_canonical_public_inputs_and_real_pins(self) -> None:
@@ -306,6 +313,22 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             )
         self.assertEqual(captured.exception.code, "fix_candidate_missing")
         self.assertFalse((self.outputs / "no-fix").exists())
+
+    def test_prepare_can_allow_unique_local_direct_child_fallback(self) -> None:
+        result = self._prepare(
+            output_name="fallback",
+            fetcher=lambda _ghsa: self._advisory(
+                references=["https://github.com/example/repo/issues/1"]
+            ),
+            allow_local_direct_child_fallback=True,
+        )
+
+        self.assertTrue((self.outputs / "fallback").exists())
+        self.assertTrue(result["summary"]["allow_local_direct_child_fallback"])
+        self.assertEqual(
+            result["summary"]["fix_commits"],
+            [{"fix_commit": self.fix, "task_id": self.task_id}],
+        )
 
     def test_prepare_uses_unique_passing_report_candidate(self) -> None:
         alternate_report = "GHSA-3333-3333-3333"
