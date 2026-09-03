@@ -27,6 +27,7 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     DEFAULT_SNAPSHOT_POLICY,
     SNAPSHOT_POLICY_VERSION,
     SealedSnapshotError,
+    SealedSnapshotEntry,
     SealedSnapshotFile,
     SealedSnapshotGitlink,
     SnapshotPolicy,
@@ -64,6 +65,17 @@ _POLICY_KEYS: Final[frozenset[str]] = frozenset(
 )
 _FILE_KEYS: Final[frozenset[str]] = frozenset(
     {"blob_oid", "git_mode", "path", "record_type", "sha256", "size"}
+)
+_GITLINK_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "git_mode",
+        "materialized_sha256",
+        "path",
+        "record_type",
+        "representation",
+        "size",
+        "target_commit_oid",
+    }
 )
 _ROOT_KEYS: Final[frozenset[str]] = frozenset(
     {
@@ -183,6 +195,37 @@ def _file_from_dict(value: object) -> SealedSnapshotFile:
         blob_oid=raw["blob_oid"],
         size=raw["size"],
         sha256=raw["sha256"],
+    )
+
+
+def _gitlink_from_dict(value: object) -> SealedSnapshotGitlink:
+    raw = _strict_object(value, keys=_GITLINK_KEYS, name="gitlink")
+    if raw["record_type"] != "gitlink":
+        raise WorkerHandoffError(
+            "invalid_contract", "worker handoff gitlink record is invalid"
+        )
+    return SealedSnapshotGitlink(
+        path=raw["path"],
+        target_commit_oid=raw["target_commit_oid"],
+        materialized_sha256=raw["materialized_sha256"],
+        size=raw["size"],
+        git_mode=raw["git_mode"],
+        representation=raw["representation"],
+    )
+
+
+def _entry_from_dict(value: object) -> SealedSnapshotEntry:
+    if type(value) is not dict:
+        raise WorkerHandoffError(
+            "invalid_contract", "worker handoff manifest entry is invalid"
+        )
+    record_type = value.get("record_type")
+    if record_type == "file":
+        return _file_from_dict(value)
+    if record_type == "gitlink":
+        return _gitlink_from_dict(value)
+    raise WorkerHandoffError(
+        "invalid_contract", "worker handoff manifest entry type is invalid"
     )
 
 
@@ -353,6 +396,54 @@ def _file_dict(value: SealedSnapshotFile) -> dict[str, object]:
     }
 
 
+def _gitlink_dict(value: SealedSnapshotGitlink) -> dict[str, object]:
+    if type(value) is not SealedSnapshotGitlink:
+        raise WorkerHandoffError(
+            "invalid_argument", "worker handoff gitlink must have an exact type"
+        )
+    try:
+        fields = (
+            value.path,
+            value.target_commit_oid,
+            value.materialized_sha256,
+            value.size,
+            value.git_mode,
+            value.representation,
+        )
+    except (AttributeError, TypeError):
+        raise WorkerHandoffError(
+            "invalid_contract", "worker handoff gitlink fields are incomplete"
+        ) from None
+    if any(
+        type(item) is not expected
+        for item, expected in zip(
+            fields, (str, str, str, int, str, str), strict=True
+        )
+    ):
+        raise WorkerHandoffError(
+            "invalid_contract", "worker handoff gitlink fields have invalid types"
+        )
+    return {
+        "git_mode": fields[4],
+        "materialized_sha256": fields[2],
+        "path": fields[0],
+        "record_type": "gitlink",
+        "representation": fields[5],
+        "size": fields[3],
+        "target_commit_oid": fields[1],
+    }
+
+
+def _entry_dict(value: SealedSnapshotEntry) -> dict[str, object]:
+    if type(value) is SealedSnapshotFile:
+        return _file_dict(value)
+    if type(value) is SealedSnapshotGitlink:
+        return _gitlink_dict(value)
+    raise WorkerHandoffError(
+        "invalid_argument", "worker handoff manifest entries have invalid types"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class WorkerHandoffV2:
     """Canonical, non-secret description of one preverified source mount."""
@@ -360,7 +451,7 @@ class WorkerHandoffV2:
     task: DiscoveryTaskInputV1
     policy: SnapshotPolicy
     root_tree: str
-    files: tuple[SealedSnapshotFile, ...]
+    files: tuple[SealedSnapshotEntry, ...]
     contract_version: int = WORKER_HANDOFF_CONTRACT_VERSION
     kind: str = WORKER_HANDOFF_KIND
     handoff_sha256: str = field(init=False)
@@ -394,18 +485,21 @@ class WorkerHandoffV2:
             raise WorkerHandoffError(
                 "limit_exceeded", "worker handoff file count is invalid"
             )
-        if any(type(item) is not SealedSnapshotFile for item in self.files):
+        if any(
+            type(item) not in (SealedSnapshotFile, SealedSnapshotGitlink)
+            for item in self.files
+        ):
             raise WorkerHandoffError(
                 "invalid_argument", "worker handoff files have invalid types"
             )
-        file_dicts = tuple(_file_dict(item) for item in self.files)
+        file_dicts = tuple(_entry_dict(item) for item in self.files)
         # Detach every manifest member from the caller-owned object graph before
         # any helper observes it.  Frozen dataclasses can still be modified via
         # ``object.__setattr__`` by a concurrent caller, so validation alone is
         # not a sufficient ownership boundary.
-        canonical_files = tuple(_file_from_dict(item) for item in file_dicts)
+        canonical_files = tuple(_entry_from_dict(item) for item in file_dicts)
         object.__setattr__(self, "files", canonical_files)
-        total_bytes = sum(item["size"] for item in file_dicts)
+        total_bytes = sum(item.size for item in canonical_files)
         if not 0 <= total_bytes <= self.policy.max_total_bytes:
             raise WorkerHandoffError(
                 "limit_exceeded", "worker handoff byte count is invalid"
@@ -493,7 +587,7 @@ class WorkerHandoffV2:
             )
         return {
             "contract_version": contract_version,
-            "files": [_file_dict(item) for item in files],
+            "files": [_entry_dict(item) for item in files],
             "kind": kind,
             "policy": _policy_dict(policy),
             "root_tree": root_tree,
@@ -604,7 +698,7 @@ class WorkerHandoffV2:
             raise WorkerHandoffError(
                 "limit_exceeded", "worker handoff file array is invalid"
             )
-        files = tuple(_file_from_dict(item) for item in raw_files)
+        files = tuple(_entry_from_dict(item) for item in raw_files)
         result = cls(
             task=task,
             policy=policy,
@@ -667,11 +761,6 @@ def build_worker_handoff(
     ):
         raise WorkerHandoffError(
             "invalid_binding", "sealed snapshot does not match the worker task"
-        )
-    if any(type(item) is SealedSnapshotGitlink for item in verified.files):
-        raise WorkerHandoffError(
-            "snapshot_verification_failed",
-            "metadata-only gitlinks are sealed but not worker-readable",
         )
     result = WorkerHandoffV2(
         task=canonical_task,

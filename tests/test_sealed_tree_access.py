@@ -254,12 +254,13 @@ class SealedTreeAccessTests(unittest.TestCase):
                 )
             self.assertEqual("invalid_binding", captured.exception.code)
 
-    def test_gitlink_rejection_zeroes_key_before_authority_construction(self) -> None:
+    def test_gitlink_marker_is_readable_and_key_zeroes_on_finalize(self) -> None:
+        target = self.commit
         self._git(
             "update-index",
             "--add",
             "--cacheinfo",
-            f"160000,{self.commit},vendor/dependency",
+            f"160000,{target},vendor/dependency",
         )
         self._git("commit", "-q", "-m", "metadata-only gitlink")
         commit = self._git("rev-parse", "HEAD").stdout.strip()
@@ -295,28 +296,32 @@ class SealedTreeAccessTests(unittest.TestCase):
                 access_module,
                 "verify_sealed_snapshot",
                 side_effect=capture_key,
-            ),
-            mock.patch.object(
-                access_module,
-                "_TrustedTreeAuthority",
-                side_effect=AssertionError("worker authority must not be constructed"),
-            ) as authority,
-            self.assertRaises(SealedTreeAccessError) as captured,
+            )
         ):
-            bind_sealed_tree(
+            bound = bind_sealed_tree(
                 task,
                 snapshot_root,
                 attestation_key=KEY,
                 expected_key_id=KEY_ID,
             )
 
-        self.assertEqual("invalid_binding", captured.exception.code)
-        authority.assert_not_called()
-        self.assertEqual(1, len(observed_keys))
-        self.assertTrue(all(value == 0 for value in observed_keys[0]))
-        message = str(captured.exception)
-        self.assertNotIn(str(self.root), message)
-        self.assertNotIn(KEY.decode("ascii"), message)
+        marker = b"gitlink " + target.encode("ascii") + b"\n"
+        inventory = bound.inventory()
+        gitlink_entries = tuple(
+            item for item in inventory if item.path == "vendor/dependency"
+        )
+        self.assertEqual(1, len(gitlink_entries))
+        self.assertEqual("160000", gitlink_entries[0].git_mode)
+        self.assertEqual(
+            marker,
+            bound.read_bytes("vendor/dependency", maximum_bytes=len(marker)),
+        )
+        ledger = bound.finalize()
+        self.assertTrue(ledger.verification_succeeded)
+        self.assertTrue(observed_keys)
+        self.assertTrue(
+            all(all(value == 0 for value in key) for key in observed_keys)
+        )
 
     def test_attestation_material_is_strictly_bytes_like_and_bounded(self) -> None:
         released = memoryview(KEY)

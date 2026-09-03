@@ -8,6 +8,7 @@ import unittest
 from scripts.author_replay_batch_offline import (
     _build_d2_response,
     _build_d3_response,
+    _has_structure_near,
     _nodes,
     _scan_tree_for_plan,
     TaskPlan,
@@ -242,6 +243,23 @@ class OfflineAuthoringHelperTests(unittest.TestCase):
         assert response is not None
         self.assertEqual("defer", response["action"])
         self.assertEqual("insufficient_offline_evidence", response["reason_code"])
+
+    def test_structure_presence_radius_matches_structure_source_radius(self) -> None:
+        payload = {
+            "catalog": {
+                "nodes": (
+                    {
+                        "type": "LEX",
+                        "path": "src/app.py",
+                        "line": 304,
+                        "token": "Loader",
+                        "ref": {"artifact_id": "ART-structure", "node_id": "LEX-1"},
+                    },
+                )
+            }
+        }
+
+        self.assertTrue(_has_structure_near(payload, path="src/app.py", line=293))
 
     def test_scan_prefers_actual_call_over_import_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

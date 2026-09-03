@@ -821,11 +821,18 @@ def _best_source_ref(
     return None
 
 
-def _has_structure_near(payload: Mapping[str, Any], *, path: str, line: int, token: str | None = None) -> bool:
+def _has_structure_near(
+    payload: Mapping[str, Any],
+    *,
+    path: str,
+    line: int,
+    token: str | None = None,
+    radius: int = 12,
+) -> bool:
     for node in _nodes(payload, "LEX"):
         if node.get("path") != path or not isinstance(node.get("line"), int):
             continue
-        if abs(int(node["line"]) - line) > 8:
+        if abs(int(node["line"]) - line) > radius:
             continue
         if token is None or node.get("token") == token:
             return True

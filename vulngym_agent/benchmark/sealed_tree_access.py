@@ -212,14 +212,31 @@ class SealedTreeFile:
     sha256: str
 
     @classmethod
-    def _from_verified(cls, value: SealedSnapshotFile) -> "SealedTreeFile":
-        return cls(
-            path=value.path,
-            git_mode=value.git_mode,
-            blob_oid=value.blob_oid,
-            size=value.size,
-            sha256=value.sha256,
-        )
+    def _from_verified(
+        cls, value: SealedSnapshotFile | SealedSnapshotGitlink
+    ) -> "SealedTreeFile":
+        if type(value) is SealedSnapshotFile:
+            return cls(
+                path=value.path,
+                git_mode=value.git_mode,
+                blob_oid=value.blob_oid,
+                size=value.size,
+                sha256=value.sha256,
+            )
+        if type(value) is SealedSnapshotGitlink:
+            marker = b"gitlink " + value.target_commit_oid.encode("ascii") + b"\n"
+            marker_blob_oid = hashlib.sha1(
+                f"blob {len(marker)}\0".encode("ascii") + marker,
+                usedforsecurity=False,
+            ).hexdigest()
+            return cls(
+                path=value.path,
+                git_mode=value.git_mode,
+                blob_oid=marker_blob_oid,
+                size=value.size,
+                sha256=value.sha256,
+            )
+        raise TypeError("sealed tree entry has an invalid type")
 
     def to_dict(self) -> dict[str, str | int]:
         return {
@@ -1657,13 +1674,6 @@ def bind_sealed_tree(
             "invalid_binding", "snapshot metadata does not match the discovery task"
         )
 
-    if any(type(item) is SealedSnapshotGitlink for item in verified.files):
-        for index in range(len(key_material)):
-            key_material[index] = 0
-        raise SealedTreeAccessError(
-            "invalid_binding",
-            "metadata-only gitlinks are sealed but not accessible to workers",
-        )
     files = tuple(SealedTreeFile._from_verified(item) for item in verified.files)
     authority: _TrustedTreeAuthority | None = None
     try:

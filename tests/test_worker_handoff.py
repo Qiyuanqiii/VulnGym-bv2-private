@@ -174,7 +174,7 @@ class WorkerHandoffTests(unittest.TestCase):
             expected_handoff_wire_sha256=self.handoff.wire_sha256,
         )
 
-    def test_gitlink_snapshot_fails_closed_before_worker_handoff(self) -> None:
+    def test_gitlink_snapshot_delivers_marker_without_child_checkout(self) -> None:
         target = self.commit
         self._git(
             "update-index",
@@ -202,21 +202,36 @@ class WorkerHandoffTests(unittest.TestCase):
             snapshot_manifest_sha256=prepared.manifest_sha256,
             snapshot_content_root=prepared.content_root,
         )
-        with (
-            mock.patch.object(
-                worker_handoff_module,
-                "WorkerHandoffV2",
-                side_effect=AssertionError(
-                    "worker handoff must not be constructed for gitlinks"
-                ),
-            ) as constructor,
-            self.assertRaises(WorkerHandoffError) as captured,
-        ):
-            build_worker_handoff(
-                task, root, attestation_key=KEY, expected_key_id=KEY_ID
-            )
-        self.assertEqual("snapshot_verification_failed", captured.exception.code)
-        constructor.assert_not_called()
+
+        handoff = build_worker_handoff(
+            task, root, attestation_key=KEY, expected_key_id=KEY_ID
+        )
+        gitlinks = tuple(
+            item for item in handoff.files if type(item) is SealedSnapshotGitlink
+        )
+        self.assertEqual(1, len(gitlinks))
+        self.assertEqual("vendor/dependency", gitlinks[0].path)
+        payload = handoff.to_bytes()
+        parsed = WorkerHandoffV2.from_bytes(
+            payload,
+            expected_sha256=handoff.handoff_sha256,
+            expected_wire_sha256=handoff.wire_sha256,
+        )
+        self.assertEqual(handoff.files, parsed.files)
+        bound = bind_worker_tree(
+            task,
+            root / "tree",
+            payload,
+            expected_handoff_sha256=handoff.handoff_sha256,
+            expected_handoff_wire_sha256=handoff.wire_sha256,
+        )
+        marker = b"gitlink " + target.encode("ascii") + b"\n"
+        self.assertEqual(
+            marker,
+            bound.read_bytes("vendor/dependency", maximum_bytes=len(marker)),
+        )
+        ledger = bound.finalize()
+        self.assertTrue(ledger.verification_succeeded)
 
     def test_public_contract_is_canonical_nonsecret_and_exported(self) -> None:
         payload = self.handoff.to_bytes()
