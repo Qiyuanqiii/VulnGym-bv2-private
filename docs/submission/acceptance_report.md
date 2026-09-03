@@ -27,7 +27,7 @@
 | --- | --- | --- | --- |
 | 公共输入 | 固定 50 train + 20 test、schema、来源与 hash | 已有实现；最终 release 祖先与文件集仍需回读 | TODO |
 | Source | 22 repositories、70 task source sealing | **完成** | 私有 Issues #60/#11；净化可披露 evidence commit `c52f48b770736d403b2ce090b10a70e5498804e0` |
-| Lane A | 完整 Entry 的 `closed_loop_cli` T2→真实 T1 | **部分完成**：40 条 strict+fallback 真实闭环已跑通，0 input failure；仍未达到全量 20+50 finalized | `docs/lane_a_hybrid_readiness_receipt.md`、`docs/submission/lane_a_manual_review_evidence.md`；仍需最终 `entries.jsonl` + `validation.jsonl` + manifest |
+| Lane A | 完整 Entry 的 `closed_loop_cli` T2→真实 T1 | **部分完成**：40 条 strict+fallback 真实闭环已跑通，0 input failure，40/40 均有完整候选/报告；仍未达到全量 20+50 finalized | `docs/lane_a_hybrid_readiness_receipt.md`、`docs/submission/lane_a_manual_review_evidence.md`；仍需最终全量 `entries.jsonl` + `validation.jsonl` + manifest |
 | Lane B | 70/70 source-only D2/D3 replay、D4/D0 | **未完成** | Issue #90 当前 0/70；TODO |
 | Runtime | 最终 OCI 与 native Linux preflight | **未完成** | Issues #91/#92；TODO |
 | Gate | test-first 20/20 | **未完成** | Issue #94；TODO |
@@ -99,31 +99,38 @@ python -B -m vulngym_agent.closed_loop_cli \
 ```
 
 - 已完成扩展 hybrid 批次：test 12/20、train 28/50，共 40/70。当前
-  consolidated 视图为 `test11` + `train24-v5-unsafe-option` +
+  consolidated 视图为 `test11-v3-authz-scope` + `train24-v5-unsafe-option` +
   `identifier-subset-v2/test1` + `identifier-subset-v2/train4`；
   `closed_loop_cli` 均 exit 0，`input_failures=0`，全部进入
-  `manual_review`。其中 37/40 有完整候选/报告对，3/40 仍为
-  producer-deferred 或 incomplete。
-- reviewer evidence 已记录：test11 digest
-  `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a`；
+  `manual_review`。其中 40/40 有完整候选/报告对，0/40 为
+  producer-deferred 或 incomplete，0/40 finalized。
+- reviewer evidence 已记录：test11-v3-authz-scope digest
+  `68305bc9de4e857761831f302c9ef8116b16f6a119755ae7ef80ebc2d62c553c`；
   train24-v5-unsafe-option digest
   `22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800`；
   identifier-subset-v2/test1 digest
   `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652`；
   identifier-subset-v2/train4 digest
   `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0`。
-- 当前 T1 增强加入同文件 review anchor、`.svelte` 入口识别和 removed unsafe
-  option guard anchor；train24 最新 probe 已从 20/24 complete 提升到
-  24/24 complete，entry/report digest 可回读。
+- 当前 T1 增强加入同文件 review anchor、`.svelte` 入口识别、removed unsafe
+  option guard anchor、access-scope propagation anchor 和 removed permissive
+  authorization decision anchor；train24 最新 probe 已从 20/24 complete
+  提升到 24/24 complete，test11 最新 probe 已从 8/11 complete 提升到
+  11/11 complete，entry/report digest 均可回读。
 - TODO：继续增强 T1 或整理人工复核证据，使最终公开测试能形成评审认可的
   `entries.jsonl`、`validation.jsonl` 和 manifest。
 - Windows-native `submission_prediction_cli review` 已回读上述固定 replay，
   task/complete/incomplete/input-failure/review digest 均与
   `docs/submission/lane_a_manual_review_evidence.md` 一致。
 - Windows-native `submission_prediction_cli export` 已解除平台硬拒绝；导出仍会拒绝
-  含缺失候选/报告对的 replay。当前 `train24-v5-unsafe-option` 已生成完整
-  `entries.jsonl`、`validation.jsonl` 和 `submission_manifest.json`，并通过
-  双 pin `verify`：source replay dataset
+  含缺失候选/报告对的 replay。当前 `test11-v3-authz-scope` 和
+  `train24-v5-unsafe-option` 均已生成完整 `entries.jsonl`、
+  `validation.jsonl` 和 `submission_manifest.json`，并通过双 pin `verify`：
+  test11-v3 source replay dataset
+  `8a314a8d9b5dd4c29e4e576e52e24a6e507ae973949a41743273dac3fe415c2a`，
+  submission
+  `f06618b509afb7843ddcbfa94e6585cff76c22b56fe79e06d2ec0fbc1e3c557e`；
+  train24-v5 source replay dataset
   `04ec0206095c0b6038190403efc56d531a1eca6184b2503928dd6df36c4bfec2`，
   submission
   `48aebd686a749d8b25c95facb8445206910c4056d13ea366d54420f02a5cbcb8`。
@@ -133,8 +140,9 @@ python -B -m vulngym_agent.closed_loop_cli \
   `identifier-subset-v2/train4` 的 `submission_sha256`
   `a4d9eb33443053da3000e94f5d5a2cf514981a718adf3e4401b46d68f6015534`。
 - TODO：按 `docs/submission/submission_prediction_posix_export_runbook.md`
-  对 complete=tasks 的 replay 执行 `export` 和双 pin `verify`；对 incomplete
-  replay，先补齐 T2 候选/报告对，或将其作为人工复核证据而非完整提交包。
+  对当前 covered set 的剩余 complete=tasks replay 执行 `export` 和双 pin
+  `verify`；继续扩大到全量 20 test + 50 train，或将无法机械证明的字段作为
+  人工复核证据而非 finalized Entry。
 
 ### 4.3 Native Linux preflight
 

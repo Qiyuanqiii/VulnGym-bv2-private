@@ -200,8 +200,10 @@ Authoring summaries:
 | Batch | Tasks | Exact replay verified | Response count | Status counts | Verdict counts |
 | --- | ---: | --- | ---: | --- | --- |
 | `test11` | 11 | true | 27 | `manual_review=11` | `incorrect=2`, `uncertain=6` |
+| `test11-v3-authz-scope` | 11 | true | 33 | `manual_review=11` | `incorrect=1`, `uncertain=10` |
 | `train23` | 23 | true | 61 | `manual_review=23` | `incorrect=2`, `uncertain=17` |
 | `train24-v2-review-anchor` | 24 | true | 64 | `manual_review=24` | `incorrect=2`, `uncertain=18` |
+| `train24-v5-unsafe-option` | 24 | true | 72 | `manual_review=24` | `incorrect=3`, `uncertain=21` |
 | `identifier-subset-v2/test1` | 1 | true | 3 | `manual_review=1` | `uncertain=1` |
 | `identifier-subset-v2/train4` | 4 | true | 12 | `manual_review=4` | `incorrect=1`, `uncertain=3` |
 | `strict-v2/train-43ac81` | 1 | true | 1 | `manual_review=1` | none |
@@ -211,8 +213,10 @@ Closed-loop runner summaries:
 | Batch | Tasks run | Records seen | Manual review | Finalized | Input failures | Status |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `test11` | 11 | 11 | 11 | 0 | 0 | ok |
+| `test11-v3-authz-scope` | 11 | 11 | 11 | 0 | 0 | ok |
 | `train23` | 23 | 23 | 23 | 0 | 0 | ok |
 | `train24-v2-review-anchor` | 24 | 24 | 24 | 0 | 0 | ok |
+| `train24-v5-unsafe-option` | 24 | 24 | 24 | 0 | 0 | ok |
 | `identifier-subset-v2/test1` | 1 | 1 | 1 | 0 | 0 | ok |
 | `identifier-subset-v2/train4` | 4 | 4 | 4 | 0 | 0 | ok |
 | `strict-v2/train-43ac81` | 1 | 1 | 1 | 0 | 0 | ok |
@@ -222,15 +226,17 @@ Reviewer evidence summaries:
 | Batch | Complete candidate/report pairs | Producer-deferred or incomplete | Review evidence SHA-256 |
 | --- | ---: | ---: | --- |
 | `test11` | 8 | 3 | `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a` |
+| `test11-v3-authz-scope` | 11 | 0 | `68305bc9de4e857761831f302c9ef8116b16f6a119755ae7ef80ebc2d62c553c` |
 | `train23` | 19 | 4 | `a1c49ec59abbbe0df612826594026a436158aab2c34a5c126f89ba7bf2ca8d72` |
 | `train24-v2-review-anchor` | 20 | 4 | `161cdcd470bb1d5629b533355c4e553e61c8cf5645f28b4c343018d82adf3c62` |
+| `train24-v5-unsafe-option` | 24 | 0 | `22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800` |
 | `identifier-subset-v2/test1` | 1 | 0 | `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652` |
 | `identifier-subset-v2/train4` | 4 | 0 | `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0` |
 | `strict-v2/train-43ac81` | 0 | 1 | `86fad1282f1b5f25f26c3b19fc0bffd15cd3798d2d6d95e5a120f284f0737e0b` |
 
-The current non-duplicated 40-task covered set is `test11`,
-`train24-v2-review-anchor`, `identifier-subset-v2/test1`, and
-`identifier-subset-v2/train4`: 33 complete candidate/report pairs, 7
+The current non-duplicated 40-task covered set is `test11-v3-authz-scope`,
+`train24-v5-unsafe-option`, `identifier-subset-v2/test1`, and
+`identifier-subset-v2/train4`: 40 complete candidate/report pairs, 0
 producer-deferred or incomplete rows, and 0 finalized rows.
 
 Expanded batch digests:
@@ -238,8 +244,10 @@ Expanded batch digests:
 | Batch | Exact replay wire SHA-256 | Closed-loop dataset SHA-256 | Run manifest SHA-256 | Candidates SHA-256 | Validation SHA-256 | Deferred SHA-256 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `test11` | `bac85d8812aa6264304526ab9450ad5bd76834b186a621d7f3abe6a78b2b1bd1` | `41c43389faa823a115890637bb4b85cf770dde8b87defde751b53e6efb18c57b` | `be4fdb904065063cc61f5a36b8c5a24454e7eea280a3256cda2ef0e84ca171de` | `e4d17d173ccd24f1536bf7383548a16db56f7e9dd4a6c1f352a0c0452fe862d2` | `b10e2da85b42b23cab02b7ecc222605aa425f4cfcb374823c625df1c86baff0f` | `a8e96613c0f7dfd4e93d1f17ed79b7c487ce273cdd8cea6463cace41f6e98538` |
+| `test11-v3-authz-scope` | `48f32f812c392d3fbcc312418c44de8020715a854a782290dffa2efbce120841` | `8a314a8d9b5dd4c29e4e576e52e24a6e507ae973949a41743273dac3fe415c2a` | `350ff783e3996a878939efba3acfcfe691f5dd5f40dcc70100776811c735fb7a` | `80f81a4bc72206a9b97017b181fd7ad1668c7f61bd855ae4234ce003c8ff96db` | `eeecb74b6fc93bd3eef2e0e80190d77f70e954ea60696d8c41d149b49872a723` | `26a4e2c056e280325c2683793f82f4f751f6823da36f1eb7cdbb0e5728a3b90e` |
 | `train23` | `da63ac0c59111570dfd66647736f41a84ab6641c09acb56a01bb8916823e4655` | `c2d30c379a8742d251c2d82c575da6c358add86f7d2046cf5af0e47c0a444cc0` | `5e8ddfe00aa29e1711932649b9695a30678864600b00fa2a45202a2e56f5b745` | `6f77234e1a1a73155ad8dfa07a2279ada65ef7eb2c3b6b3242c6464ca1eb5475` | `f21c634627a8d04b152e375b294f321ce66e0549e7adef7aa9dfa7359c7d18ae` | `be0fa4b02530d1003e813f2ec98ad5f5bf18a2f845c148245b86a81e3d2cbc92` |
 | `train24-v2-review-anchor` | `689ee3419e18cb7cd8518cb7d09e6a78b183a1aa9c39389153931228df32e563` | `a2b6f487a6bd1208728d91777f605c5834ba50c35fba6fd9843e46eb7c21925b` | `b779ff87595f80a916cac4da6440e1a5b90a78ec17ce8b8dc5fb813631fb52c9` | `0c063d86c11dc6efb76f7d2b61e6123d1d4b88c0063da3dbaf080fe7a88cd506` | `a6df0c7d01b550b48a717fbc372dd64c859b4241de299d287f4e299cb832e973` | `e3ded47d4e6fe8629f907a775ec23f06099fdcc594e291745d63937c55277ff5` |
+| `train24-v5-unsafe-option` | `2b63187933e47f127771c0e338d2d716483fbec7379649e8b673c73d8dd9569e` | `04ec0206095c0b6038190403efc56d531a1eca6184b2503928dd6df36c4bfec2` | `2ed3e5be8906cbbb2846e3e003508d57c76e1c889f03988bb106f7af6122bbd3` | `3dddb01036d470160a71cf96463c39df230d6ab221605f0ccb9c77348d801f8f` | `4a545bea1487b53aaf8785c67480b53092c3ed99f71db77e8cd6844ba4b7664d` | `46cbbb4d03cb249e86dd15ad6c5bfebf2d2b9cd2539a1eea398ba80fa3f03c0c` |
 | `identifier-subset-v2/test1` | `fe8f6458f2b66e646fafb47fe1cbd0c87e7c387068a7c86e530fd4eefa94af9c` | `c2151999e0c68a6c38c6f02ea5c6dfe9c189169251ee948b57585f6bf5a5763d` | `c8b40e284877579b5254277f3132a7fe06123067d6877a3af35ec9703397b20b` | `e1fae809c8139c71f7c05ab8996584ba9be7d208f15ffcca9a68b883ee9fd089` | `c2259ac296e48d3a2a648f4ad7d5178a783ca2db376ba7f88fad7cf6e2525004` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
 | `identifier-subset-v2/train4` | `58508e0083b0e96b086aea5d8c296fd63e3356e84e867c92e08e11c0ca1914c2` | `797f75f8df8bca392d30c542fb494793ec5b4e6b137e4e540607312eb973e5fe` | `cf487d6767064b6d7d6a81c0aebc631d3a385f8cb6577342deec948428d2b351` | `d8540ad5841ed9e866ea0e51360b0b67f611babc80ae36cddb4fbe3d147ea796` | `d4b608305e004a8ae6c5e2a66784799c0f5d22ffaa1670d48aa39570979d712f` | `83dc9d5425336b24d2b81a2c092bbd273b04ae9e384c750d7902d2fa879d95a2` |
 | `strict-v2/train-43ac81` | `6ff129a830443d3e0a6a09e60259ea4c117e37438372c9d6652eb49ea2f5aa91` | `2143c8cfdbcbaf3f8da159eed584fbb402a7710f2a70562ea6f21bd68295b068` | `82277e4f72a9e873aaa9b322f81444758ab0a19967cdabc9afeee90fb811f430` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | `abc2089b78a11c0ee41c1af4cfc1c028f286341c8ff6e2cb16b2a7833620a82c` |
@@ -250,11 +258,9 @@ identifier-subset v2 incremental scan covered `61` generated files, excluding
 trusted local repo-map configuration files, and found `0` restricted marker or
 local-path hits. The strict-v2 `train-43ac81` incremental scan covered `26`
 generated files, excluding trusted local repo-map configuration files, and found
-`0` restricted marker or local-path hits. The `train24-v2-review-anchor` replay
-is the current consolidated training view; it improves one Flowise task
-(`VG-TRAIN-46D6453D5B4663CF0D13`) from incomplete to complete `manual_review`
-by using a same-file review anchor, while the four remaining incomplete rows
-remain stopped at `guard_only_exists_on_fix_side`.
+`0` restricted marker or local-path hits. The newer `test11-v3-authz-scope` and
+`train24-v5-unsafe-option` replays are the current consolidated test/training
+views for the 40-task covered set.
 
 ### Guard-anchor authoring probe
 
@@ -274,9 +280,9 @@ The two additional terminal candidate/report pairs are
 `VG-TRAIN-727D94F6A27E96DB4DAC` (`uncertain`) and
 `VG-TRAIN-8FEE6A4371C6C410BCB8` (`incorrect`). The remaining non-terminal rows
 are `VG-TRAIN-43AC81B29F131DE6F550` (`no_entry_candidate`) and
-`VG-TRAIN-747C63B97771B863292B` (`guard_only_exists_on_fix_side`). If this
-probe replaces `train24-v2-review-anchor` in the current non-duplicated covered
-set, the 40-task covered status becomes 35 terminal candidate/report pairs, 5
+`VG-TRAIN-747C63B97771B863292B` (`guard_only_exists_on_fix_side`). At this
+intermediate point, replacing `train24-v2-review-anchor` in the non-duplicated
+covered set would have produced 35 terminal candidate/report pairs, 5
 producer-deferred or incomplete rows, and 0 finalized rows.
 
 After adding `.svelte` to the bounded entry-search language set, a follow-up
@@ -286,10 +292,9 @@ The only remaining non-terminal training row in that probe is
 `VG-TRAIN-747C63B97771B863292B`
 (`guard_only_exists_on_fix_side`). The closed-loop runner accepted the replay
 with `tasks_run=24`, `manual_review=24`, `failed=0`, and `input_failures=0`.
-If this probe replaces `train24-v2-review-anchor` in the current
-non-duplicated covered set, the 40-task covered status becomes 36 terminal
-candidate/report pairs, 4 producer-deferred or incomplete rows, and 0 finalized
-rows.
+At this intermediate point, replacing `train24-v2-review-anchor` in the
+non-duplicated covered set would have produced 36 terminal candidate/report
+pairs, 4 producer-deferred or incomplete rows, and 0 finalized rows.
 
 After adding a narrow old-side anchor for removed unsafe deserialization
 options, the follow-up `train24-v5-unsafe-option` probe moved
@@ -304,10 +309,28 @@ this batch, producing submission SHA-256
 `48aebd686a749d8b25c95facb8445206910c4056d13ea366d54420f02a5cbcb8` and
 review-evidence SHA-256
 `22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800`.
-If this probe replaces `train24-v2-review-anchor` in the current
-non-duplicated covered set, the 40-task covered status becomes 37 terminal
-candidate/report pairs, 3 producer-deferred or incomplete rows, and 0 finalized
-rows.
+Before the follow-up test-side probe, replacing `train24-v2-review-anchor` in
+the non-duplicated covered set would have produced 37 terminal candidate/report
+pairs, 3 producer-deferred or incomplete rows, and 0 finalized rows.
+
+After adding access-scope propagation anchors and removed permissive
+authorization-decision anchors, the follow-up `test11-v3-authz-scope` probe
+moved `VG-TEST-A1EBF05AB83CEA26E60E`,
+`VG-TEST-BF91B957B02CA987C926`, and
+`VG-TEST-F18FEB614A9AFF680A8E` from
+`guard_only_exists_on_fix_side` to complete `manual_review`. The closed-loop
+runner accepted this replay with `tasks_run=11`, `manual_review=11`,
+`failed=0`, and `input_failures=0`. The runner dataset SHA-256 is
+`8a314a8d9b5dd4c29e4e576e52e24a6e507ae973949a41743273dac3fe415c2a`.
+`submission_prediction_cli export` and double-pin `verify` both succeeded for
+this batch, producing submission SHA-256
+`f06618b509afb7843ddcbfa94e6585cff76c22b56fe79e06d2ec0fbc1e3c557e`
+and review-evidence SHA-256
+`68305bc9de4e857761831f302c9ef8116b16f6a119755ae7ef80ebc2d62c553c`.
+With `test11-v3-authz-scope` and `train24-v5-unsafe-option` replacing the older
+test/training replays in the current non-duplicated covered set, all 40 covered
+tasks now have complete candidate/report pairs, 0 are producer-deferred or
+incomplete, and 0 are finalized.
 
 ## Artifact digests
 

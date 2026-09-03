@@ -213,6 +213,62 @@ index 1111111..2222222 100644
             },
         )
         self.assertTrue(
+            all(
+                item.change_kind != "added" or item.old_line is None
+                for item in result.guard_candidates
+            )
+        )
+
+    def test_added_access_scope_yields_old_side_guard_anchor(self) -> None:
+        patch = """diff --git a/src/documents.ts b/src/documents.ts
+index 1111111..2222222 100644
+--- a/src/documents.ts
++++ b/src/documents.ts
+@@ -40,2 +40,2 @@ export async function preview(data: Input) {
+-  return splitIntoChunks(appDataSource, componentNodes, data)
++  return splitIntoChunks(appDataSource, componentNodes, data, workspaceId)
+ }
+"""
+
+        result = analyze_patch(local_patch(patch))
+
+        self.assertIn(
+            ("guard", "removed", 40),
+            {
+                (item.mode, item.change_kind, item.old_line)
+                for item in result.guard_candidates
+            },
+        )
+        self.assertTrue(
+            all(
+                item.change_kind != "added" or item.old_line is None
+                for item in result.guard_candidates
+            )
+        )
+
+    def test_removed_permissive_authz_decision_yields_guard_anchor(self) -> None:
+        patch = """diff --git a/src/policy.ts b/src/policy.ts
+index 1111111..2222222 100644
+--- a/src/policy.ts
++++ b/src/policy.ts
+@@ -43,5 +43,2 @@ export function resolvePolicy(params: Params) {
+-  if (senderName && allowFrom.includes(senderName)) {
+-    return { allowed: true, matchKey: senderName };
+-  }
+   return { allowed: false };
+ }
+"""
+
+        result = analyze_patch(local_patch(patch))
+
+        self.assertIn(
+            ("guard", "removed", 44),
+            {
+                (item.mode, item.change_kind, item.old_line)
+                for item in result.guard_candidates
+            },
+        )
+        self.assertTrue(
             all(item.change_kind != "added" for item in result.guard_candidates)
         )
 

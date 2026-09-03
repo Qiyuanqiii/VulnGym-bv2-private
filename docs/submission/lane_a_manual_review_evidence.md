@@ -10,17 +10,17 @@ input failures:
 
 | Batch | Public split | Tasks | Complete candidate/report pairs | Producer-deferred or incomplete | Finalized |
 | --- | --- | ---: | ---: | ---: | ---: |
-| `test11` | test | 11 | 8 | 3 | 0 |
+| `test11-v3-authz-scope` | test | 11 | 11 | 0 | 0 |
 | `train24-v5-unsafe-option` | train | 24 | 24 | 0 | 0 |
 | `identifier-subset-v2/test1` | test | 1 | 1 | 0 | 0 |
 | `identifier-subset-v2/train4` | train | 4 | 4 | 0 | 0 |
-| Total | mixed | 40 | 37 | 3 | 0 |
+| Total | mixed | 40 | 40 | 0 | 0 |
 
 A later guard-anchor authoring probe over the same `train24` workload improves
 the code-level terminal-candidate coverage from 20/24 to 22/24 by adding
 old-side anchors for sanitizer/normalizer replacements and assertion namespace
 calls. Substituting that probe for `train24-v2-review-anchor` would make the
-current 40-task covered set 35 complete candidate/report pairs and 5
+then-current 40-task covered set 35 complete candidate/report pairs and 5
 producer-deferred or incomplete rows. The added terminal reports are still
 `manual_review`: one is `uncertain`, and one is intentionally rejected as
 `incorrect`.
@@ -30,14 +30,18 @@ A follow-up `.svelte` entry-search probe then improves the same workload from
 `manual_review` with an `uncertain` verdict; the single remaining non-terminal
 training row is stopped before report generation because the review anchor is
 only present on the fix side. Substituting this later probe would make the
-current 40-task covered set 36 complete candidate/report pairs and 4
+then-current 40-task covered set 36 complete candidate/report pairs and 4
 producer-deferred or incomplete rows, still with 0 finalized rows.
 
 A later removed-unsafe-option guard-anchor probe completes the same `train24`
 workload at 24/24 terminal candidate/report pairs. That row also remains
-`manual_review` with an `uncertain` verdict. The current 40-task covered set is
-therefore 37 complete candidate/report pairs and 3 producer-deferred or
-incomplete rows, still with 0 finalized rows.
+`manual_review` with an `uncertain` verdict.
+
+A follow-up access-scope and permissive-authorization-decision probe over the
+same `test11` workload completes the three remaining test rows, moving them
+from producer-deferred to complete `manual_review`. The current 40-task covered
+set is therefore 40 complete candidate/report pairs, 0 producer-deferred or
+incomplete rows, and 0 finalized rows.
 
 The validator currently proves these fields deterministically for every
 complete candidate/report pair:
@@ -67,16 +71,16 @@ Observed reviewer-evidence aggregation:
 
 | Batch | Correct field checks | Incorrect field checks | Uncertain field checks | Main incorrect field | Main uncertain fields |
 | --- | ---: | ---: | ---: | --- | --- |
-| `test11` | 72 | 2 | 54 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
+| `test11-v3-authz-scope` | 99 | 1 | 76 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
 | `train24-v5-unsafe-option` | 216 | 3 | 165 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
 | `identifier-subset-v2/test1` | 9 | 0 | 7 | none | `critical_operation`, `entry_point`, `trace`, title/category |
 | `identifier-subset-v2/train4` | 36 | 1 | 27 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
 
-Producer-deferred rows are also expected in this conservative route:
+Producer-deferred rows are now cleared for the current covered set:
 
 | Batch | `guard_only_exists_on_fix_side` | `no_entry_candidate` | `required_checks_unavailable` |
 | --- | ---: | ---: | ---: |
-| `test11` | 3 | 0 | 0 |
+| `test11-v3-authz-scope` | 0 | 0 | 0 |
 | `train24-v5-unsafe-option` | 0 | 0 | 0 |
 | `identifier-subset-v2/test1` | 0 | 0 | 0 |
 | `identifier-subset-v2/train4` | 0 | 0 | 0 |
@@ -99,10 +103,17 @@ Digest anchors:
 
 | Batch | Closed-loop dataset SHA-256 | Review evidence SHA-256 |
 | --- | --- | --- |
-| `test11` | `41c43389faa823a115890637bb4b85cf770dde8b87defde751b53e6efb18c57b` | `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a` |
+| `test11-v3-authz-scope` | `8a314a8d9b5dd4c29e4e576e52e24a6e507ae973949a41743273dac3fe415c2a` | `68305bc9de4e857761831f302c9ef8116b16f6a119755ae7ef80ebc2d62c553c` |
 | `train24-v5-unsafe-option` | `04ec0206095c0b6038190403efc56d531a1eca6184b2503928dd6df36c4bfec2` | `22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800` |
 | `identifier-subset-v2/test1` | `c2151999e0c68a6c38c6f02ea5c6dfe9c189169251ee948b57585f6bf5a5763d` | `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652` |
 | `identifier-subset-v2/train4` | `797f75f8df8bca392d30c542fb494793ec5b4e6b137e4e540607312eb973e5fe` | `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0` |
+
+Formal export anchors for the latest complete replay batches:
+
+| Batch | Submission SHA-256 |
+| --- | --- |
+| `test11-v3-authz-scope` | `f06618b509afb7843ddcbfa94e6585cff76c22b56fe79e06d2ec0fbc1e3c557e` |
+| `train24-v5-unsafe-option` | `48aebd686a749d8b25c95facb8445206910c4056d13ea366d54420f02a5cbcb8` |
 
 The next engineering choice is therefore not whether the pipeline runs. It
 does. The choice is how aggressively to promote semantic facts:

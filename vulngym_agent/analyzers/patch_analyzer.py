@@ -52,6 +52,17 @@ _UNSAFE_DESERIALIZATION_OPTION_RE: Final[re.Pattern[str]] = re.compile(
     r"allow_pickle\s*=\s*True|trust_remote_code\s*=\s*True)\b",
     re.IGNORECASE,
 )
+_ACCESS_SCOPE_PROPAGATION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9_$])(?:workspaceId|tenantId|orgId|ForceSenderIsOwnerFalse)"
+    r"(?![A-Za-z0-9_$])"
+)
+_PERMISSIVE_AUTHZ_DECISION_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:return\b|(?:const|let|var)\s+|[A-Za-z_$][A-Za-z0-9_$]*\s*[=:])"
+    r".*(?<![A-Za-z0-9_$])(?:allowed|allowFrom|allowlist|authorized|"
+    r"auth|owner|admin|role|permission)(?![A-Za-z0-9_$]).*"
+    r"(?:\btrue\b|includes\s*\(|\|\||ownerAllowAll)",
+    re.IGNORECASE,
+)
 _ASSERT_ALIAS_IMPORT_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*import\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+"
     r"['\"](?:node:)?assert['\"]\s*;?\s*$"
@@ -690,6 +701,7 @@ def _is_guard_like_line(code: str, aliases: frozenset[str]) -> bool:
     return (
         _GUARD_RE.search(code) is not None
         or _SECURITY_TRANSFORM_RE.search(code) is not None
+        or _ACCESS_SCOPE_PROPAGATION_RE.search(code) is not None
         or _assert_alias_call(code, aliases)
     )
 
@@ -758,6 +770,16 @@ def _candidates(files: Iterable[ChangedFile], max_candidates: int) -> tuple[Patc
                         (
                             "guard",
                             "old-side removed unsafe deserialization option; semantic role unverified",
+                        )
+                    )
+                if (
+                    line.change_kind == "removed"
+                    and _PERMISSIVE_AUTHZ_DECISION_RE.search(line.code)
+                ):
+                    modes.append(
+                        (
+                            "guard",
+                            "old-side removed permissive authorization decision; semantic role unverified",
                         )
                     )
                 for mode, reason in modes:
