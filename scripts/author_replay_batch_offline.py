@@ -1236,6 +1236,15 @@ def _build_d2_response(payload: Mapping[str, Any], plan: TaskPlan) -> dict[str, 
         if select_response is not None and "select" in allowed_set:
             return select_response
 
+        if "defer" in allowed_set:
+            return {
+                "action": "defer",
+                "missing_information": [
+                    "offline replay helper could not assemble selectable structure and relationship evidence"
+                ],
+                "reason_code": "insufficient_offline_evidence",
+            }
+
     return None
 
 

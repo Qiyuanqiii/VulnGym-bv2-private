@@ -190,6 +190,59 @@ class OfflineAuthoringHelperTests(unittest.TestCase):
 
         self.assertEqual({"action": "advance"}, _build_d2_response(payload, plan))
 
+    def test_d2_builder_defers_when_analyze_has_no_selectable_evidence(self) -> None:
+        plan = TaskPlan(
+            task_id="VG-TEST-0123456789ABCDEF0123",
+            split="test",
+            target_path="src/app.py",
+            target_index=0,
+            inventory_cursor=0,
+            critical_line=40,
+            critical_query="exec(",
+            critical_token="exec",
+            entry_line=10,
+            entry_token="handler",
+            relation_line=20,
+            relation_token="helper",
+            score=1,
+        )
+        payload = {
+            "allowed_actions": ("inventory", "search", "read", "structure", "link", "defer", "select"),
+            "phase": "ANALYZE",
+            "catalog": {
+                "nodes": (
+                    {
+                        "type": "FIL",
+                        "path": "src/app.py",
+                        "ref": {"artifact_id": "ART-inv", "node_id": "FIL-1"},
+                    },
+                    {
+                        "type": "MAT",
+                        "path": "src/app.py",
+                        "line": 40,
+                        "excerpt": "exec(user_input)",
+                        "ref": {"artifact_id": "ART-search", "node_id": "MAT-critical"},
+                    },
+                    {
+                        "type": "MAT",
+                        "path": "src/app.py",
+                        "line": 20,
+                        "excerpt": "helper(user_input)",
+                        "ref": {"artifact_id": "ART-search", "node_id": "MAT-helper"},
+                    },
+                )
+            },
+            "relationships": (),
+            "last_result": {"action": "read", "summary": {"span_count": 2}},
+        }
+
+        response = _build_d2_response(payload, plan)
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual("defer", response["action"])
+        self.assertEqual("insufficient_offline_evidence", response["reason_code"])
+
     def test_scan_prefers_actual_call_over_import_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)
