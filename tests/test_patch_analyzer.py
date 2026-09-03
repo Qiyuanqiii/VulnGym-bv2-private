@@ -190,6 +190,32 @@ index 1111111..2222222 100644
             )
         )
 
+    def test_removed_unsafe_deserialization_option_yields_guard_anchor(self) -> None:
+        patch = """diff --git a/pkg/loader.py b/pkg/loader.py
+index 1111111..2222222 100644
+--- a/pkg/loader.py
++++ b/pkg/loader.py
+@@ -8,5 +8,4 @@ def load(path):
+     return torch.load(
+         path,
+-        weights_only=False,
+         map_location="cpu",
+     )
+"""
+
+        result = analyze_patch(local_patch(patch))
+
+        self.assertIn(
+            ("guard", "removed", 10, "        weights_only=False,"),
+            {
+                (item.mode, item.change_kind, item.old_line, item.code)
+                for item in result.guard_candidates
+            },
+        )
+        self.assertTrue(
+            all(item.change_kind != "added" for item in result.guard_candidates)
+        )
+
     def test_multifile_rename_add_delete_and_candidate_ids_are_stable(self) -> None:
         result = analyze_patch(local_patch(MULTI_FILE_PATCH))
 

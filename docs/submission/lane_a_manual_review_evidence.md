@@ -11,10 +11,10 @@ input failures:
 | Batch | Public split | Tasks | Complete candidate/report pairs | Producer-deferred or incomplete | Finalized |
 | --- | --- | ---: | ---: | ---: | ---: |
 | `test11` | test | 11 | 8 | 3 | 0 |
-| `train24-v2-review-anchor` | train | 24 | 20 | 4 | 0 |
+| `train24-v5-unsafe-option` | train | 24 | 24 | 0 | 0 |
 | `identifier-subset-v2/test1` | test | 1 | 1 | 0 | 0 |
 | `identifier-subset-v2/train4` | train | 4 | 4 | 0 | 0 |
-| Total | mixed | 40 | 33 | 7 | 0 |
+| Total | mixed | 40 | 37 | 3 | 0 |
 
 A later guard-anchor authoring probe over the same `train24` workload improves
 the code-level terminal-candidate coverage from 20/24 to 22/24 by adding
@@ -32,6 +32,12 @@ training row is stopped before report generation because the review anchor is
 only present on the fix side. Substituting this later probe would make the
 current 40-task covered set 36 complete candidate/report pairs and 4
 producer-deferred or incomplete rows, still with 0 finalized rows.
+
+A later removed-unsafe-option guard-anchor probe completes the same `train24`
+workload at 24/24 terminal candidate/report pairs. That row also remains
+`manual_review` with an `uncertain` verdict. The current 40-task covered set is
+therefore 37 complete candidate/report pairs and 3 producer-deferred or
+incomplete rows, still with 0 finalized rows.
 
 The validator currently proves these fields deterministically for every
 complete candidate/report pair:
@@ -62,7 +68,7 @@ Observed reviewer-evidence aggregation:
 | Batch | Correct field checks | Incorrect field checks | Uncertain field checks | Main incorrect field | Main uncertain fields |
 | --- | ---: | ---: | ---: | --- | --- |
 | `test11` | 72 | 2 | 54 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
-| `train24-v2-review-anchor` | 180 | 2 | 138 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
+| `train24-v5-unsafe-option` | 216 | 3 | 165 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
 | `identifier-subset-v2/test1` | 9 | 0 | 7 | none | `critical_operation`, `entry_point`, `trace`, title/category |
 | `identifier-subset-v2/train4` | 36 | 1 | 27 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
 
@@ -71,7 +77,7 @@ Producer-deferred rows are also expected in this conservative route:
 | Batch | `guard_only_exists_on_fix_side` | `no_entry_candidate` | `required_checks_unavailable` |
 | --- | ---: | ---: | ---: |
 | `test11` | 3 | 0 | 0 |
-| `train24-v2-review-anchor` | 4 | 0 | 0 |
+| `train24-v5-unsafe-option` | 0 | 0 | 0 |
 | `identifier-subset-v2/test1` | 0 | 0 | 0 |
 | `identifier-subset-v2/train4` | 0 | 0 | 0 |
 
@@ -94,7 +100,7 @@ Digest anchors:
 | Batch | Closed-loop dataset SHA-256 | Review evidence SHA-256 |
 | --- | --- | --- |
 | `test11` | `41c43389faa823a115890637bb4b85cf770dde8b87defde751b53e6efb18c57b` | `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a` |
-| `train24-v2-review-anchor` | `a2b6f487a6bd1208728d91777f605c5834ba50c35fba6fd9843e46eb7c21925b` | `161cdcd470bb1d5629b533355c4e553e61c8cf5645f28b4c343018d82adf3c62` |
+| `train24-v5-unsafe-option` | `04ec0206095c0b6038190403efc56d531a1eca6184b2503928dd6df36c4bfec2` | `22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800` |
 | `identifier-subset-v2/test1` | `c2151999e0c68a6c38c6f02ea5c6dfe9c189169251ee948b57585f6bf5a5763d` | `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652` |
 | `identifier-subset-v2/train4` | `797f75f8df8bca392d30c542fb494793ec5b4e6b137e4e540607312eb973e5fe` | `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0` |
 

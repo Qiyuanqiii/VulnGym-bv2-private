@@ -268,6 +268,7 @@ bundle until the sanitized public artifacts are regenerated.
 | --- | --- | --- | ---: | ---: | ---: | ---: |
 | `train24-v3-guard-anchor` | `e02e18f01ae7c48b6542acdc72255ab484af41db9060718fa5cd847345b98130` | `5a1f966bbf98a29665c91e8965de46dd002335def2e26176fcbf3cdbbb2bca6c` | 68 | 22 | 2 | 0 |
 | `train24-v4-svelte-entry` | `1b6b3abdfacba443b264a7457485c02720bea2ce16d22db62761db035679b1e6` | `e94ac5eef4ea121e3396ce0b57ea9dc7671cfb0a046c96b54dbf40b6cf3a1ca1` | 70 | 23 | 1 | 0 |
+| `train24-v5-unsafe-option` | `588e4fce68753c9c1462c96e4ce3b1f5e93eb4acc9168a1fff304212b5e4978d` | `2b63187933e47f127771c0e338d2d716483fbec7379649e8b673c73d8dd9569e` | 72 | 24 | 0 | 0 |
 
 The two additional terminal candidate/report pairs are
 `VG-TRAIN-727D94F6A27E96DB4DAC` (`uncertain`) and
@@ -288,6 +289,24 @@ with `tasks_run=24`, `manual_review=24`, `failed=0`, and `input_failures=0`.
 If this probe replaces `train24-v2-review-anchor` in the current
 non-duplicated covered set, the 40-task covered status becomes 36 terminal
 candidate/report pairs, 4 producer-deferred or incomplete rows, and 0 finalized
+rows.
+
+After adding a narrow old-side anchor for removed unsafe deserialization
+options, the follow-up `train24-v5-unsafe-option` probe moved
+`VG-TRAIN-747C63B97771B863292B` from
+`guard_only_exists_on_fix_side` to complete `manual_review` with an
+`uncertain` verdict. The closed-loop runner accepted this replay with
+`tasks_run=24`, `manual_review=24`, `failed=0`, and `input_failures=0`.
+The runner dataset SHA-256 is
+`04ec0206095c0b6038190403efc56d531a1eca6184b2503928dd6df36c4bfec2`.
+`submission_prediction_cli export` and double-pin `verify` both succeeded for
+this batch, producing submission SHA-256
+`48aebd686a749d8b25c95facb8445206910c4056d13ea366d54420f02a5cbcb8` and
+review-evidence SHA-256
+`22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800`.
+If this probe replaces `train24-v2-review-anchor` in the current
+non-duplicated covered set, the 40-task covered status becomes 37 terminal
+candidate/report pairs, 3 producer-deferred or incomplete rows, and 0 finalized
 rows.
 
 ## Artifact digests

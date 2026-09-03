@@ -99,32 +99,34 @@ python -B -m vulngym_agent.closed_loop_cli \
 ```
 
 - 已完成扩展 hybrid 批次：test 12/20、train 28/50，共 40/70。当前
-  consolidated 视图为 `test11` + `train24-v2-review-anchor` +
+  consolidated 视图为 `test11` + `train24-v5-unsafe-option` +
   `identifier-subset-v2/test1` + `identifier-subset-v2/train4`；
   `closed_loop_cli` 均 exit 0，`input_failures=0`，全部进入
-  `manual_review`。其中 33/40 有完整候选/报告对，7/40 仍为
+  `manual_review`。其中 37/40 有完整候选/报告对，3/40 仍为
   producer-deferred 或 incomplete。
 - reviewer evidence 已记录：test11 digest
   `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a`；
-  train24-v2-review-anchor digest
-  `161cdcd470bb1d5629b533355c4e553e61c8cf5645f28b4c343018d82adf3c62`；
+  train24-v5-unsafe-option digest
+  `22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800`；
   identifier-subset-v2/test1 digest
   `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652`；
   identifier-subset-v2/train4 digest
   `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0`。
-- 当前 T1 增强仅加入同文件 review anchor：`VG-TRAIN-46D6453D5B4663CF0D13`
-  从 incomplete 变为完整 `manual_review`，entry/report digest 可回读；
-  剩余 4 条 train24-v2 incomplete 均为 `guard_only_exists_on_fix_side`。
+- 当前 T1 增强加入同文件 review anchor、`.svelte` 入口识别和 removed unsafe
+  option guard anchor；train24 最新 probe 已从 20/24 complete 提升到
+  24/24 complete，entry/report digest 可回读。
 - TODO：继续增强 T1 或整理人工复核证据，使最终公开测试能形成评审认可的
   `entries.jsonl`、`validation.jsonl` 和 manifest。
 - Windows-native `submission_prediction_cli review` 已回读上述固定 replay，
   task/complete/incomplete/input-failure/review digest 均与
   `docs/submission/lane_a_manual_review_evidence.md` 一致。
 - Windows-native `submission_prediction_cli export` 已解除平台硬拒绝；导出仍会拒绝
-  含缺失候选/报告对的 replay。当前 consolidated `train24-v2-review-anchor`
-  可回读复核，但因 20/24 complete、4/24 incomplete，仍不能生成完整三文件
-  提交面；实测拒绝码为 `incomplete_predictions`，退出码为 `2`，且未创建
-  输出目录。
+  含缺失候选/报告对的 replay。当前 `train24-v5-unsafe-option` 已生成完整
+  `entries.jsonl`、`validation.jsonl` 和 `submission_manifest.json`，并通过
+  双 pin `verify`：source replay dataset
+  `04ec0206095c0b6038190403efc56d531a1eca6184b2503928dd6df36c4bfec2`，
+  submission
+  `48aebd686a749d8b25c95facb8445206910c4056d13ea366d54420f02a5cbcb8`。
 - Windows-native `export` + 双 pin `verify` 已实测通过两个 complete 子批次：
   `identifier-subset-v2/test1` 的 `submission_sha256`
   `d6aa6c769a09c1dc70e4a25de1030a868dc546e28cdde3130140a76cf4729694`，

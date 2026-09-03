@@ -47,6 +47,11 @@ _SECURITY_TRANSFORM_RE: Final[re.Pattern[str]] = re.compile(
     r"[A-Za-z0-9_$]*)\s*\(",
     re.IGNORECASE,
 )
+_UNSAFE_DESERIALIZATION_OPTION_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9_$])(?:weights_only\s*=\s*False|"
+    r"allow_pickle\s*=\s*True|trust_remote_code\s*=\s*True)\b",
+    re.IGNORECASE,
+)
 _ASSERT_ALIAS_IMPORT_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*import\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+"
     r"['\"](?:node:)?assert['\"]\s*;?\s*$"
@@ -743,6 +748,16 @@ def _candidates(files: Iterable[ChangedFile], max_candidates: int) -> tuple[Patc
                         (
                             "dangerous_call",
                             "lexical call-name list match; semantic role unverified",
+                        )
+                    )
+                if (
+                    line.change_kind == "removed"
+                    and _UNSAFE_DESERIALIZATION_OPTION_RE.search(line.code)
+                ):
+                    modes.append(
+                        (
+                            "guard",
+                            "old-side removed unsafe deserialization option; semantic role unverified",
                         )
                     )
                 for mode, reason in modes:
