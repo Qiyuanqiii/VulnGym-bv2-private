@@ -12,7 +12,9 @@ from vulngym_agent.resolvers import (
     CriticalResolutionResult,
     resolve_critical_operation,
 )
+from vulngym_agent.resolvers.critical_resolver import _old_side_line_sets
 from vulngym_agent.tools.git import GitRepository
+from vulngym_agent.tools.git import TextFileDiff
 
 
 class CriticalResolverTests(unittest.TestCase):
@@ -181,6 +183,36 @@ class CriticalResolverTests(unittest.TestCase):
         )
         self.assertTrue(result.candidates[0].in_removed_or_changed_side)
         self.assertIn("fix-added guard", result.candidates[0].evidence)
+
+    def test_guard_context_line_sets_include_sanitizer_and_assert_alias_hunks(self) -> None:
+        diff = TextFileDiff(
+            before_commit="1" * 40,
+            after_commit="2" * 40,
+            path="src/render.ts",
+            before_exists=True,
+            after_exists=True,
+            before_blob_id="3" * 40,
+            after_blob_id="4" * 40,
+            added_lines=3,
+            deleted_lines=0,
+            unified_diff="""diff --git a/src/render.ts b/src/render.ts
+index 1111111..2222222 100644
+--- a/src/render.ts
++++ b/src/render.ts
+@@ -1,3 +1,5 @@
++import * as a from "node:assert";
+ export function render(req: Request) {
+   const body = readBody(req)
++  a.ok(req.headers.get("content-type"))
+   return DOMPurify.sanitize(body)
+ }
+""",
+        )
+
+        _removed, guard_context = _old_side_line_sets(diff)
+
+        self.assertIn(2, guard_context)
+        self.assertIn(3, guard_context)
 
     def test_fix_added_guard_is_refuted_without_inventing_vulnerable_line(self) -> None:
         result = self._resolve(

@@ -102,9 +102,21 @@ class PatchAnalyzerTests(unittest.TestCase):
             [line.new_line for line in changed.hunks[0].lines],
             [None, 10, 11, 12, 13, 14],
         )
-        self.assertEqual(len(result.guard_candidates), 2)
+        self.assertEqual(len(result.guard_candidates), 3)
         self.assertEqual(len(result.early_return_candidates), 2)
         self.assertEqual(len(result.removed_dangerous_calls), 1)
+        self.assertIn(
+            ("guard", "removed", 10, "    return eval(value)"),
+            {
+                (
+                    item.mode,
+                    item.change_kind,
+                    item.old_line,
+                    item.code,
+                )
+                for item in result.guard_candidates
+            },
+        )
         self.assertIn(
             ("guard", "context", 11, "    # retained"),
             {
@@ -119,6 +131,64 @@ class PatchAnalyzerTests(unittest.TestCase):
         )
         self.assertTrue(all(not item.semantic_verified for item in result.candidates))
         self.assertIn("semantic role unverified", result.removed_dangerous_calls[0].reason)
+
+    def test_sanitizer_replacement_yields_old_side_guard_anchor(self) -> None:
+        patch = """diff --git a/src/render.ts b/src/render.ts
+index 1111111..2222222 100644
+--- a/src/render.ts
++++ b/src/render.ts
+@@ -20,3 +20,3 @@ export function render(text: string) {
+-  const html = marked.parse(text)
++  const html = DOMPurify.sanitize(marked.parse(text))
+   return html
+ }
+"""
+
+        result = analyze_patch(local_patch(patch))
+
+        self.assertIn(
+            ("guard", "removed", 20),
+            {
+                (item.mode, item.change_kind, item.old_line)
+                for item in result.guard_candidates
+            },
+        )
+        self.assertTrue(
+            all(
+                item.change_kind != "added" or item.old_line is None
+                for item in result.guard_candidates
+            )
+        )
+
+    def test_assert_namespace_alias_yields_guard_context_anchor(self) -> None:
+        patch = """diff --git a/src/form.ts b/src/form.ts
+index 1111111..2222222 100644
+--- a/src/form.ts
++++ b/src/form.ts
+@@ -1,4 +1,6 @@
++import * as a from "node:assert";
+ export function handle(req: Request) {
+   const body = readBody(req)
++  a.ok(req.headers.get("content-type"))
+   return body
+ }
+"""
+
+        result = analyze_patch(local_patch(patch))
+
+        self.assertIn(
+            ("guard", "context", 2),
+            {
+                (item.mode, item.change_kind, item.old_line)
+                for item in result.guard_candidates
+            },
+        )
+        self.assertTrue(
+            all(
+                item.change_kind != "added" or item.old_line is None
+                for item in result.guard_candidates
+            )
+        )
 
     def test_multifile_rename_add_delete_and_candidate_ids_are_stable(self) -> None:
         result = analyze_patch(local_patch(MULTI_FILE_PATCH))

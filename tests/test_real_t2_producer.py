@@ -520,7 +520,7 @@ class LocalStructuredT2ProducerTests(unittest.TestCase):
         )
         self.assertEqual(
             {item["change_kind"] for item in semantic.payload["critical_candidates"]},
-            {"context"},
+            {"context", "removed"},
         )
         self.assertEqual(
             projection.model_stages,

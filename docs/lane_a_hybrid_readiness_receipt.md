@@ -256,6 +256,27 @@ is the current consolidated training view; it improves one Flowise task
 by using a same-file review anchor, while the four remaining incomplete rows
 remain stopped at `guard_only_exists_on_fix_side`.
 
+### Guard-anchor authoring probe
+
+After adding old-side guard anchors for sanitizer/normalizer replacements and
+assertion namespace calls, a local exact-replay authoring probe over the same
+24 training tasks completed successfully. This probe is code-level readiness
+evidence; it does not replace the pinned `train24-v2-review-anchor` publication
+bundle until the sanitized public artifacts are regenerated.
+
+| Probe | Exact replay SHA-256 | Exact replay wire SHA-256 | Responses | Terminal candidate/report pairs | Producer-deferred or incomplete | Finalized |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| `train24-v3-guard-anchor` | `e02e18f01ae7c48b6542acdc72255ab484af41db9060718fa5cd847345b98130` | `5a1f966bbf98a29665c91e8965de46dd002335def2e26176fcbf3cdbbb2bca6c` | 68 | 22 | 2 | 0 |
+
+The two additional terminal candidate/report pairs are
+`VG-TRAIN-727D94F6A27E96DB4DAC` (`uncertain`) and
+`VG-TRAIN-8FEE6A4371C6C410BCB8` (`incorrect`). The remaining non-terminal rows
+are `VG-TRAIN-43AC81B29F131DE6F550` (`no_entry_candidate`) and
+`VG-TRAIN-747C63B97771B863292B` (`guard_only_exists_on_fix_side`). If this
+probe replaces `train24-v2-review-anchor` in the current non-duplicated covered
+set, the 40-task covered status becomes 35 terminal candidate/report pairs, 5
+producer-deferred or incomplete rows, and 0 finalized rows.
+
 ## Artifact digests
 
 These digests identify the sanitized public artifacts for the 8-task strict

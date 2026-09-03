@@ -16,6 +16,15 @@ input failures:
 | `identifier-subset-v2/train4` | train | 4 | 4 | 0 | 0 |
 | Total | mixed | 40 | 33 | 7 | 0 |
 
+A later guard-anchor authoring probe over the same `train24` workload improves
+the code-level terminal-candidate coverage from 20/24 to 22/24 by adding
+old-side anchors for sanitizer/normalizer replacements and assertion namespace
+calls. Substituting that probe for `train24-v2-review-anchor` would make the
+current 40-task covered set 35 complete candidate/report pairs and 5
+producer-deferred or incomplete rows. The added terminal reports are still
+`manual_review`: one is `uncertain`, and one is intentionally rejected as
+`incorrect`.
+
 The validator currently proves these fields deterministically for every
 complete candidate/report pair:
 

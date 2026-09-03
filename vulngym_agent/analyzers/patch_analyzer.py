@@ -41,6 +41,20 @@ _GUARD_RE: Final[re.Pattern[str]] = re.compile(
     r"check|authorize|authorise|deny|reject)[A-Za-z0-9_]*\s*\()",
     re.IGNORECASE,
 )
+_SECURITY_TRANSFORM_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?<![A-Za-z0-9_$])(?:[A-Za-z_$][A-Za-z0-9_$]*\s*\.\s*)?"
+    r"(?:saniti[sz]e|escapeHtml|escapeHTML|normalize(?:Pasted)?Markdown"
+    r"[A-Za-z0-9_$]*)\s*\(",
+    re.IGNORECASE,
+)
+_ASSERT_ALIAS_IMPORT_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*import\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+"
+    r"['\"](?:node:)?assert['\"]\s*;?\s*$"
+)
+_ASSERT_ALIAS_REQUIRE_RE: Final[re.Pattern[str]] = re.compile(
+    r"^\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*"
+    r"require\s*\(\s*['\"](?:node:)?assert['\"]\s*\)\s*;?\s*$"
+)
 _EARLY_RETURN_RE: Final[re.Pattern[str]] = re.compile(
     r"^\s*(?:return\b|raise\b|throw\b|break\s*;?\s*$|continue\s*;?\s*$|"
     r"goto\s+(?:fail|error|cleanup)\b|abort\s*\()",
@@ -634,9 +648,51 @@ def _nearest_context_line(hunk: PatchHunk, line_index: int) -> PatchLine | None:
     return min(candidates)[3]
 
 
+def _nearest_removed_line(hunk: PatchHunk, line_index: int) -> PatchLine | None:
+    candidates = [
+        (abs(index - line_index), 0 if index < line_index else 1, index, line)
+        for index, line in enumerate(hunk.lines)
+        if line.change_kind == "removed" and line.old_line is not None and line.code.strip()
+    ]
+    if not candidates:
+        return None
+    return min(candidates)[3]
+
+
+def _assert_aliases(changed_file: ChangedFile) -> frozenset[str]:
+    aliases = {"assert"}
+    for hunk in changed_file.hunks:
+        for line in hunk.lines:
+            match = _ASSERT_ALIAS_IMPORT_RE.search(line.code)
+            if match is not None:
+                aliases.add(match.group(1))
+                continue
+            match = _ASSERT_ALIAS_REQUIRE_RE.search(line.code)
+            if match is not None:
+                aliases.add(match.group(1))
+    return frozenset(aliases)
+
+
+def _assert_alias_call(code: str, aliases: frozenset[str]) -> bool:
+    for alias in aliases:
+        pattern = rf"^\s*{re.escape(alias)}\s*\.\s*(?:ok|equal|strictEqual|notEqual|notStrictEqual|match|doesNotMatch)\s*\("
+        if re.search(pattern, code) is not None:
+            return True
+    return False
+
+
+def _is_guard_like_line(code: str, aliases: frozenset[str]) -> bool:
+    return (
+        _GUARD_RE.search(code) is not None
+        or _SECURITY_TRANSFORM_RE.search(code) is not None
+        or _assert_alias_call(code, aliases)
+    )
+
+
 def _candidates(files: Iterable[ChangedFile], max_candidates: int) -> tuple[PatchCandidate, ...]:
     candidates: list[PatchCandidate] = []
     context_keys: set[tuple[str, int, str]] = set()
+    removed_guard_keys: set[tuple[str, int, str]] = set()
 
     def append_candidate(
         mode: CandidateMode,
@@ -663,10 +719,12 @@ def _candidates(files: Iterable[ChangedFile], max_candidates: int) -> tuple[Patc
             )
 
     for changed_file in files:
+        assert_aliases = _assert_aliases(changed_file)
         for hunk in changed_file.hunks:
             for index, line in enumerate(hunk.lines):
                 modes: list[tuple[CandidateMode, str]] = []
-                if line.change_kind == "added" and _GUARD_RE.search(line.code):
+                line_is_guard_like = _is_guard_like_line(line.code, assert_aliases)
+                if line.change_kind == "added" and line_is_guard_like:
                     modes.append(
                         (
                             "guard",
@@ -689,10 +747,26 @@ def _candidates(files: Iterable[ChangedFile], max_candidates: int) -> tuple[Patc
                     )
                 for mode, reason in modes:
                     append_candidate(mode, changed_file, line, reason)
+                if line.change_kind == "added" and line_is_guard_like:
+                    removed = _nearest_removed_line(hunk, index)
+                    if removed is not None:
+                        assert removed.old_line is not None
+                        key = (changed_file.path, removed.old_line, removed.code)
+                        if key not in removed_guard_keys:
+                            removed_guard_keys.add(key)
+                            append_candidate(
+                                "guard",
+                                changed_file,
+                                removed,
+                                (
+                                    "old-side removed line nearest a fix-added "
+                                    "guard-like line; semantic role unverified"
+                                ),
+                            )
                 if (
                     line.change_kind == "added"
                     and (
-                        _GUARD_RE.search(line.code) is not None
+                        line_is_guard_like
                         or _EARLY_RETURN_RE.search(line.code) is not None
                     )
                 ):

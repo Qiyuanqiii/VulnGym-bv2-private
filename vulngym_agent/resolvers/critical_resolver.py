@@ -47,6 +47,20 @@ _FIX_ADDED_GUARD_RE = re.compile(
     r"goto\s+(?:fail|error|cleanup)\b|abort\s*\()",
     re.IGNORECASE,
 )
+_FIX_ADDED_SECURITY_TRANSFORM_RE = re.compile(
+    r"(?<![A-Za-z0-9_$])(?:[A-Za-z_$][A-Za-z0-9_$]*\s*\.\s*)?"
+    r"(?:saniti[sz]e|escapeHtml|escapeHTML|normalize(?:Pasted)?Markdown"
+    r"[A-Za-z0-9_$]*)\s*\(",
+    re.IGNORECASE,
+)
+_ASSERT_ALIAS_IMPORT_RE = re.compile(
+    r"^\s*import\s+\*\s+as\s+([A-Za-z_$][A-Za-z0-9_$]*)\s+from\s+"
+    r"['\"](?:node:)?assert['\"]\s*;?\s*$"
+)
+_ASSERT_ALIAS_REQUIRE_RE = re.compile(
+    r"^\s*(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*"
+    r"require\s*\(\s*['\"](?:node:)?assert['\"]\s*\)\s*;?\s*$"
+)
 _CANDIDATE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _MISSING = object()
 
@@ -340,11 +354,28 @@ def _canonical_candidate_mode(mode: str) -> CriticalMode | None:
     return None
 
 
+def _assert_alias_call(code: str, aliases: set[str]) -> bool:
+    for alias in aliases:
+        pattern = rf"^\s*{re.escape(alias)}\s*\.\s*(?:ok|equal|strictEqual|notEqual|notStrictEqual|match|doesNotMatch)\s*\("
+        if re.search(pattern, code) is not None:
+            return True
+    return False
+
+
+def _is_fix_added_guard_line(code: str, assert_aliases: set[str]) -> bool:
+    return (
+        _FIX_ADDED_GUARD_RE.search(code) is not None
+        or _FIX_ADDED_SECURITY_TRANSFORM_RE.search(code) is not None
+        or _assert_alias_call(code, assert_aliases)
+    )
+
+
 def _old_side_line_sets(diff: TextFileDiff) -> tuple[frozenset[int], frozenset[int]]:
     """Extract old-side replaced lines and guarded context lines from a diff."""
 
     removed: set[int] = set()
     guard_context: set[int] = set()
+    assert_aliases = {"assert"}
     old_line: int | None = None
     in_hunk = False
     hunk_context: list[int] = []
@@ -374,7 +405,14 @@ def _old_side_line_sets(diff: TextFileDiff) -> tuple[frozenset[int], frozenset[i
                 hunk_context.append(old_line)
             old_line += 1
         elif line.startswith("+"):
-            if _FIX_ADDED_GUARD_RE.search(line[1:]) is not None:
+            added_code = line[1:]
+            match = _ASSERT_ALIAS_IMPORT_RE.search(added_code)
+            if match is not None:
+                assert_aliases.add(match.group(1))
+            match = _ASSERT_ALIAS_REQUIRE_RE.search(added_code)
+            if match is not None:
+                assert_aliases.add(match.group(1))
+            if _is_fix_added_guard_line(added_code, assert_aliases):
                 hunk_has_added_guard = True
         elif line.startswith("\\"):
             continue
