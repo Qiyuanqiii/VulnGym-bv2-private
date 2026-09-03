@@ -140,7 +140,7 @@ The remaining blockers are materialization gaps, not T1/T2 runtime failures.
 They need separate reviewer-auditable policies or refresh steps before they can
 be safely added to automated batches.
 
-## Real T2-to-T1 batch result
+## Historical strict-only T2-to-T1 batch result
 
 The strict-ready public test batch has been expanded from 3 to 8 real tasks and
 executed through deterministic replay plus the production closed-loop runner.
@@ -170,6 +170,42 @@ The two producer-deferred tasks are both stopped before prediction publication
 because the public evidence only supports a fix-side guard clue and does not
 establish a vulnerable-side guard location. Keeping them deferred is the safer
 review posture.
+
+## Expanded hybrid T2-to-T1 batch result
+
+The verified strict+fallback task bundles were then executed through the same
+offline authoring and production closed-loop path.
+
+Authoring summaries:
+
+| Batch | Tasks | Exact replay verified | Response count | Status counts | Verdict counts |
+| --- | ---: | --- | ---: | --- | --- |
+| `test11` | 11 | true | 27 | `manual_review=11` | `incorrect=2`, `uncertain=6` |
+| `train23` | 23 | true | 61 | `manual_review=23` | `incorrect=2`, `uncertain=17` |
+
+Closed-loop runner summaries:
+
+| Batch | Tasks run | Records seen | Manual review | Finalized | Input failures | Status |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `test11` | 11 | 11 | 11 | 0 | 0 | ok |
+| `train23` | 23 | 23 | 23 | 0 | 0 | ok |
+
+Reviewer evidence summaries:
+
+| Batch | Complete candidate/report pairs | Producer-deferred or incomplete | Review evidence SHA-256 |
+| --- | ---: | ---: | --- |
+| `test11` | 8 | 3 | `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a` |
+| `train23` | 19 | 4 | `a1c49ec59abbbe0df612826594026a436158aab2c34a5c126f89ba7bf2ca8d72` |
+
+Expanded batch digests:
+
+| Batch | Exact replay wire SHA-256 | Closed-loop dataset SHA-256 | Run manifest SHA-256 | Candidates SHA-256 | Validation SHA-256 | Deferred SHA-256 |
+| --- | --- | --- | --- | --- | --- | --- |
+| `test11` | `bac85d8812aa6264304526ab9450ad5bd76834b186a621d7f3abe6a78b2b1bd1` | `41c43389faa823a115890637bb4b85cf770dde8b87defde751b53e6efb18c57b` | `be4fdb904065063cc61f5a36b8c5a24454e7eea280a3256cda2ef0e84ca171de` | `e4d17d173ccd24f1536bf7383548a16db56f7e9dd4a6c1f352a0c0452fe862d2` | `b10e2da85b42b23cab02b7ecc222605aa425f4cfcb374823c625df1c86baff0f` | `a8e96613c0f7dfd4e93d1f17ed79b7c487ce273cdd8cea6463cace41f6e98538` |
+| `train23` | `da63ac0c59111570dfd66647736f41a84ab6641c09acb56a01bb8916823e4655` | `c2d30c379a8742d251c2d82c575da6c358add86f7d2046cf5af0e47c0a444cc0` | `5e8ddfe00aa29e1711932649b9695a30678864600b00fa2a45202a2e56f5b745` | `6f77234e1a1a73155ad8dfa07a2279ada65ef7eb2c3b6b3242c6464ca1eb5475` | `f21c634627a8d04b152e375b294f321ce66e0549e7adef7aa9dfa7359c7d18ae` | `be0fa4b02530d1003e813f2ec98ad5f5bf18a2f845c148245b86a81e3d2cbc92` |
+
+The expanded closed-loop and review evidence marker scan covered `30` generated
+public files and found `0` restricted path or private-control marker hits.
 
 ## Artifact digests
 
@@ -232,13 +268,12 @@ closed-loop and readback checks.
 
 ## Next acceptance work
 
-1. Run the real T2-to-T1 closed loop for the verified 11-task public test
-   bundle and 23-task public training bundle.
-2. Use the reviewer evidence export on every expanded batch and archive the
-   resulting `review_evidence_sha256` with the batch receipt.
-3. Add narrow T1 promotions only where evidence is exact and reproducible. Do
+1. Add narrow T1 promotions only where evidence is exact and reproducible. Do
    not globally lower the finalized threshold and do not auto-finalize records
    with known incorrect entry-point evidence.
-4. Continue the remaining 35-task materialization backlog through identifier
+2. Continue the remaining 36-task materialization backlog through identifier
    subset policy, local repository refresh, public metadata refresh, and manual
    review where no direct-child policy can be justified.
+3. Turn the expanded reviewer evidence into the final submission-facing
+   narrative: every `manual_review` must explain which exact facts passed,
+   which facts are still semantic, and why no hidden answer was used.
