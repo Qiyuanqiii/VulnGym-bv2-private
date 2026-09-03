@@ -147,6 +147,49 @@ class OfflineAuthoringHelperTests(unittest.TestCase):
         self.assertEqual("defer", response["action"])
         self.assertEqual("no_selectable_relationship", response["reason_code"])
 
+    def test_d2_builder_advances_after_read_without_target_location(self) -> None:
+        plan = TaskPlan(
+            task_id="VG-TEST-0123456789ABCDEF0123",
+            split="test",
+            target_path="src/app.py",
+            target_index=0,
+            inventory_cursor=0,
+            critical_line=40,
+            critical_query="exec(",
+            critical_token="exec",
+            entry_line=10,
+            entry_token="handler",
+            relation_line=20,
+            relation_token="helper",
+            score=1,
+        )
+        payload = {
+            "allowed_actions": ("inventory", "search", "read", "advance"),
+            "phase": "SCOUT",
+            "catalog": {
+                "nodes": (
+                    {
+                        "type": "FIL",
+                        "path": "src/app.py",
+                        "ref": {"artifact_id": "ART-inv", "node_id": "FIL-1"},
+                    },
+                    {
+                        "type": "MAT",
+                        "path": "src/app.py",
+                        "line": 40,
+                        "excerpt": "os.exec(user_input)",
+                        "ref": {"artifact_id": "ART-search", "node_id": "MAT-1"},
+                    },
+                ),
+            },
+            "last_result": {
+                "action": "read",
+                "summary": {"span_count": 2},
+            },
+        }
+
+        self.assertEqual({"action": "advance"}, _build_d2_response(payload, plan))
+
     def test_scan_prefers_actual_call_over_import_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)

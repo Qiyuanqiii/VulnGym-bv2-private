@@ -956,6 +956,14 @@ def _next_link_cursor(payload: Mapping[str, Any]) -> int | None:
     return None
 
 
+def _last_result_action(payload: Mapping[str, Any]) -> str | None:
+    last_result = payload.get("last_result")
+    if not isinstance(last_result, Mapping):
+        return None
+    action = last_result.get("action")
+    return action if isinstance(action, str) else None
+
+
 def _dedupe_refs(refs: Sequence[dict[str, str]]) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for ref in refs:
@@ -1088,6 +1096,7 @@ def _build_d2_response(payload: Mapping[str, Any], plan: TaskPlan) -> dict[str, 
     if not isinstance(allowed, Sequence) or isinstance(allowed, (str, bytes)):
         return None
     allowed_set = set(str(item) for item in allowed if isinstance(item, str))
+    last_action = _last_result_action(payload)
 
     target_ref = _fileref_for_path(payload, plan.target_path)
     if target_ref is None and "inventory" in allowed_set:
@@ -1131,7 +1140,7 @@ def _build_d2_response(payload: Mapping[str, Any], plan: TaskPlan) -> dict[str, 
             }
         if critical_matches and not _loc_nodes_near_line(
             payload, path=plan.target_path, line=plan.critical_line, radius=4
-        ) and "read" in allowed_set:
+        ) and last_action != "read" and "read" in allowed_set:
             locations = _read_locations_from_matches(
                 critical_matches,
                 preferred_lines=[plan.critical_line, plan.entry_line],
@@ -1141,7 +1150,12 @@ def _build_d2_response(payload: Mapping[str, Any], plan: TaskPlan) -> dict[str, 
                 return {"action": "read", "locations": locations[:MAX_READ_SPANS]}
 
     if phase == "SCOUT" and "advance" in allowed_set:
-        if _loc_nodes_near_line(payload, path=plan.target_path, line=plan.critical_line, radius=8):
+        if (
+            last_action == "read"
+            or _loc_nodes_near_line(
+                payload, path=plan.target_path, line=plan.critical_line, radius=8
+            )
+        ):
             return {"action": "advance"}
 
     if phase == "ANALYZE":
@@ -1162,7 +1176,7 @@ def _build_d2_response(payload: Mapping[str, Any], plan: TaskPlan) -> dict[str, 
                     "limit": MAX_SEARCH_RESULTS,
                     "query": plan.relation_query,
                 }
-            if relation_matches and "read" in allowed_set:
+            if relation_matches and last_action != "read" and "read" in allowed_set:
                 missing_relation_context = any(
                     not _loc_nodes_near_line(
                         payload, path=plan.target_path, line=line, radius=4
