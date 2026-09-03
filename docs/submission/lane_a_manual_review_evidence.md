@@ -12,7 +12,9 @@ input failures:
 | --- | --- | ---: | ---: | ---: | ---: |
 | `test11` | test | 11 | 8 | 3 | 0 |
 | `train23` | train | 23 | 19 | 4 | 0 |
-| Total | mixed | 34 | 27 | 7 | 0 |
+| `identifier-subset-v2/test1` | test | 1 | 1 | 0 | 0 |
+| `identifier-subset-v2/train4` | train | 4 | 4 | 0 | 0 |
+| Total | mixed | 39 | 32 | 7 | 0 |
 
 The validator currently proves these fields deterministically for every
 complete candidate/report pair:
@@ -44,13 +46,17 @@ Observed reviewer-evidence aggregation:
 | --- | ---: | ---: | ---: | --- | --- |
 | `test11` | 72 | 2 | 54 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
 | `train23` | 171 | 2 | 131 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
+| `identifier-subset-v2/test1` | 9 | 0 | 7 | none | `critical_operation`, `entry_point`, `trace`, title/category |
+| `identifier-subset-v2/train4` | 36 | 1 | 27 | `entry_point` | `critical_operation`, `entry_point`, `trace`, title/category |
 
 Producer-deferred rows are also expected in this conservative route:
 
-| Batch | `guard_only_exists_on_fix_side` | `no_entry_candidate` |
-| --- | ---: | ---: |
-| `test11` | 3 | 0 |
-| `train23` | 3 | 1 |
+| Batch | `guard_only_exists_on_fix_side` | `no_entry_candidate` | `required_checks_unavailable` |
+| --- | ---: | ---: | ---: |
+| `test11` | 3 | 0 | 0 |
+| `train23` | 3 | 1 | 0 |
+| `identifier-subset-v2/test1` | 0 | 0 | 0 |
+| `identifier-subset-v2/train4` | 0 | 0 | 1 |
 
 The reviewer evidence files are path-free summaries. They include status,
 completion state, Entry/report digests, field-level status counts,
@@ -64,6 +70,8 @@ Digest anchors:
 | --- | --- | --- |
 | `test11` | `41c43389faa823a115890637bb4b85cf770dde8b87defde751b53e6efb18c57b` | `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a` |
 | `train23` | `c2d30c379a8742d251c2d82c575da6c358add86f7d2046cf5af0e47c0a444cc0` | `a1c49ec59abbbe0df612826594026a436158aab2c34a5c126f89ba7bf2ca8d72` |
+| `identifier-subset-v2/test1` | `c2151999e0c68a6c38c6f02ea5c6dfe9c189169251ee948b57585f6bf5a5763d` | `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652` |
+| `identifier-subset-v2/train4` | `797f75f8df8bca392d30c542fb494793ec5b4e6b137e4e540607312eb973e5fe` | `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0` |
 
 The next engineering choice is therefore not whether the pipeline runs. It
 does. The choice is how aggressively to promote semantic facts:

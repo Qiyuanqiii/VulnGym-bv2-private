@@ -47,6 +47,8 @@ from vulngym_agent.lane_a_assignment_materializer import (
     _parse_report,
     compute_lane_a_assignment_input_pins,
 )
+from vulngym_agent.evidence.advisory import extract_advisory_facts
+from vulngym_agent.evidence.package import LoadedEvidenceFile
 from vulngym_agent.lane_a_task_bundle import (
     LaneATaskBundleError,
     _assert_chain,
@@ -63,7 +65,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 
 CONTRACT_VERSION: Final[int] = 1
 KIND: Final[str] = "vulngym.lane-a-public-batch-preparation.v1"
-FALLBACK_POLICY_VERSION: Final[int] = 1
+FALLBACK_POLICY_VERSION: Final[int] = 2
 LOCAL_CHILD_PROBE_VERSION: Final[int] = 1
 TASKS_FILENAME: Final[str] = "tasks.jsonl"
 REPORTS_FILENAME: Final[str] = "reports.jsonl"
@@ -452,16 +454,40 @@ def _has_github_commit_reference(advisory: Mapping[str, Any]) -> bool:
     )
 
 
+def _identifiers_match(
+    report: Mapping[str, Any],
+    advisory: Mapping[str, Any],
+    *,
+    allow_identifier_subset_fallback: bool = False,
+) -> bool:
+    actual_identifiers = {item["value"] for item in advisory["identifiers"]}
+    report_identifiers = set(report["vuln_ids"])
+    if actual_identifiers == report_identifiers:
+        return True
+    if not allow_identifier_subset_fallback:
+        return False
+    report_id = str(report["report_id"])
+    if not report_identifiers:
+        return False
+    if report_id not in actual_identifiers or report_id not in report_identifiers:
+        return False
+    return report_identifiers < actual_identifiers or actual_identifiers < report_identifiers
+
+
 def _validate_materializer_anchor(
     task: BenchmarkTask,
     report: Mapping[str, Any],
     advisory: Mapping[str, Any],
     repository: GitRepository,
     *,
+    allow_identifier_subset_fallback: bool = False,
     allow_local_direct_child_fallback: bool = False,
 ) -> str:
-    actual_identifiers = {item["value"] for item in advisory["identifiers"]}
-    if actual_identifiers != set(report["vuln_ids"]):
+    if not _identifiers_match(
+        report,
+        advisory,
+        allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+    ):
         raise _error(
             "advisory_identifier_mismatch",
             "public advisory identifiers differ from the selected public report",
@@ -506,7 +532,62 @@ def _validate_materializer_anchor(
             "ambiguous_fix_candidate" if len(matching) > 1 else "fix_parent_mismatch",
             "the selected advisory has no unique single-parent fix for the vulnerable commit",
         )
+    _validate_materialized_advisory_facts(
+        report,
+        advisory,
+        matching[0],
+        allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+    )
     return matching[0]
+
+
+def _validate_materialized_advisory_facts(
+    report: Mapping[str, Any],
+    advisory: Mapping[str, Any],
+    fix_commit: str,
+    *,
+    allow_identifier_subset_fallback: bool = False,
+) -> None:
+    report_id = str(report["report_id"])
+    advisory_value = {
+        "description": advisory["description"],
+        "fix_commits": [fix_commit],
+        "ghsa_id": advisory["ghsa_id"],
+        "identifiers": [dict(item) for item in advisory["identifiers"]],
+        "source_link": report["source_link"],
+        "summary": advisory["summary"],
+    }
+    advisory_wire = _line(advisory_value)
+    facts = extract_advisory_facts(
+        LoadedEvidenceFile(
+            kind="advisory",
+            relative_path=f"advisory-{report_id}.json",
+            text=advisory_wire.decode("utf-8", errors="strict"),
+            byte_size=len(advisory_wire),
+            sha256=hashlib.sha256(advisory_wire).hexdigest(),
+        )
+    )
+    advisory_ids = tuple(str(item["value"]) for item in advisory["identifiers"])
+    report_ids = tuple(str(item) for item in report["vuln_ids"])
+    expected_ids = (
+        advisory_ids
+        if allow_identifier_subset_fallback and set(advisory_ids) != set(report_ids)
+        else report_ids
+    )
+    if facts.vuln_ids != expected_ids:
+        raise _error(
+            "advisory_fact_identifier_mismatch",
+            "the materialized advisory exposes additional vulnerability identifiers",
+        )
+    if (
+        facts.ghsa_ids != (report_id,)
+        or facts.fix_commits != (fix_commit,)
+        or facts.source_link != report["source_link"]
+    ):
+        raise _error(
+            "advisory_ambiguous",
+            "the materialized advisory facts are not uniquely bound to the selected fix",
+        )
 
 
 def _materializer_anchor_diagnosis(
@@ -514,6 +595,8 @@ def _materializer_anchor_diagnosis(
     reports: Sequence[Mapping[str, Any]],
     advisories_by_ghsa: Mapping[str, Mapping[str, Any]],
     repository: GitRepository,
+    *,
+    allow_identifier_subset_fallback: bool = False,
 ) -> dict[str, object]:
     """Return a compact report-level anchor diagnosis for one public task."""
 
@@ -527,7 +610,11 @@ def _materializer_anchor_diagnosis(
             continue
         try:
             fix_commit = _validate_materializer_anchor(
-                task, report, advisory, repository
+                task,
+                report,
+                advisory,
+                repository,
+                allow_identifier_subset_fallback=allow_identifier_subset_fallback,
             )
         except LaneAPublicBatchError as exc:
             blockers.append({"code": exc.code, "report_id": report_id})
@@ -560,6 +647,7 @@ def _select_materializer_anchor(
     advisories_by_ghsa: Mapping[str, Mapping[str, Any]],
     repository: GitRepository,
     *,
+    allow_identifier_subset_fallback: bool = False,
     allow_local_direct_child_fallback: bool = False,
 ) -> str:
     passes: list[dict[str, str]] = []
@@ -581,6 +669,7 @@ def _select_materializer_anchor(
                 report,
                 advisory,
                 repository,
+                allow_identifier_subset_fallback=allow_identifier_subset_fallback,
                 allow_local_direct_child_fallback=task_allows_local_direct_child,
             )
         except LaneAPublicBatchError as exc:
@@ -869,6 +958,7 @@ def prepare_lane_a_public_batch(
     task_ids: Sequence[str],
     output_dir: Path,
     advisory_fetcher: AdvisoryFetcher | None = None,
+    allow_identifier_subset_fallback: bool = False,
     allow_local_direct_child_fallback: bool = False,
 ) -> dict[str, object]:
     """Prepare and atomically publish one explicit public Lane A batch."""
@@ -907,6 +997,7 @@ def prepare_lane_a_public_batch(
             reports_by_task[task.task_id],
             by_ghsa,
             repositories[task.repo_url.casefold()].repository,
+            allow_identifier_subset_fallback=allow_identifier_subset_fallback,
             allow_local_direct_child_fallback=allow_local_direct_child_fallback,
         )
 
@@ -936,6 +1027,7 @@ def prepare_lane_a_public_batch(
         "pins": pins,
         "summary": {
             "advisory_count": len(advisories),
+            "allow_identifier_subset_fallback": allow_identifier_subset_fallback,
             "allow_local_direct_child_fallback": allow_local_direct_child_fallback,
             "fix_commits": [
                 {"fix_commit": fix_commits[task.task_id], "task_id": task.task_id}
@@ -961,6 +1053,7 @@ def diagnose_lane_a_public_batch(
     local_repo_root: Path,
     task_ids: Sequence[str],
     advisory_fetcher: AdvisoryFetcher | None = None,
+    allow_identifier_subset_fallback: bool = False,
 ) -> dict[str, object]:
     """Diagnose public-materialization readiness without publishing outputs."""
 
@@ -1006,6 +1099,7 @@ def diagnose_lane_a_public_batch(
             reports_by_task[task.task_id],
             task_advisories,
             repository,
+            allow_identifier_subset_fallback=allow_identifier_subset_fallback,
         )
         blockers = list(diagnosis["blockers"])
         for report in reports_by_task[task.task_id]:
@@ -1085,6 +1179,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--local-repo-root", required=True, type=Path)
     parser.add_argument("--task-id", action="append", required=True, dest="task_ids")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--allow-identifier-subset-fallback", action="store_true")
     parser.add_argument("--allow-local-direct-child-fallback", action="store_true")
     parser.add_argument("--diagnose-only", action="store_true")
     return parser
@@ -1099,6 +1194,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 public_reports_file=args.public_reports_file,
                 local_repo_root=args.local_repo_root,
                 task_ids=args.task_ids,
+                allow_identifier_subset_fallback=args.allow_identifier_subset_fallback,
             )
         else:
             if args.output_dir is None:
@@ -1109,6 +1205,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 local_repo_root=args.local_repo_root,
                 task_ids=args.task_ids,
                 output_dir=args.output_dir,
+                allow_identifier_subset_fallback=args.allow_identifier_subset_fallback,
                 allow_local_direct_child_fallback=args.allow_local_direct_child_fallback,
             )
     except LaneAPublicBatchError as exc:

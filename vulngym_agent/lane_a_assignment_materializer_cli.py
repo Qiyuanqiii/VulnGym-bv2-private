@@ -58,6 +58,7 @@ def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--expected-repo-map-sha256", type=_digest, required=True)
     parser.add_argument("--expected-repo-map-wire-sha256", type=_digest, required=True)
     parser.add_argument("--expected-task-count", type=_count, required=True)
+    parser.add_argument("--allow-identifier-subset-fallback", action="store_true")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -130,6 +131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.output_dir,
                     *_inputs(args),
                     protected_paths=args.protected_path,
+                    allow_identifier_subset_fallback=args.allow_identifier_subset_fallback,
                     **_pins(args),
                 )
             except LaneAAssignmentMaterializerError as error:
@@ -143,6 +145,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 *_inputs(args),
                 expected_materialization_sha256=args.expected_materialization_sha256,
                 expected_manifest_wire_sha256=args.expected_manifest_wire_sha256,
+                allow_identifier_subset_fallback=args.allow_identifier_subset_fallback,
                 **_pins(args),
             )
             operation = "verify"

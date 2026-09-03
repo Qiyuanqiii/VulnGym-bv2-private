@@ -194,6 +194,7 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
         *,
         output_name: str = "prepared",
         fetcher=None,
+        allow_identifier_subset_fallback: bool = False,
         allow_local_direct_child_fallback: bool = False,
     ):
         return prep.prepare_lane_a_public_batch(
@@ -203,6 +204,7 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             task_ids=[self.task_id],
             output_dir=self.outputs / output_name,
             advisory_fetcher=fetcher or (lambda _ghsa: self._advisory()),
+            allow_identifier_subset_fallback=allow_identifier_subset_fallback,
             allow_local_direct_child_fallback=allow_local_direct_child_fallback,
         )
 
@@ -330,6 +332,59 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             [{"fix_commit": self.fix, "task_id": self.task_id}],
         )
 
+    def test_prepare_can_allow_identifier_subset_fallback(self) -> None:
+        self.reports_file.write_bytes(
+            _canonical_line(
+                self._report(
+                    self.report_id,
+                    self.vulnerable,
+                    vuln_ids=[self.report_id],
+                )
+            )
+        )
+
+        with self.assertRaises(prep.LaneAPublicBatchError) as captured:
+            self._prepare(output_name="subset-default")
+        self.assertEqual(captured.exception.code, "advisory_identifier_mismatch")
+
+        result = self._prepare(
+            output_name="subset",
+            allow_identifier_subset_fallback=True,
+        )
+
+        self.assertTrue((self.outputs / "subset").exists())
+        self.assertTrue(result["summary"]["allow_identifier_subset_fallback"])
+        self.assertEqual(
+            result["summary"]["fix_commits"],
+            [{"fix_commit": self.fix, "task_id": self.task_id}],
+        )
+
+    def test_identifier_subset_fallback_rejects_extra_advisory_fact_id(self) -> None:
+        extra_ghsa = "GHSA-3333-3333-3333"
+        self.reports_file.write_bytes(
+            _canonical_line(
+                self._report(
+                    self.report_id,
+                    self.vulnerable,
+                    vuln_ids=[self.cve_id, extra_ghsa, self.report_id],
+                )
+            )
+        )
+
+        def fetcher(_ghsa: str) -> dict[str, object]:
+            advisory = self._advisory()
+            advisory["description"] = f"Related advisory: {extra_ghsa}."
+            return advisory
+
+        with self.assertRaises(prep.LaneAPublicBatchError) as captured:
+            self._prepare(
+                output_name="subset-extra-fact",
+                fetcher=fetcher,
+                allow_identifier_subset_fallback=True,
+            )
+        self.assertEqual(captured.exception.code, "advisory_fact_identifier_mismatch")
+        self.assertFalse((self.outputs / "subset-extra-fact").exists())
+
     def test_prepare_uses_unique_passing_report_candidate(self) -> None:
         alternate_report = "GHSA-3333-3333-3333"
         self.reports_file.write_bytes(
@@ -396,7 +451,7 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
 
         self.assertEqual(result["summary"]["status_counts"], {"prepared": 1})
         self.assertEqual(result["summary"]["fallback_plan_counts"], {"strict_ready": 1})
-        self.assertEqual(result["summary"]["fallback_policy_version"], 1)
+        self.assertEqual(result["summary"]["fallback_policy_version"], 2)
         task = result["tasks"][0]
         self.assertEqual(task["status"], "prepared")
         self.assertEqual(task["fallback_plan"]["action"], "strict_ready")
@@ -440,7 +495,7 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
                     "probe_version": 1,
                     "status": "unique_direct_child",
                 },
-                "policy_version": 1,
+                "policy_version": 2,
             },
         )
         self.assertEqual(

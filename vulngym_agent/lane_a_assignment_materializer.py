@@ -69,11 +69,15 @@ CONTRACT_VERSION: Final[int] = 1
 MATERIALIZATION_KIND: Final[str] = "vulngym.lane-a-assignment-materialization.v1"
 POLICY_ID: Final[str] = "lexicographic-report-entry-v1"
 LOCAL_DIRECT_CHILD_POLICY_ID: Final[str] = "local-direct-child-fallback-v1"
+IDENTIFIER_SUBSET_POLICY_ID: Final[str] = "public-identifier-subset-fallback-v1"
 ANCHOR_SEMANTICS: Final[str] = (
     "deterministic_evaluation_anchor_not_finding_provenance"
 )
 LOCAL_DIRECT_CHILD_ANCHOR_SEMANTICS: Final[str] = (
     "public_identifier_match_with_unique_local_single_parent_child"
+)
+IDENTIFIER_SUBSET_ANCHOR_SEMANTICS: Final[str] = (
+    "selected_ghsa_identifier_subset_match_with_public_fix_reference"
 )
 ASSIGNMENTS_FILENAME: Final[str] = "assignments.jsonl"
 COVERAGE_AUDIT_FILENAME: Final[str] = "coverage-audit.jsonl"
@@ -554,6 +558,27 @@ def _candidate_commits(advisory: _Advisory, repo_url: str) -> tuple[str, ...]:
     return tuple(sorted(candidates))
 
 
+def _identifier_anchor_policy(
+    report: _Report,
+    advisory: _Advisory,
+    *,
+    allow_identifier_subset_fallback: bool = False,
+) -> tuple[str, str] | None:
+    actual_identifiers = {item["value"] for item in advisory.identifiers}
+    report_identifiers = set(report.vuln_ids)
+    if actual_identifiers == report_identifiers:
+        return POLICY_ID, ANCHOR_SEMANTICS
+    if not allow_identifier_subset_fallback:
+        return None
+    if not report_identifiers:
+        return None
+    if report.report_id not in actual_identifiers or report.report_id not in report_identifiers:
+        return None
+    if report_identifiers < actual_identifiers or actual_identifiers < report_identifiers:
+        return IDENTIFIER_SUBSET_POLICY_ID, IDENTIFIER_SUBSET_ANCHOR_SEMANTICS
+    return None
+
+
 def _has_github_commit_reference(advisory: _Advisory) -> bool:
     return any(_COMMIT_URL_RE.fullmatch(reference) is not None for reference in advisory.references)
 
@@ -621,10 +646,17 @@ def _try_anchor_selection(
     report: _Report,
     advisory: _Advisory,
     repository: GitRepository,
+    *,
+    allow_identifier_subset_fallback: bool = False,
 ) -> tuple[_AnchorSelection | None, str | None]:
-    actual_identifiers = {item["value"] for item in advisory.identifiers}
-    if actual_identifiers != set(report.vuln_ids):
+    identifier_policy = _identifier_anchor_policy(
+        report,
+        advisory,
+        allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+    )
+    if identifier_policy is None:
         return None, "advisory_identifier_mismatch"
+    anchor_policy, anchor_semantics = identifier_policy
     candidates = _candidate_commits(advisory, task.repo_url)
     if not candidates:
         return None, "fix_candidate_missing"
@@ -647,9 +679,13 @@ def _try_anchor_selection(
             entry_id=report.entry_ids[0],
             candidate_fix_commits=candidates,
             fix_commit=matching[0],
-            anchor_policy=POLICY_ID,
-            anchor_semantics=ANCHOR_SEMANTICS,
-            candidate_source="public_advisory_commit_reference",
+            anchor_policy=anchor_policy,
+            anchor_semantics=anchor_semantics,
+            candidate_source=(
+                "public_advisory_commit_reference"
+                if anchor_policy == POLICY_ID
+                else "public_advisory_commit_reference_identifier_subset"
+            ),
         ),
         None,
     )
@@ -660,6 +696,8 @@ def _select_anchor(
     reports: Sequence[_Report],
     advisories: Mapping[str, _Advisory],
     repository: GitRepository,
+    *,
+    allow_identifier_subset_fallback: bool = False,
 ) -> _AnchorSelection:
     selections: list[_AnchorSelection] = []
     failures: list[str] = []
@@ -669,7 +707,11 @@ def _select_anchor(
             failures.append("advisory_missing")
             continue
         selection, failure = _try_anchor_selection(
-            task, report, advisory, repository
+            task,
+            report,
+            advisory,
+            repository,
+            allow_identifier_subset_fallback=allow_identifier_subset_fallback,
         )
         if selection is None:
             assert failure is not None
@@ -763,7 +805,11 @@ def _storage_seal(repository: GitRepository) -> object:
     return repository.capture_storage_seal()
 
 
-def _build_payloads(inputs: _Inputs) -> tuple[dict[str, bytes], LaneAAssignmentMaterializationManifestV1]:
+def _build_payloads(
+    inputs: _Inputs,
+    *,
+    allow_identifier_subset_fallback: bool = False,
+) -> tuple[dict[str, bytes], LaneAAssignmentMaterializationManifestV1]:
     by_snapshot: dict[tuple[str, str], list[_Report]] = {}
     for report in inputs.reports:
         by_snapshot.setdefault((_repo_key(report.repo_url), report.commit), []).append(report)
@@ -802,7 +848,13 @@ def _build_payloads(inputs: _Inputs) -> tuple[dict[str, bytes], LaneAAssignmentM
                 raise _error("repository_unsafe", "an offline repository snapshot is unavailable or unsafe") from None
             repositories[repo_key] = repository
             repo_seals[repo_key] = initial_seal
-        anchor = _select_anchor(task, reports, inputs.advisories, repository)
+        anchor = _select_anchor(
+            task,
+            reports,
+            inputs.advisories,
+            repository,
+            allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+        )
         selected = anchor.report
         entry_id = anchor.entry_id
         advisory = inputs.advisories[selected.report_id]
@@ -840,10 +892,15 @@ def _build_payloads(inputs: _Inputs) -> tuple[dict[str, bytes], LaneAAssignmentM
                 sha256=hashlib.sha256(advisory_wire).hexdigest(),
             )
         )
-        if advisory_facts.vuln_ids != selected.vuln_ids:
+        expected_advisory_ids = (
+            tuple(item["value"] for item in advisory.identifiers)
+            if anchor.anchor_policy == IDENTIFIER_SUBSET_POLICY_ID
+            else selected.vuln_ids
+        )
+        if advisory_facts.vuln_ids != expected_advisory_ids:
             raise _error(
-                "advisory_identifier_mismatch",
-                "materialized advisory identifiers differ from the public report",
+                "advisory_fact_identifier_mismatch",
+                "materialized advisory facts expose additional vulnerability identifiers",
             )
         if (
             advisory_facts.ghsa_ids != (selected.report_id,)
@@ -1179,10 +1236,15 @@ def _common_build(
     reports_file: str | os.PathLike[str],
     advisory_cache_file: str | os.PathLike[str],
     repo_map_file: str | os.PathLike[str],
+    *,
+    allow_identifier_subset_fallback: bool = False,
     **pins: object,
 ) -> tuple[_Inputs, dict[str, bytes], LaneAAssignmentMaterializationManifestV1]:
     inputs = _load_inputs(public_tasks_file, reports_file, advisory_cache_file, repo_map_file, **pins)
-    payloads, manifest = _build_payloads(inputs)
+    payloads, manifest = _build_payloads(
+        inputs,
+        allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+    )
     try:
         repeated = _load_inputs(
             public_tasks_file,
@@ -1200,7 +1262,10 @@ def _common_build(
         }:
             raise _error("input_changed", "a pinned materializer input changed") from None
         raise
-    repeated_payloads, repeated_manifest = _build_payloads(repeated)
+    repeated_payloads, repeated_manifest = _build_payloads(
+        repeated,
+        allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+    )
     if repeated.wires != inputs.wires or repeated_payloads != payloads or repeated_manifest != manifest:
         raise _error("input_changed", "pinned materializer inputs changed")
     return repeated, payloads, manifest
@@ -1214,10 +1279,16 @@ def write_lane_a_assignment_materialization(
     repo_map_file: str | os.PathLike[str],
     *,
     protected_paths: Sequence[str | os.PathLike[str]] = (),
+    allow_identifier_subset_fallback: bool = False,
     **pins: object,
 ) -> LaneAAssignmentMaterializationManifestV1:
     inputs, payloads, manifest = _common_build(
-        public_tasks_file, reports_file, advisory_cache_file, repo_map_file, **pins
+        public_tasks_file,
+        reports_file,
+        advisory_cache_file,
+        repo_map_file,
+        allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+        **pins,
     )
     return _publish(output_dir, payloads, manifest, inputs, protected_paths)
 
@@ -1231,12 +1302,18 @@ def verify_lane_a_assignment_materialization(
     *,
     expected_materialization_sha256: str,
     expected_manifest_wire_sha256: str,
+    allow_identifier_subset_fallback: bool = False,
     **pins: object,
 ) -> LaneAAssignmentMaterializationManifestV1:
     expected_materialization = _require_sha256(expected_materialization_sha256, "expected_materialization_sha256")
     expected_manifest_wire = _require_sha256(expected_manifest_wire_sha256, "expected_manifest_wire_sha256")
     _inputs, expected_payloads, manifest = _common_build(
-        public_tasks_file, reports_file, advisory_cache_file, repo_map_file, **pins
+        public_tasks_file,
+        reports_file,
+        advisory_cache_file,
+        repo_map_file,
+        allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+        **pins,
     )
     if manifest.materialization_sha256 != expected_materialization or manifest.manifest_wire_sha256 != expected_manifest_wire:
         raise _error("materialization_pin_mismatch", "expected materialization pins differ")
@@ -1256,6 +1333,7 @@ __all__ = [
     "ADVISORY_CACHE_DOMAIN",
     "ASSIGNMENTS_FILENAME",
     "COVERAGE_AUDIT_FILENAME",
+    "IDENTIFIER_SUBSET_POLICY_ID",
     "LaneAAssignmentMaterializationManifestV1",
     "LaneAAssignmentMaterializerError",
     "MANIFEST_FILENAME",

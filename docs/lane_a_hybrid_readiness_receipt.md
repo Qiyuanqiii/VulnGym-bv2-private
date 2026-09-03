@@ -98,18 +98,23 @@ was rejected with `non_source_diff` and remains out of the automatic batch.
 | Public train | 11 | 10 | 1 |
 | Total | 14 | 13 | 1 |
 
-Current machine-materializable coverage with the strict and fallback policies
-combined, after full source-diff validation:
+Current machine-materializable coverage with the strict, local direct-child
+fallback, and identifier-subset fallback policies combined, after full
+source-diff and materialized-advisory-fact validation:
 
-| Split | Tasks | Strict materialized | Fallback materialized | Source-diff rejected | Total materialized | Rate |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Public test | 20 | 8 | 3 | 0 | 11 | 55.0% |
-| Public train | 50 | 13 | 10 | 2 | 23 | 46.0% |
-| Total | 70 | 21 | 13 | 2 | 34 | 48.6% |
+| Split | Tasks | Strict materialized | Local-child fallback materialized | Identifier-subset materialized | Validated automatic-policy rejected | Total materialized | Rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Public test | 20 | 8 | 3 | 1 | 0 | 12 | 60.0% |
+| Public train | 50 | 13 | 10 | 4 | 3 | 27 | 54.0% |
+| Total | 70 | 21 | 13 | 5 | 3 | 39 | 55.7% |
 
 The rejected training tasks are `VG-TRAIN-43AC81B29F131DE6F550` from the strict
 candidate set and `VG-TRAIN-640FF6DE344026468477` from the local direct-child
-fallback set. Both are kept out of the automatic Lane A batch.
+fallback set. Identifier-subset fallback also rejected
+`VG-TRAIN-D335B462947DB4339FB5` because the materialized advisory facts expose
+an additional GHSA identifier in public prose and therefore cannot be uniquely
+bound without manual review or a stronger fact-isolation rule. These tasks are
+kept out of the automatic Lane A batch.
 
 Fallback materialization digests:
 
@@ -125,12 +130,21 @@ Combined materialization digests:
 | `test11` | 11 | `597c830fc0f0c3a3bda8c26e208be74fea2da8cc7d2a3916f68916f232e634e5` | `dd3e3a990bf4664825502d513628f1388cb3ca4ecbbcbcc811b9bed27e56148b` | `68fc4b6ee7b7311eeac9ab8041795e72ca6439bac8632a8f51bf25a33c4db881` |
 | `train23` | 23 | `fb91367fc08b6bbe455e40deb0a032adfc9d226d41232b0fcecafb05a535d5f4` | `58efc9205c844fcf329828d6e448d9e2269ccf1630c8c2417945ef5033d45861` | `3535765558f59804cb3d43c4c1f5847d0c56cae2fdf2bb7907cb0bc5c07f863a` |
 
+Identifier-subset v2 incremental materialization digests:
+
+| Batch | Tasks | Materialization SHA-256 | Manifest wire SHA-256 | Assignments wire SHA-256 |
+| --- | ---: | --- | --- | --- |
+| `test1` | 1 | `5cf347e0c6d88794bcff121efe1c4865a465633f278b5a0a33825f688003074a` | `1215ca68e7bf95cb8721587498ea7f0ea023820e75b341d5ae2f3390b64b7e70` | `f0b5297945ecbee60a7b7635100cf84bb487dfc98cbb90cd8401a1e2252993d7` |
+| `train4` | 4 | `eb15e47ae2f2f73921bff306168e08034e7a0d18e9fe449ee83ae9ffd7c915e8` | `9030a5a986ac14433ed34bfcd5c0e214ab0e8c3ae40c32ba71882e56b3ef090f` | `ea1532aa53e192a3d1d57e0da0549e7a1e69fc21567c06b651771800831fd53` |
+
 Verified Lane A task-bundle digests:
 
 | Bundle | Tasks | Bundle SHA-256 | Manifest wire SHA-256 | Run tasks wire SHA-256 |
 | --- | ---: | --- | --- | --- |
 | `test11` | 11 | `b0136dd45da74d7f11a3e4f56b72f922611b381627dde6064681f927cea7ddd8` | `a0c268d4bd3aa098665ed284e339f0f8bee25afd7e5451f7773df8390e4d1ef7` | `02d36aaebc31c3931b08fe13fd2882b6d85c96954d643aa56abe95bf214af3a4` |
 | `train23` | 23 | `022d1903ffc074cb2cd4ade53d461e95c49d058eaf442bf5768e441d110a1db8` | `1191aa2fbf53ad0942d0d178ce56d5a6ef469c43ab1bebdefcc5af5be0de6c6f` | `0d3e01ac78ad8a57652c22fd59cec2e97597db83ee56c2879520be5eb7ad9a96` |
+| `identifier-subset-v2/test1` | 1 | `a45d3e141460b465b086479132f7dba9c361d8cdee39daac92d84fa56a4eb346` | `f50b8d4ed0ae9e72752af7ced754612abfc2932f5485264f1dfa53d977605992` | `9963e72eaa55da50a59ed630335242817b73c918b9058e3adebb748de6ba7467` |
+| `identifier-subset-v2/train4` | 4 | `ef1a0eba5b89ac1b888290ad346d3214b2c1f7bc23fe56afc8c7fa2a970335f3` | `26764457d17c4f7f64ef39d5d0cf05abb526e4d2e37ce49665e4b2df8171e34c` | `87b7fceed24afad8f4cf186f3dd14305fac7756add52b0a7189435673316fdc8` |
 
 Both task bundles were verified against their pinned public task and assignment
 inputs, and a public marker scan over the committed bundle files returned no
@@ -182,6 +196,8 @@ Authoring summaries:
 | --- | ---: | --- | ---: | --- | --- |
 | `test11` | 11 | true | 27 | `manual_review=11` | `incorrect=2`, `uncertain=6` |
 | `train23` | 23 | true | 61 | `manual_review=23` | `incorrect=2`, `uncertain=17` |
+| `identifier-subset-v2/test1` | 1 | true | 3 | `manual_review=1` | `uncertain=1` |
+| `identifier-subset-v2/train4` | 4 | true | 12 | `manual_review=4` | `incorrect=1`, `uncertain=3` |
 
 Closed-loop runner summaries:
 
@@ -189,6 +205,8 @@ Closed-loop runner summaries:
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
 | `test11` | 11 | 11 | 11 | 0 | 0 | ok |
 | `train23` | 23 | 23 | 23 | 0 | 0 | ok |
+| `identifier-subset-v2/test1` | 1 | 1 | 1 | 0 | 0 | ok |
+| `identifier-subset-v2/train4` | 4 | 4 | 4 | 0 | 0 | ok |
 
 Reviewer evidence summaries:
 
@@ -196,6 +214,8 @@ Reviewer evidence summaries:
 | --- | ---: | ---: | --- |
 | `test11` | 8 | 3 | `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a` |
 | `train23` | 19 | 4 | `a1c49ec59abbbe0df612826594026a436158aab2c34a5c126f89ba7bf2ca8d72` |
+| `identifier-subset-v2/test1` | 1 | 0 | `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652` |
+| `identifier-subset-v2/train4` | 4 | 0 | `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0` |
 
 Expanded batch digests:
 
@@ -203,9 +223,14 @@ Expanded batch digests:
 | --- | --- | --- | --- | --- | --- | --- |
 | `test11` | `bac85d8812aa6264304526ab9450ad5bd76834b186a621d7f3abe6a78b2b1bd1` | `41c43389faa823a115890637bb4b85cf770dde8b87defde751b53e6efb18c57b` | `be4fdb904065063cc61f5a36b8c5a24454e7eea280a3256cda2ef0e84ca171de` | `e4d17d173ccd24f1536bf7383548a16db56f7e9dd4a6c1f352a0c0452fe862d2` | `b10e2da85b42b23cab02b7ecc222605aa425f4cfcb374823c625df1c86baff0f` | `a8e96613c0f7dfd4e93d1f17ed79b7c487ce273cdd8cea6463cace41f6e98538` |
 | `train23` | `da63ac0c59111570dfd66647736f41a84ab6641c09acb56a01bb8916823e4655` | `c2d30c379a8742d251c2d82c575da6c358add86f7d2046cf5af0e47c0a444cc0` | `5e8ddfe00aa29e1711932649b9695a30678864600b00fa2a45202a2e56f5b745` | `6f77234e1a1a73155ad8dfa07a2279ada65ef7eb2c3b6b3242c6464ca1eb5475` | `f21c634627a8d04b152e375b294f321ce66e0549e7adef7aa9dfa7359c7d18ae` | `be0fa4b02530d1003e813f2ec98ad5f5bf18a2f845c148245b86a81e3d2cbc92` |
+| `identifier-subset-v2/test1` | `fe8f6458f2b66e646fafb47fe1cbd0c87e7c387068a7c86e530fd4eefa94af9c` | `c2151999e0c68a6c38c6f02ea5c6dfe9c189169251ee948b57585f6bf5a5763d` | `c8b40e284877579b5254277f3132a7fe06123067d6877a3af35ec9703397b20b` | `e1fae809c8139c71f7c05ab8996584ba9be7d208f15ffcca9a68b883ee9fd089` | `c2259ac296e48d3a2a648f4ad7d5178a783ca2db376ba7f88fad7cf6e2525004` | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` |
+| `identifier-subset-v2/train4` | `58508e0083b0e96b086aea5d8c296fd63e3356e84e867c92e08e11c0ca1914c2` | `797f75f8df8bca392d30c542fb494793ec5b4e6b137e4e540607312eb973e5fe` | `cf487d6767064b6d7d6a81c0aebc631d3a385f8cb6577342deec948428d2b351` | `d8540ad5841ed9e866ea0e51360b0b67f611babc80ae36cddb4fbe3d147ea796` | `d4b608305e004a8ae6c5e2a66784799c0f5d22ffaa1670d48aa39570979d712f` | `83dc9d5425336b24d2b81a2c092bbd273b04ae9e384c750d7902d2fa879d95a2` |
 
 The expanded closed-loop and review evidence marker scan covered `30` generated
-public files and found `0` restricted path or private-control marker hits.
+public files and found `0` restricted path or private-control marker hits. The
+identifier-subset v2 incremental scan covered `61` generated files, excluding
+trusted local repo-map configuration files, and found `0` restricted marker or
+local-path hits.
 
 ## Artifact digests
 
@@ -271,7 +296,7 @@ closed-loop and readback checks.
 1. Add narrow T1 promotions only where evidence is exact and reproducible. Do
    not globally lower the finalized threshold and do not auto-finalize records
    with known incorrect entry-point evidence.
-2. Continue the remaining 36-task materialization backlog through identifier
+2. Continue the remaining 31-task materialization backlog through identifier
    subset policy, local repository refresh, public metadata refresh, and manual
    review where no direct-child policy can be justified.
 3. Turn the expanded reviewer evidence into the final submission-facing

@@ -184,13 +184,14 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
             "expected_task_count": pins["task_count"],
         }
 
-    def _build(self, name: str = "output"):
+    def _build(self, name: str = "output", **kwargs):
         return write_lane_a_assignment_materialization(
             self.output_root / name,
             self.tasks_path,
             self.reports_path,
             self.cache_path,
             self.repo_map_path,
+            **kwargs,
             **self._pins(),
         )
 
@@ -383,7 +384,7 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
         self._write_inputs()
         with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
             self._build()
-        self.assertEqual(caught.exception.code, "advisory_identifier_mismatch")
+        self.assertEqual(caught.exception.code, "advisory_fact_identifier_mismatch")
 
         self.cache[0]["description"] = "Fix commit " + self.alternate_fix
         self._write_inputs()
@@ -401,6 +402,39 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
             self._build()
         self.assertEqual(caught.exception.code, "advisory_identifier_mismatch")
 
+    def test_identifier_subset_fallback_materializes_only_when_enabled(self) -> None:
+        self.cache[0]["identifiers"] = [
+            {"type": "CVE", "value": "CVE-2026-12345"},
+            {"type": "GHSA", "value": "GHSA-1111-1111-1111"},
+        ]
+        self._write_inputs()
+
+        with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
+            self._build("default")
+        self.assertEqual(caught.exception.code, "advisory_identifier_mismatch")
+
+        manifest = self._build("subset", allow_identifier_subset_fallback=True)
+        output = self.output_root / "subset"
+        audit = json.loads((output / COVERAGE_AUDIT_FILENAME).read_bytes())
+        self.assertEqual(
+            audit["anchor_policy"], "public-identifier-subset-fallback-v1"
+        )
+        self.assertEqual(
+            audit["anchor_candidate_source"],
+            "public_advisory_commit_reference_identifier_subset",
+        )
+        verify_lane_a_assignment_materialization(
+            output,
+            self.tasks_path,
+            self.reports_path,
+            self.cache_path,
+            self.repo_map_path,
+            expected_materialization_sha256=manifest.materialization_sha256,
+            expected_manifest_wire_sha256=manifest.manifest_wire_sha256,
+            allow_identifier_subset_fallback=True,
+            **self._pins(),
+        )
+
     def test_advisory_cannot_omit_a_public_report_identifier(self) -> None:
         self.reports[0]["vuln_ids"] = [
             "CVE-2026-12345",
@@ -409,6 +443,18 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
         self._write_inputs()
         with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
             self._build()
+        self.assertEqual(caught.exception.code, "advisory_identifier_mismatch")
+
+    def test_identifier_subset_fallback_rejects_empty_report_identifiers(self) -> None:
+        self.reports[0]["vuln_ids"] = []
+        self.cache[0]["identifiers"] = [
+            {"type": "CVE", "value": "CVE-2026-12345"},
+            {"type": "GHSA", "value": "GHSA-1111-1111-1111"},
+        ]
+        self._write_inputs()
+
+        with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
+            self._build("empty-subset", allow_identifier_subset_fallback=True)
         self.assertEqual(caught.exception.code, "advisory_identifier_mismatch")
 
     def test_advisory_must_fit_downstream_t2_file_budget(self) -> None:
@@ -535,9 +581,9 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
         original = materializer._build_payloads
         calls = 0
 
-        def mutate_after_first(inputs):
+        def mutate_after_first(inputs, **kwargs):
             nonlocal calls
-            result = original(inputs)
+            result = original(inputs, **kwargs)
             calls += 1
             if calls == 1:
                 self.cache[0]["summary"] = "Changed after the first pass"
