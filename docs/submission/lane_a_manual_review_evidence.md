@@ -25,6 +25,14 @@ producer-deferred or incomplete rows. The added terminal reports are still
 `manual_review`: one is `uncertain`, and one is intentionally rejected as
 `incorrect`.
 
+A follow-up `.svelte` entry-search probe then improves the same workload from
+22/24 to 23/24 terminal candidate/report pairs. The newly completed row remains
+`manual_review` with an `uncertain` verdict; the single remaining non-terminal
+training row is stopped before report generation because the review anchor is
+only present on the fix side. Substituting this later probe would make the
+current 40-task covered set 36 complete candidate/report pairs and 4
+producer-deferred or incomplete rows, still with 0 finalized rows.
+
 The validator currently proves these fields deterministically for every
 complete candidate/report pair:
 

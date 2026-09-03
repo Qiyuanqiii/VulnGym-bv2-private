@@ -44,7 +44,7 @@ _LANGUAGES: Final[dict[str, str]] = {
     ".py": "python", ".pyw": "python",
     ".js": "javascript", ".jsx": "javascript",
     ".mjs": "javascript", ".cjs": "javascript",
-    ".ts": "typescript", ".tsx": "typescript",
+    ".ts": "typescript", ".tsx": "typescript", ".svelte": "typescript",
     ".java": "java", ".go": "go", ".rb": "ruby",
     ".php": "php", ".phtml": "php",
 }

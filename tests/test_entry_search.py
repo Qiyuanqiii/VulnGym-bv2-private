@@ -73,6 +73,12 @@ class EntryPointSearchTests(unittest.TestCase):
                 "const normalized = value.toLowerCase();\n"
                 "return normalized;\n"
             ),
+            "web/Widget.svelte": (
+                "<script lang=\"ts\">\n"
+                "  const value = input.trim();\n"
+                "</script>\n"
+                "<div>{value}</div>\n"
+            ),
         }
         for name, content in files.items():
             path = cls.repo_path / Path(*name.split("/"))
@@ -181,6 +187,21 @@ class EntryPointSearchTests(unittest.TestCase):
         self.assertEqual(candidate.matched_clue, "path:src/plain.ts")
         self.assertFalse(candidate.runtime_reachability_verified)
         self.assertFalse(candidate.semantic_role_verified)
+
+    def test_svelte_same_file_critical_path_gets_review_anchor(self) -> None:
+        result = EntryPointSearcher(self.repository).search(
+            self.commit,
+            paths=["web/Widget.svelte"],
+            critical_paths=["web/Widget.svelte"],
+        )
+        self.assertEqual(result.status, "uncertain")
+        self.assertEqual(result.fact_status, "correct")
+        self.assertEqual(len(result.candidates), 1)
+        candidate = result.candidates[0]
+        self.assertEqual(candidate.kind, "handler")
+        self.assertEqual(candidate.path, "web/Widget.svelte")
+        self.assertTrue(candidate.direct_critical_reference)
+        self.assertEqual(candidate.matched_clue, "path:web/Widget.svelte")
 
     def test_non_utf8_and_unsupported_files_are_uncertain_with_reasons(self) -> None:
         result = self.search(["src/non_utf8.py", "docs/readme.md"])

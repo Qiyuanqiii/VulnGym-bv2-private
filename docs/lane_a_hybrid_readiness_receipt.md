@@ -267,6 +267,7 @@ bundle until the sanitized public artifacts are regenerated.
 | Probe | Exact replay SHA-256 | Exact replay wire SHA-256 | Responses | Terminal candidate/report pairs | Producer-deferred or incomplete | Finalized |
 | --- | --- | --- | ---: | ---: | ---: | ---: |
 | `train24-v3-guard-anchor` | `e02e18f01ae7c48b6542acdc72255ab484af41db9060718fa5cd847345b98130` | `5a1f966bbf98a29665c91e8965de46dd002335def2e26176fcbf3cdbbb2bca6c` | 68 | 22 | 2 | 0 |
+| `train24-v4-svelte-entry` | `1b6b3abdfacba443b264a7457485c02720bea2ce16d22db62761db035679b1e6` | `e94ac5eef4ea121e3396ce0b57ea9dc7671cfb0a046c96b54dbf40b6cf3a1ca1` | 70 | 23 | 1 | 0 |
 
 The two additional terminal candidate/report pairs are
 `VG-TRAIN-727D94F6A27E96DB4DAC` (`uncertain`) and
@@ -276,6 +277,18 @@ are `VG-TRAIN-43AC81B29F131DE6F550` (`no_entry_candidate`) and
 probe replaces `train24-v2-review-anchor` in the current non-duplicated covered
 set, the 40-task covered status becomes 35 terminal candidate/report pairs, 5
 producer-deferred or incomplete rows, and 0 finalized rows.
+
+After adding `.svelte` to the bounded entry-search language set, a follow-up
+probe over the same 24 tasks moved `VG-TRAIN-43AC81B29F131DE6F550` from
+`no_entry_candidate` to complete `manual_review` with an `uncertain` verdict.
+The only remaining non-terminal training row in that probe is
+`VG-TRAIN-747C63B97771B863292B`
+(`guard_only_exists_on_fix_side`). The closed-loop runner accepted the replay
+with `tasks_run=24`, `manual_review=24`, `failed=0`, and `input_failures=0`.
+If this probe replaces `train24-v2-review-anchor` in the current
+non-duplicated covered set, the 40-task covered status becomes 36 terminal
+candidate/report pairs, 4 producer-deferred or incomplete rows, and 0 finalized
+rows.
 
 ## Artifact digests
 
