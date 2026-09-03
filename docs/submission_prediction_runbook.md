@@ -32,27 +32,24 @@ are finalized.
 
 ## Export
 
-Formal export is supported only on native POSIX hosts that provide
-descriptor-relative directory operations and atomic no-replace rename
-(`renameat2`). Run the final export and its native acceptance gate on Linux.
-Non-POSIX hosts, including Windows, fail with `platform_unsupported` before
-reading the source replay or changing the output. They may still run the
-read-only `verify` command against an existing submission.
+Formal export is supported on both POSIX and Windows-native development hosts.
+POSIX uses descriptor-relative directory operations and `renameat2` no-replace
+publication when the host provides them. Windows uses the same private staging
+directory, no-replace final rename, and post-publication readback checks, but
+without POSIX directory file descriptors.
 
 The replay dataset digest must come from a trusted channel outside the replay
 directory. The output directory must not exist. Keep the replay, output, and
 all protected inputs on disjoint filesystem objects; the writer checks both
 canonical paths and directory identities.
 
-```bash
-export TMPDIR=/srv/vulngym/tmp
-
-python -B -m vulngym_agent.submission_prediction_cli export \
-  --replay-dir /srv/vulngym/lane-a/test-replay \
-  --replay-dataset-sha256 <TRUSTED_REPLAY_DATASET_SHA256> \
-  --expected-task-count 20 \
-  --output-dir /srv/vulngym/lane-a/test-submission \
-  --protected-path /srv/vulngym/benchmark-private
+```powershell
+python -B -m vulngym_agent.submission_prediction_cli export `
+  --replay-dir D:\VulnGym-bv2-runtime\lane-a\test-replay `
+  --replay-dataset-sha256 <TRUSTED_REPLAY_DATASET_SHA256> `
+  --expected-task-count 20 `
+  --output-dir D:\VulnGym-bv2-runtime\lane-a\test-submission `
+  --protected-path D:\VulnGym-bv2-runtime\benchmark-private
 ```
 
 The fixed output contains:

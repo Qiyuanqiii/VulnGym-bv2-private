@@ -1970,12 +1970,6 @@ def write_submission_predictions(
     replay directory plus a separately trusted digest are the source of truth.
     """
 
-    if os.name != "posix":
-        raise SubmissionPredictionError(
-            "platform_unsupported",
-            "submission export requires POSIX descriptor-relative publication",
-        )
-
     source_digest = _require_sha256(
         expected_source_replay_dataset_sha256,
         "expected_source_replay_dataset_sha256",

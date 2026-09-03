@@ -117,11 +117,17 @@ python -B -m vulngym_agent.closed_loop_cli \
 - Windows-native `submission_prediction_cli review` 已回读上述 5 个固定 replay，
   task/complete/incomplete/input-failure/review digest 均与
   `docs/submission/lane_a_manual_review_evidence.md` 一致。
-- TODO：在 POSIX 主机执行 `docs/submission/submission_prediction_posix_export_runbook.md`：
-  用 `submission_prediction_cli export` 从固定 replay 生成三文件提交面，再用
-  `verify` 携带外部 replay/submission 双 pin 重读源 replay；Windows 原生会按设计
-  返回 `platform_unsupported`，不能把这个当成数据失败，也不能只验证输出自己的
-  manifest。
+- Windows-native `submission_prediction_cli export` 已解除平台硬拒绝；导出仍会拒绝
+  含缺失候选/报告对的 replay。当前 consolidated `train24` 可回读复核，
+  但因 19/24 complete、5/24 incomplete，仍不能生成完整三文件提交面。
+- Windows-native `export` + 双 pin `verify` 已实测通过两个 complete 子批次：
+  `identifier-subset-v2/test1` 的 `submission_sha256`
+  `d6aa6c769a09c1dc70e4a25de1030a868dc546e28cdde3130140a76cf4729694`，
+  `identifier-subset-v2/train4` 的 `submission_sha256`
+  `a4d9eb33443053da3000e94f5d5a2cf514981a718adf3e4401b46d68f6015534`。
+- TODO：按 `docs/submission/submission_prediction_posix_export_runbook.md`
+  对 complete=tasks 的 replay 执行 `export` 和双 pin `verify`；对 incomplete
+  replay，先补齐 T2 候选/报告对，或将其作为人工复核证据而非完整提交包。
 
 ### 4.3 Native Linux preflight
 

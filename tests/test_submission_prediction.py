@@ -174,7 +174,6 @@ class SubmissionReviewEvidenceTests(unittest.TestCase):
         self.assertFalse((root / "submission").exists())
 
 
-@unittest.skipUnless(os.name == "posix", "submission export requires POSIX")
 class SubmissionPredictionTests(unittest.TestCase):
     def setUp(self) -> None:
         fixture = orchestrator_fixtures.ClosedLoopOrchestratorTests()
@@ -872,17 +871,13 @@ class SubmissionPredictionCliStateTests(unittest.TestCase):
         self.assertIn("arguments rejected", stderr.getvalue())
 
 
-@unittest.skipIf(os.name == "posix", "non-POSIX fail-closed contract")
 class SubmissionPredictionNonPosixTests(unittest.TestCase):
-    def test_export_fails_before_reading_source_or_changing_output(self) -> None:
+    @unittest.skipIf(os.name == "posix", "Windows-specific export contract")
+    def test_export_validates_source_before_publishing_on_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             output = root / "submission"
             with patch.object(
-                submission_module,
-                "_read_source_predictions",
-                side_effect=AssertionError("source must not be read"),
-            ), patch.object(
                 submission_module,
                 "_publish_payloads",
                 side_effect=AssertionError("output must not be changed"),
@@ -894,17 +889,11 @@ class SubmissionPredictionNonPosixTests(unittest.TestCase):
                         expected_source_replay_dataset_sha256="a" * 64,
                         expected_task_count=1,
                     )
-            self.assertEqual(raised.exception.code, "platform_unsupported")
+            self.assertEqual(raised.exception.code, "path_check_failed")
             self.assertFalse(raised.exception.committed)
             self.assertFalse(output.exists())
 
-    def test_cli_rejects_export_but_still_dispatches_verify(self) -> None:
-        stderr = io.StringIO()
-        with redirect_stderr(stderr):
-            code = main(SubmissionPredictionCliStateTests._export_arguments())
-        self.assertEqual(code, submission_cli_module.EXIT_REJECTED)
-        self.assertIn("error[platform_unsupported]", stderr.getvalue())
-
+    def test_cli_dispatches_verify(self) -> None:
         bundle = SimpleNamespace(
             manifest=SubmissionPredictionCliStateTests._manifest()
         )
