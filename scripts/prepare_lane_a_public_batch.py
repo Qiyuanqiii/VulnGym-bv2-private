@@ -506,6 +506,12 @@ def _validate_materializer_anchor(
                     "a local direct-child fix candidate cannot be inspected",
                 ) from None
             if len(children) == 1:
+                _validate_materialized_advisory_facts(
+                    report,
+                    advisory,
+                    children[0],
+                    allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+                )
                 return children[0]
             if len(children) > 1:
                 raise _error(

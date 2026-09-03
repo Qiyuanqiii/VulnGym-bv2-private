@@ -288,6 +288,50 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
             "local_commit_graph_direct_child",
         )
 
+    def test_local_direct_child_identifier_subset_fallback_is_explicit_opt_in(self) -> None:
+        self._git("branch", "-D", "alternate", cwd=self.repo)
+        self.reports = [self.reports[0]]
+        self.cache[0]["identifiers"] = [
+            {"type": "CVE", "value": "CVE-2026-12345"},
+            {"type": "GHSA", "value": "GHSA-1111-1111-1111"},
+        ]
+        self.cache[0]["references"] = ["https://github.com/example/repo/issues/1"]
+        self.cache = [self.cache[0]]
+        self._write_inputs()
+
+        with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
+            self._build("combined-default")
+        self.assertEqual(caught.exception.code, "advisory_identifier_mismatch")
+
+        manifest = self._build(
+            "combined",
+            allow_identifier_subset_fallback=True,
+        )
+        output = self.output_root / "combined"
+        assignment = json.loads((output / ASSIGNMENTS_FILENAME).read_bytes())
+        self.assertEqual(assignment["report_id"], "GHSA-1111-1111-1111")
+        self.assertEqual(assignment["hints"]["fix_commits"], [self.fix])
+        audit = json.loads((output / COVERAGE_AUDIT_FILENAME).read_bytes())
+        self.assertEqual(
+            audit["anchor_policy"],
+            "local-direct-child-identifier-subset-fallback-v1",
+        )
+        self.assertEqual(
+            audit["anchor_candidate_source"],
+            "local_commit_graph_direct_child_identifier_subset",
+        )
+        verify_lane_a_assignment_materialization(
+            output,
+            self.tasks_path,
+            self.reports_path,
+            self.cache_path,
+            self.repo_map_path,
+            expected_materialization_sha256=manifest.materialization_sha256,
+            expected_manifest_wire_sha256=manifest.manifest_wire_sha256,
+            allow_identifier_subset_fallback=True,
+            **self._pins(),
+        )
+
     def test_local_direct_child_fallback_rejects_ambiguous_children(self) -> None:
         self.cache[0]["references"] = ["https://github.com/example/repo/issues/1"]
         self.cache[1]["references"] = ["https://github.com/example/repo/issues/2"]
@@ -478,6 +522,27 @@ class LaneAAssignmentMaterializerTests(unittest.TestCase):
         with self.assertRaises(LaneAAssignmentMaterializerError) as caught:
             self._build()
         self.assertEqual(caught.exception.code, "non_source_diff")
+
+    def test_svelte_changes_are_treated_as_source_diff(self) -> None:
+        self._git("checkout", "-b", "svelte-fix", self.vulnerable, cwd=self.repo)
+        (self.repo / "src" / "Widget.svelte").write_text(
+            "<script lang=\"ts\">\n  export let value = '';\n</script>\n"
+            "<p>{value}</p>\n",
+            encoding="utf-8",
+        )
+        self._git("add", "--all", cwd=self.repo)
+        self._git("-c", "commit.gpgsign=false", "commit", "-m", "svelte fix", cwd=self.repo)
+        svelte_fix = self._git("rev-parse", "HEAD", cwd=self.repo).strip()
+        self.cache[0]["references"] = [self._commit_url(svelte_fix)]
+        self._write_inputs()
+
+        self._build("svelte")
+
+        assignment = json.loads(
+            (self.output_root / "svelte" / ASSIGNMENTS_FILENAME).read_bytes()
+        )
+        self.assertEqual(assignment["hints"]["fix_commits"], [svelte_fix])
+        self.assertEqual(assignment["hints"]["source_paths"], ["src/Widget.svelte"])
 
     def test_non_source_only_fix_is_rejected(self) -> None:
         self._git("checkout", "-b", "docs-only", self.vulnerable, cwd=self.repo)

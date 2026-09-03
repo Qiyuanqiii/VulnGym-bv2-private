@@ -70,6 +70,9 @@ MATERIALIZATION_KIND: Final[str] = "vulngym.lane-a-assignment-materialization.v1
 POLICY_ID: Final[str] = "lexicographic-report-entry-v1"
 LOCAL_DIRECT_CHILD_POLICY_ID: Final[str] = "local-direct-child-fallback-v1"
 IDENTIFIER_SUBSET_POLICY_ID: Final[str] = "public-identifier-subset-fallback-v1"
+LOCAL_DIRECT_CHILD_IDENTIFIER_SUBSET_POLICY_ID: Final[str] = (
+    "local-direct-child-identifier-subset-fallback-v1"
+)
 ANCHOR_SEMANTICS: Final[str] = (
     "deterministic_evaluation_anchor_not_finding_provenance"
 )
@@ -78,6 +81,9 @@ LOCAL_DIRECT_CHILD_ANCHOR_SEMANTICS: Final[str] = (
 )
 IDENTIFIER_SUBSET_ANCHOR_SEMANTICS: Final[str] = (
     "selected_ghsa_identifier_subset_match_with_public_fix_reference"
+)
+LOCAL_DIRECT_CHILD_IDENTIFIER_SUBSET_ANCHOR_SEMANTICS: Final[str] = (
+    "selected_ghsa_identifier_subset_match_with_unique_local_single_parent_child"
 )
 ASSIGNMENTS_FILENAME: Final[str] = "assignments.jsonl"
 COVERAGE_AUDIT_FILENAME: Final[str] = "coverage-audit.jsonl"
@@ -137,6 +143,7 @@ _SOURCE_SUFFIXES = frozenset(
         ".py",
         ".pyw",
         ".rb",
+        ".svelte",
         ".ts",
         ".tsx",
     }
@@ -742,11 +749,24 @@ def _select_anchor(
         advisory = advisories.get(report.report_id)
         if advisory is None:
             continue
-        actual_identifiers = {item["value"] for item in advisory.identifiers}
-        if actual_identifiers != set(report.vuln_ids):
+        identifier_policy = _identifier_anchor_policy(
+            report,
+            advisory,
+            allow_identifier_subset_fallback=allow_identifier_subset_fallback,
+        )
+        if identifier_policy is None:
             continue
         if _has_github_commit_reference(advisory):
             continue
+        identifier_anchor_policy, _identifier_anchor_semantics = identifier_policy
+        if identifier_anchor_policy == IDENTIFIER_SUBSET_POLICY_ID:
+            anchor_policy = LOCAL_DIRECT_CHILD_IDENTIFIER_SUBSET_POLICY_ID
+            anchor_semantics = LOCAL_DIRECT_CHILD_IDENTIFIER_SUBSET_ANCHOR_SEMANTICS
+            candidate_source = "local_commit_graph_direct_child_identifier_subset"
+        else:
+            anchor_policy = LOCAL_DIRECT_CHILD_POLICY_ID
+            anchor_semantics = LOCAL_DIRECT_CHILD_ANCHOR_SEMANTICS
+            candidate_source = "local_commit_graph_direct_child"
         if local_children is None and not local_child_unavailable:
             try:
                 local_children = repository.direct_child_commits(task.commit)
@@ -767,9 +787,9 @@ def _select_anchor(
                 entry_id=report.entry_ids[0],
                 candidate_fix_commits=local_children,
                 fix_commit=local_children[0],
-                anchor_policy=LOCAL_DIRECT_CHILD_POLICY_ID,
-                anchor_semantics=LOCAL_DIRECT_CHILD_ANCHOR_SEMANTICS,
-                candidate_source="local_commit_graph_direct_child",
+                anchor_policy=anchor_policy,
+                anchor_semantics=anchor_semantics,
+                candidate_source=candidate_source,
             )
         )
     fallback_distinct_fixes = sorted(
@@ -894,7 +914,11 @@ def _build_payloads(
         )
         expected_advisory_ids = (
             tuple(item["value"] for item in advisory.identifiers)
-            if anchor.anchor_policy == IDENTIFIER_SUBSET_POLICY_ID
+            if anchor.anchor_policy
+            in {
+                IDENTIFIER_SUBSET_POLICY_ID,
+                LOCAL_DIRECT_CHILD_IDENTIFIER_SUBSET_POLICY_ID,
+            }
             else selected.vuln_ids
         )
         if advisory_facts.vuln_ids != expected_advisory_ids:
@@ -1334,6 +1358,7 @@ __all__ = [
     "ASSIGNMENTS_FILENAME",
     "COVERAGE_AUDIT_FILENAME",
     "IDENTIFIER_SUBSET_POLICY_ID",
+    "LOCAL_DIRECT_CHILD_IDENTIFIER_SUBSET_POLICY_ID",
     "LaneAAssignmentMaterializationManifestV1",
     "LaneAAssignmentMaterializerError",
     "MANIFEST_FILENAME",

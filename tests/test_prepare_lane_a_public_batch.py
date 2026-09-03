@@ -359,6 +359,41 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             [{"fix_commit": self.fix, "task_id": self.task_id}],
         )
 
+    def test_prepare_can_combine_identifier_subset_and_local_child_fallbacks(self) -> None:
+        self.reports_file.write_bytes(
+            _canonical_line(
+                self._report(
+                    self.report_id,
+                    self.vulnerable,
+                    vuln_ids=[self.report_id],
+                )
+            )
+        )
+        no_fix_reference = ["https://github.com/example/repo/issues/1"]
+
+        with self.assertRaises(prep.LaneAPublicBatchError) as captured:
+            self._prepare(
+                output_name="combined-default",
+                fetcher=lambda _ghsa: self._advisory(references=no_fix_reference),
+                allow_local_direct_child_fallback=True,
+            )
+        self.assertEqual(captured.exception.code, "advisory_identifier_mismatch")
+
+        result = self._prepare(
+            output_name="combined",
+            fetcher=lambda _ghsa: self._advisory(references=no_fix_reference),
+            allow_identifier_subset_fallback=True,
+            allow_local_direct_child_fallback=True,
+        )
+
+        self.assertTrue((self.outputs / "combined").exists())
+        self.assertTrue(result["summary"]["allow_identifier_subset_fallback"])
+        self.assertTrue(result["summary"]["allow_local_direct_child_fallback"])
+        self.assertEqual(
+            result["summary"]["fix_commits"],
+            [{"fix_commit": self.fix, "task_id": self.task_id}],
+        )
+
     def test_identifier_subset_fallback_rejects_extra_advisory_fact_id(self) -> None:
         extra_ghsa = "GHSA-3333-3333-3333"
         self.reports_file.write_bytes(
