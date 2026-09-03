@@ -99,13 +99,17 @@ was rejected with `non_source_diff` and remains out of the automatic batch.
 | Total | 14 | 13 | 1 |
 
 Current machine-materializable coverage with the strict and fallback policies
-combined:
+combined, after full source-diff validation:
 
-| Split | Tasks | Strict-ready | Fallback materialized | Total materializable | Rate |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Public test | 20 | 8 | 3 | 11 | 55.0% |
-| Public train | 50 | 14 | 10 | 24 | 48.0% |
-| Total | 70 | 22 | 13 | 35 | 50.0% |
+| Split | Tasks | Strict materialized | Fallback materialized | Source-diff rejected | Total materialized | Rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Public test | 20 | 8 | 3 | 0 | 11 | 55.0% |
+| Public train | 50 | 13 | 10 | 2 | 23 | 46.0% |
+| Total | 70 | 21 | 13 | 2 | 34 | 48.6% |
+
+The rejected training tasks are `VG-TRAIN-43AC81B29F131DE6F550` from the strict
+candidate set and `VG-TRAIN-640FF6DE344026468477` from the local direct-child
+fallback set. Both are kept out of the automatic Lane A batch.
 
 Fallback materialization digests:
 
@@ -113,6 +117,24 @@ Fallback materialization digests:
 | --- | ---: | --- | --- |
 | `test3` | 3 | `130188977378e0d71a45485ca9799a95b02cd3fc38a635aa00b3446c34db4b0a` | `eed9c4ea32dad976716c70a56dbb355f36e0f54d9be0ee49d773cfda6197981f` |
 | `train10` | 10 | `f8e266ed412e0933ff9cd03c255bdccabbb72d086f7f10d03a2852a3e0ce0ab1` | `b92ca1f4bac6d603e1e51bb36e0890042888e6a0aa39c8135bb5b90ab0fad131` |
+
+Combined materialization digests:
+
+| Batch | Tasks | Materialization SHA-256 | Manifest wire SHA-256 | Assignments wire SHA-256 |
+| --- | ---: | --- | --- | --- |
+| `test11` | 11 | `597c830fc0f0c3a3bda8c26e208be74fea2da8cc7d2a3916f68916f232e634e5` | `dd3e3a990bf4664825502d513628f1388cb3ca4ecbbcbcc811b9bed27e56148b` | `68fc4b6ee7b7311eeac9ab8041795e72ca6439bac8632a8f51bf25a33c4db881` |
+| `train23` | 23 | `fb91367fc08b6bbe455e40deb0a032adfc9d226d41232b0fcecafb05a535d5f4` | `58efc9205c844fcf329828d6e448d9e2269ccf1630c8c2417945ef5033d45861` | `3535765558f59804cb3d43c4c1f5847d0c56cae2fdf2bb7907cb0bc5c07f863a` |
+
+Verified Lane A task-bundle digests:
+
+| Bundle | Tasks | Bundle SHA-256 | Manifest wire SHA-256 | Run tasks wire SHA-256 |
+| --- | ---: | --- | --- | --- |
+| `test11` | 11 | `b0136dd45da74d7f11a3e4f56b72f922611b381627dde6064681f927cea7ddd8` | `a0c268d4bd3aa098665ed284e339f0f8bee25afd7e5451f7773df8390e4d1ef7` | `02d36aaebc31c3931b08fe13fd2882b6d85c96954d643aa56abe95bf214af3a4` |
+| `train23` | 23 | `022d1903ffc074cb2cd4ade53d461e95c49d058eaf442bf5768e441d110a1db8` | `1191aa2fbf53ad0942d0d178ce56d5a6ef469c43ab1bebdefcc5af5be0de6c6f` | `0d3e01ac78ad8a57652c22fd59cec2e97597db83ee56c2879520be5eb7ad9a96` |
+
+Both task bundles were verified against their pinned public task and assignment
+inputs, and a public marker scan over the committed bundle files returned no
+restricted path or private-control markers.
 
 The remaining blockers are materialization gaps, not T1/T2 runtime failures.
 They need separate reviewer-auditable policies or refresh steps before they can
@@ -210,9 +232,8 @@ closed-loop and readback checks.
 
 ## Next acceptance work
 
-1. Merge strict and fallback-materialized tasks into expanded Lane A batches
-   and run the real T2-to-T1 closed loop for 11 public test tasks and 24 public
-   training tasks.
+1. Run the real T2-to-T1 closed loop for the verified 11-task public test
+   bundle and 23-task public training bundle.
 2. Use the reviewer evidence export on every expanded batch and archive the
    resulting `review_evidence_sha256` with the batch receipt.
 3. Add narrow T1 promotions only where evidence is exact and reproducible. Do
