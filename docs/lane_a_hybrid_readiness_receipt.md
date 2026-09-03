@@ -64,6 +64,22 @@ Fallback action plan from the same diagnosis:
 | Public train | `refresh_local_repository` | 5 |
 | Public train | `refresh_public_metadata` | 1 |
 
+Local commit-graph fallback probe:
+
+| Split | Probe result | Count |
+| --- | --- | ---: |
+| Public test | `unique_direct_child` | 3 |
+| Public test | `no_direct_child` | 3 |
+| Public train | `unique_direct_child` | 11 |
+| Public train | `no_direct_child` | 12 |
+
+The probe is intentionally graph-only: it identifies whether a blocked task has
+exactly one local single-parent child commit of the vulnerable checkout, but it
+does not inspect or publish source paths during broad diagnosis. The 14
+`unique_direct_child` tasks are therefore the next high-confidence automation
+candidates; each still needs the formal materializer to validate source diffs
+before it can join a real T2-to-T1 batch.
+
 These blockers are materialization gaps, not T1/T2 runtime failures. The main
 follow-up is to add a second, reviewer-auditable materialization policy for
 public advisories that do not expose the exact direct-fix-parent shape currently
@@ -161,8 +177,9 @@ closed-loop and readback checks.
 
 ## Next acceptance work
 
-1. Add fallback public materialization for the 48 blocked tasks without using
-   hidden evaluator material.
+1. Add fallback public materialization for the 14 blocked tasks whose local
+   commit-graph probe found a unique direct child, without using hidden
+   evaluator material.
 2. Use the reviewer evidence export on every expanded batch and archive the
    resulting `review_evidence_sha256` with the batch receipt.
 3. Add narrow T1 promotions only where evidence is exact and reproducible. Do

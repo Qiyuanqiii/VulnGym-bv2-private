@@ -64,6 +64,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 CONTRACT_VERSION: Final[int] = 1
 KIND: Final[str] = "vulngym.lane-a-public-batch-preparation.v1"
 FALLBACK_POLICY_VERSION: Final[int] = 1
+LOCAL_CHILD_PROBE_VERSION: Final[int] = 1
 TASKS_FILENAME: Final[str] = "tasks.jsonl"
 REPORTS_FILENAME: Final[str] = "reports.jsonl"
 GHSA_CACHE_FILENAME: Final[str] = "ghsa-cache.jsonl"
@@ -86,6 +87,12 @@ _COMMIT_URL_RE: Final[re.Pattern[str]] = re.compile(
 )
 _FORBIDDEN_PATH_MARKERS: Final[frozenset[str]] = frozenset(
     {"gold", "private", "selection_lock", "selection-lock", "source-map", "source_map"}
+)
+_LOCAL_CHILD_PROBE_ACTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "local_graph_child_policy_candidate",
+        "mixed_public_anchor_policy_candidate",
+    }
 )
 
 
@@ -605,6 +612,64 @@ def _fallback_plan_for_diagnosis(diagnosis: Mapping[str, object]) -> dict[str, o
     }
 
 
+def _local_child_probe(
+    repository: GitRepository,
+    task: BenchmarkTask,
+    *,
+    graph_unavailable: bool = False,
+    precomputed_children: Sequence[str] | None = None,
+) -> dict[str, object]:
+    """Return a path-free local graph probe for fallback planning."""
+
+    if graph_unavailable:
+        return {
+            "candidate_count": 0,
+            "probe_version": LOCAL_CHILD_PROBE_VERSION,
+            "status": "local_graph_unavailable",
+        }
+    if precomputed_children is None:
+        try:
+            children = repository.direct_child_commits(task.commit)
+        except GitFactError:
+            return {
+                "candidate_count": 0,
+                "probe_version": LOCAL_CHILD_PROBE_VERSION,
+                "status": "local_graph_unavailable",
+            }
+    else:
+        children = tuple(precomputed_children)
+
+    if not children:
+        try:
+            incomplete = repository.history_may_be_incomplete()
+        except GitFactError:
+            incomplete = True
+        return {
+            "candidate_count": 0,
+            "history_may_be_incomplete": incomplete,
+            "probe_version": LOCAL_CHILD_PROBE_VERSION,
+            "status": "no_direct_child",
+        }
+
+    if len(children) > 1:
+        prefixes = [commit[:12] for commit in children[:8]]
+        return {
+            "candidate_commit_prefixes": prefixes,
+            "candidate_count": len(children),
+            "probe_version": LOCAL_CHILD_PROBE_VERSION,
+            "status": "multiple_direct_children",
+            "truncated": len(children) > len(prefixes),
+        }
+
+    candidate = children[0]
+    return {
+        "candidate_commit_prefix": candidate[:12],
+        "candidate_count": 1,
+        "probe_version": LOCAL_CHILD_PROBE_VERSION,
+        "status": "unique_direct_child",
+    }
+
+
 def _canonical_wires(
     tasks: Sequence[BenchmarkTask],
     reports: Sequence[Mapping[str, Any]],
@@ -869,7 +934,14 @@ def diagnose_lane_a_public_batch(
     task_results: list[dict[str, object]] = []
     blocker_counts: dict[str, int] = {}
     fallback_plan_counts: dict[str, int] = {}
+    local_child_probe_counts: dict[str, int] = {}
+    task_commits_by_repo: dict[str, list[str]] = {}
     for task in tasks:
+        task_commits_by_repo.setdefault(task.repo_url.casefold(), []).append(task.commit)
+    local_child_maps: dict[str, dict[str, tuple[str, ...]] | None] = {}
+    for task in tasks:
+        repo_key = task.repo_url.casefold()
+        repository = repositories[repo_key].repository
         task_advisories = {
             report["report_id"]: advisories_by_ghsa[report["report_id"]]
             for report in reports_by_task[task.task_id]
@@ -879,7 +951,7 @@ def diagnose_lane_a_public_batch(
             task,
             reports_by_task[task.task_id],
             task_advisories,
-            repositories[task.repo_url.casefold()].repository,
+            repository,
         )
         blockers = list(diagnosis["blockers"])
         for report in reports_by_task[task.task_id]:
@@ -900,6 +972,28 @@ def diagnose_lane_a_public_batch(
             code = str(item["code"])
             blocker_counts[code] = blocker_counts.get(code, 0) + 1
         fallback_plan = _fallback_plan_for_diagnosis(diagnosis)
+        if fallback_plan["action"] in _LOCAL_CHILD_PROBE_ACTIONS:
+            if repo_key not in local_child_maps:
+                try:
+                    local_child_maps[repo_key] = repository.direct_child_commits_for(
+                        task_commits_by_repo[repo_key]
+                    )
+                except GitFactError:
+                    local_child_maps[repo_key] = None
+            child_map = local_child_maps[repo_key]
+            probe = _local_child_probe(
+                repository,
+                task,
+                graph_unavailable=child_map is None,
+                precomputed_children=()
+                if child_map is None
+                else child_map.get(task.commit, ()),
+            )
+            fallback_plan["local_child_probe"] = probe
+            probe_status = str(probe["status"])
+            local_child_probe_counts[probe_status] = (
+                local_child_probe_counts.get(probe_status, 0) + 1
+            )
         diagnosis["fallback_plan"] = fallback_plan
         action = str(fallback_plan["action"])
         fallback_plan_counts[action] = fallback_plan_counts.get(action, 0) + 1
@@ -918,6 +1012,8 @@ def diagnose_lane_a_public_batch(
             "blocker_counts": dict(sorted(blocker_counts.items())),
             "fallback_plan_counts": dict(sorted(fallback_plan_counts.items())),
             "fallback_policy_version": FALLBACK_POLICY_VERSION,
+            "local_child_probe_counts": dict(sorted(local_child_probe_counts.items())),
+            "local_child_probe_version": LOCAL_CHILD_PROBE_VERSION,
             "report_count": len(reports),
             "repository_count": len(repositories),
             "split": tasks[0].split,

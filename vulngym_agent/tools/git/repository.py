@@ -1613,6 +1613,85 @@ class GitRepository:
             parents.append(parent)
         return tuple(parents)
 
+    def direct_child_commits(
+        self,
+        parent: object,
+        *,
+        max_commits: int = DEFAULT_MAX_TREE_ENTRIES,
+    ) -> tuple[str, ...]:
+        """Return single-parent commits whose only parent is ``parent``.
+
+        Git does not store child pointers, so this scans the bounded local commit
+        graph via ``rev-list --parents --all``.  The result is a local fact only:
+        callers that need negative certainty should separately check whether the
+        repository history may be incomplete.
+        """
+
+        canonical_parent = self._require_commit(parent, operation="rev-list")
+        return self.direct_child_commits_for(
+            (canonical_parent,),
+            max_commits=max_commits,
+        )[canonical_parent]
+
+    def direct_child_commits_for(
+        self,
+        parents: Sequence[object],
+        *,
+        max_commits: int = DEFAULT_MAX_TREE_ENTRIES,
+    ) -> dict[str, tuple[str, ...]]:
+        """Return single-parent direct children for several parent commits.
+
+        This performs one bounded local graph scan for the supplied parent set.
+        """
+
+        if isinstance(max_commits, bool) or not isinstance(max_commits, int) or max_commits < 1:
+            raise ValueError("max_commits must be a positive integer")
+        canonical_parents: list[str] = []
+        seen: set[str] = set()
+        for parent in parents:
+            canonical_parent = self._require_commit(parent, operation="rev-list")
+            if canonical_parent in seen:
+                continue
+            seen.add(canonical_parent)
+            canonical_parents.append(canonical_parent)
+        if not canonical_parents:
+            return {}
+        parent_set = frozenset(canonical_parents)
+        children_by_parent: dict[str, set[str]] = {
+            parent: set() for parent in canonical_parents
+        }
+        result = self._run(
+            ("rev-list", "--parents", "--all"),
+            operation="rev-list",
+        )
+        try:
+            lines = result.stdout.decode("ascii", errors="strict").splitlines()
+        except UnicodeDecodeError as error:
+            raise GitCommandError(
+                "rev-list", 0, "git returned non-ASCII commit graph output"
+            ) from error
+        if len(lines) > max_commits:
+            raise GitOutputTooLarge(
+                f"git rev-list returned more than {max_commits} commit rows"
+            )
+
+        for line in lines:
+            if not line:
+                continue
+            parts = line.split()
+            if not parts or any(_SHA_RE.fullmatch(part) is None for part in parts):
+                raise GitCommandError(
+                    "rev-list", 0, "git returned malformed commit graph output"
+                )
+            child = parts[0]
+            parents = parts[1:]
+            if len(parents) == 1 and parents[0] in parent_set:
+                children_by_parent[parents[0]].add(child)
+        return {
+            parent: tuple(sorted(children))
+            for parent, children in children_by_parent.items()
+        }
+
     def history_is_shallow(self) -> bool:
         """Return whether Git marks this repository's local history as shallow.
 

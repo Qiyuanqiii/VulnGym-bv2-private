@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -110,6 +111,23 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
             cwd=self.root,
         )
         return vulnerable, fix
+
+    def _add_direct_child(self, parent: str, branch: str, payload: str) -> str:
+        bare = self.repo_root / "example" / "repo.git"
+        replacement = self.root / f"replacement-{branch}.git"
+        work = self.root / f"work-{branch}"
+        self._git("clone", str(bare), str(work), cwd=self.root)
+        self._git("config", "user.name", "Fixture", cwd=work)
+        self._git("config", "user.email", "fixture@example.invalid", cwd=work)
+        self._git("checkout", "-b", branch, parent, cwd=work)
+        (work / "app.py").write_text(payload, encoding="utf-8")
+        self._git("add", "app.py", cwd=work)
+        self._git("-c", "commit.gpgsign=false", "commit", "-m", branch, cwd=work)
+        child = self._git("rev-parse", "HEAD", cwd=work)
+        self._git("clone", "--bare", "--no-hardlinks", str(work), str(replacement), cwd=self.root)
+        shutil.rmtree(bare)
+        replacement.rename(bare)
+        return child
 
     def _task(self, task_id: str, commit: str, *, repo_url: str | None = None) -> dict[str, object]:
         return {
@@ -393,8 +411,50 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
                 "action": "local_graph_child_policy_candidate",
                 "automatable_candidate": True,
                 "blocker_codes": ["fix_candidate_missing"],
+                "local_child_probe": {
+                    "candidate_commit_prefix": self.fix[:12],
+                    "candidate_count": 1,
+                    "probe_version": 1,
+                    "status": "unique_direct_child",
+                },
                 "policy_version": 1,
             },
+        )
+        self.assertEqual(
+            result["summary"]["local_child_probe_counts"],
+            {"unique_direct_child": 1},
+        )
+        self.assertEqual(result["summary"]["local_child_probe_version"], 1)
+
+    def test_diagnose_marks_ambiguous_local_child_probe(self) -> None:
+        alternate = self._add_direct_child(
+            self.vulnerable,
+            "alternate-fix",
+            "def run(value):\n    return str(value)\n",
+        )
+
+        result = prep.diagnose_lane_a_public_batch(
+            public_tasks_file=self.tasks_file,
+            public_reports_file=self.reports_file,
+            local_repo_root=self.repo_root,
+            task_ids=[self.task_id],
+            advisory_fetcher=lambda _ghsa: self._advisory(
+                references=["https://github.com/example/repo/issues/1"]
+            ),
+        )
+
+        task = result["tasks"][0]
+        probe = task["fallback_plan"]["local_child_probe"]
+        self.assertEqual(probe["status"], "multiple_direct_children")
+        self.assertEqual(probe["candidate_count"], 2)
+        self.assertEqual(
+            sorted(probe["candidate_commit_prefixes"]),
+            sorted([self.fix[:12], alternate[:12]]),
+        )
+        self.assertFalse(probe["truncated"])
+        self.assertEqual(
+            result["summary"]["local_child_probe_counts"],
+            {"multiple_direct_children": 1},
         )
 
     def test_forbidden_input_name_is_rejected_without_reading_it(self) -> None:
