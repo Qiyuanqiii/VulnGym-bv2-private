@@ -27,7 +27,7 @@
 | --- | --- | --- | --- |
 | 公共输入 | 固定 50 train + 20 test、schema、来源与 hash | 已有实现；最终 release 祖先与文件集仍需回读 | TODO |
 | Source | 22 repositories、70 task source sealing | **完成** | 私有 Issues #60/#11；净化可披露 evidence commit `c52f48b770736d403b2ce090b10a70e5498804e0` |
-| Lane A | 完整 Entry 的 `closed_loop_cli` T2→真实 T1 | V2 快照绑定与安全 submission projector 已实现；正式公开测试输出未完成 | 必须生成并外部 pin `entries.jsonl` + `validation.jsonl` + manifest |
+| Lane A | 完整 Entry 的 `closed_loop_cli` T2→真实 T1 | **部分完成**：34 条 strict+fallback 真实闭环已跑通，0 input failure；仍未达到全量 20+50 finalized | `docs/lane_a_hybrid_readiness_receipt.md`、`docs/submission/lane_a_manual_review_evidence.md`；仍需最终 `entries.jsonl` + `validation.jsonl` + manifest |
 | Lane B | 70/70 source-only D2/D3 replay、D4/D0 | **未完成** | Issue #90 当前 0/70；TODO |
 | Runtime | 最终 OCI 与 native Linux preflight | **未完成** | Issues #91/#92；TODO |
 | Gate | test-first 20/20 | **未完成** | Issue #94；TODO |
@@ -98,10 +98,14 @@ python -B -m vulngym_agent.closed_loop_cli \
   --require-all-finalized
 ```
 
-- TODO：记录输入 pin、task/Entry 数、exit code、`entries.jsonl` 与
-  `validation.jsonl` digest。
-- TODO：逐行验证完整 Entry 必填字段、location `code` 和 `verify=0`；保存 T1 对首次
-  候选的反馈、获批 repair 与复验结果。不得公开 repo map、cache 宿主路径或 replay 密钥。
+- 已完成扩展 hybrid 批次：test 11/20、train 23/50，共 34/70。两批
+  `closed_loop_cli` 均 exit 0，`input_failures=0`，全部进入 `manual_review`。
+- reviewer evidence 已记录：test11 digest
+  `367bd779089dbb5942b323cfd553d3d8c4908f526e4e3ecb1fe02492c5a3b46a`；
+  train23 digest
+  `a1c49ec59abbbe0df612826594026a436158aab2c34a5c126f89ba7bf2ca8d72`。
+- TODO：继续增强 T1 或整理人工复核证据，使最终公开测试能形成评审认可的
+  `entries.jsonl`、`validation.jsonl` 和 manifest。
 - TODO：用 `submission_prediction_cli export` 从固定 replay 生成三文件提交面，再用
   `verify` 携带外部 replay/submission 双 pin 重读源 replay；不能只验证输出自己的 manifest。
 
