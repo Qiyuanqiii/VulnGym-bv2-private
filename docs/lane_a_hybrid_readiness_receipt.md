@@ -300,7 +300,8 @@ semantics for atomic no-replace publication. On Windows it correctly rejects the
 formal export path with `platform_unsupported`. This is a packaging constraint,
 not a batch-data failure. Formal final export should run on native Linux or
 another supported POSIX environment, while Windows can continue to run the
-closed-loop and readback checks.
+closed-loop and readback checks. The exact export/verify command matrix is in
+`docs/submission/submission_prediction_posix_export_runbook.md`.
 
 ## Next acceptance work
 

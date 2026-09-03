@@ -114,8 +114,14 @@ python -B -m vulngym_agent.closed_loop_cli \
   `86fad1282f1b5f25f26c3b19fc0bffd15cd3798d2d6d95e5a120f284f0737e0b`。
 - TODO：继续增强 T1 或整理人工复核证据，使最终公开测试能形成评审认可的
   `entries.jsonl`、`validation.jsonl` 和 manifest。
-- TODO：用 `submission_prediction_cli export` 从固定 replay 生成三文件提交面，再用
-  `verify` 携带外部 replay/submission 双 pin 重读源 replay；不能只验证输出自己的 manifest。
+- Windows-native `submission_prediction_cli review` 已回读上述 5 个固定 replay，
+  task/complete/incomplete/input-failure/review digest 均与
+  `docs/submission/lane_a_manual_review_evidence.md` 一致。
+- TODO：在 POSIX 主机执行 `docs/submission/submission_prediction_posix_export_runbook.md`：
+  用 `submission_prediction_cli export` 从固定 replay 生成三文件提交面，再用
+  `verify` 携带外部 replay/submission 双 pin 重读源 replay；Windows 原生会按设计
+  返回 `platform_unsupported`，不能把这个当成数据失败，也不能只验证输出自己的
+  manifest。
 
 ### 4.3 Native Linux preflight
 

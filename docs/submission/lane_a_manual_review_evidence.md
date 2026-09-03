@@ -67,6 +67,12 @@ incorrect/uncertain field names, missing-information categories, and deferred
 reason codes. They omit field evidence text, source snippets, prompts, model
 responses, and local paths.
 
+These digests are reviewer evidence over the pinned closed-loop replay outputs,
+not the final submission-prediction export bundle. The formal
+`entries.jsonl`/`validation.jsonl`/`manifest.json` export still has to run on a
+POSIX host because the exporter intentionally rejects Windows-native
+publication with `platform_unsupported`.
+
 Digest anchors:
 
 | Batch | Closed-loop dataset SHA-256 | Review evidence SHA-256 |
