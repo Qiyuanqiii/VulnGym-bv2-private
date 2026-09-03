@@ -124,8 +124,9 @@ two workstreams:
 1. Improve T2/T1 evidence collection so more records become mechanically
    provable.
 2. Export concise review evidence for records that remain `manual_review`, so
-   reviewers can see exactly which facts passed, which facts are missing, and
-   why the system refused to finalize them.
+   reviewers can see exactly which facts passed, which fact categories are
+   missing, and why the system refused to finalize them. This is now available
+   through `submission_prediction_cli review`.
 
 ## Publication note
 
@@ -140,8 +141,8 @@ closed-loop and readback checks.
 
 1. Add fallback public materialization for the 48 blocked tasks without using
    hidden evaluator material.
-2. Add a reviewer evidence export for `manual_review` rows: per-field status,
-   missing-info taxonomy, candidate/report digest, and deferred reason.
+2. Use the reviewer evidence export on every expanded batch and archive the
+   resulting `review_evidence_sha256` with the batch receipt.
 3. Add narrow T1 promotions only where evidence is exact and reproducible. Do
    not globally lower the finalized threshold and do not auto-finalize records
    with known incorrect entry-point evidence.

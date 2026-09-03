@@ -41,6 +41,7 @@ from vulngym_agent.trusted_inputs import paths_overlap_v1
 
 
 SUBMISSION_PREDICTION_CONTRACT_VERSION: Final[int] = 1
+SUBMISSION_REVIEW_EVIDENCE_CONTRACT_VERSION: Final[int] = 1
 SUBMISSION_PREDICTION_FILES: Final[tuple[str, ...]] = (
     "entries.jsonl",
     "validation.jsonl",
@@ -307,6 +308,275 @@ def _build_payloads(
     )
     payloads["submission_manifest.json"] = _line(manifest.to_dict())
     return payloads, manifest
+
+
+def _missing_category(value: str) -> str:
+    text = value.casefold()
+    if any(
+        marker in text
+        for marker in (
+            "entry",
+            "route",
+            "reachab",
+            "runtime",
+            "call",
+            "data flow",
+            "data-flow",
+        )
+    ):
+        return "entry_reachability"
+    if any(marker in text for marker in ("critical", "operation", "guard", "sink")):
+        return "operation_proof"
+    if "trace" in text:
+        return "trace_completeness"
+    if any(marker in text for marker in ("title", "category", "cwe", "class")):
+        return "classification"
+    if any(marker in text for marker in ("advisory", "patch", "source", "evidence")):
+        return "source_context"
+    if any(
+        marker in text
+        for marker in ("schema", "report", "commit", "repo", "identifier", "verify")
+    ):
+        return "identity_or_schema"
+    return "other"
+
+
+def _count_missing_categories(values: Sequence[str]) -> dict[str, int]:
+    return dict(sorted(Counter(_missing_category(item) for item in values).items()))
+
+
+def _field_review_summary(field: Any) -> dict[str, Any]:
+    suggested_fix = getattr(field, "suggested_fix", None)
+    return {
+        "status": field.status,
+        "confidence": field.confidence,
+        "evidence_sha256": hashlib.sha256(field.evidence.encode("utf-8")).hexdigest(),
+        "evidence_ref_count": len(field.evidence_refs),
+        "has_suggested_fix": suggested_fix is not None,
+        "suggested_fix_sha256": (
+            None if suggested_fix is None else canonical_sha256(suggested_fix)
+        ),
+    }
+
+
+def _read_replay_sidecar(path: Path) -> bytes:
+    try:
+        before = os.lstat(path)
+    except OSError:
+        raise SubmissionPredictionError(
+            "source_replay_rejected", "replay sidecar is unavailable"
+        ) from None
+    if (
+        not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(before.st_mode)
+        or _is_reparse(before)
+        or before.st_nlink != 1
+        or before.st_size > _MAX_FILE_BYTES
+    ):
+        raise SubmissionPredictionError(
+            "source_replay_rejected", "replay sidecar is unsafe"
+        )
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        raise SubmissionPredictionError(
+            "source_replay_rejected", "replay sidecar could not be opened"
+        ) from None
+    try:
+        opened = os.fstat(descriptor)
+        if _file_state(opened) != _file_state(before):
+            raise SubmissionPredictionError(
+                "source_replay_rejected", "replay sidecar changed during open"
+            )
+        return _read_descriptor(descriptor, before)
+    finally:
+        os.close(descriptor)
+
+
+def _review_deferred_index(source_replay: Path) -> dict[str, Mapping[str, Any]]:
+    payload = _read_replay_sidecar(source_replay / "deferred.jsonl")
+    records = _parse_lines(payload, "deferred.jsonl")
+    deferred_by_task: dict[str, Mapping[str, Any]] = {}
+    for record in records:
+        if record.get("kind") != "deferred":
+            raise SubmissionPredictionError(
+                "source_replay_rejected", "deferred evidence has invalid kind"
+            )
+        payload_value = record.get("payload")
+        if not isinstance(payload_value, Mapping):
+            raise SubmissionPredictionError(
+                "source_replay_rejected", "deferred evidence has invalid payload"
+            )
+        core = payload_value.get("deferred")
+        if not isinstance(core, Mapping):
+            raise SubmissionPredictionError(
+                "source_replay_rejected", "deferred evidence has invalid core"
+            )
+        task_id = core.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            raise SubmissionPredictionError(
+                "source_replay_rejected", "deferred evidence has invalid task"
+            )
+        missing = core.get("missing_information")
+        if not isinstance(missing, list) or any(
+            not isinstance(item, str) for item in missing
+        ):
+            raise SubmissionPredictionError(
+                "source_replay_rejected", "deferred evidence has invalid missing set"
+            )
+        for name in (
+            "deferred_core_sha256",
+            "deferred_sha256",
+            "projection_sha256",
+        ):
+            _require_sha256(payload_value.get(name), name)
+        deferred_by_task[task_id] = {
+            "attempt": core.get("attempt"),
+            "mode": core.get("mode"),
+            "stage": core.get("stage"),
+            "reason_code": core.get("reason_code"),
+            "missing_information_count": len(missing),
+            "missing_category_counts": _count_missing_categories(missing),
+            "deferred_core_sha256": payload_value["deferred_core_sha256"],
+            "deferred_sha256": payload_value["deferred_sha256"],
+            "projection_sha256": payload_value["projection_sha256"],
+        }
+    return deferred_by_task
+
+
+def build_submission_review_evidence(
+    source_replay_dir: str | os.PathLike[str],
+    *,
+    expected_source_replay_dataset_sha256: str,
+    expected_task_count: int,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+) -> Mapping[str, Any]:
+    """Build a compact reviewer index for terminal prediction readback.
+
+    The result is intentionally a digest-and-status index.  It does not copy
+    field evidence text, source snippets, prompts, model responses, or local
+    paths.  Reviewers can use it to see which records need human attention and
+    then inspect the already-pinned replay artifacts if a full report is needed.
+    """
+
+    source_digest = _require_sha256(
+        expected_source_replay_dataset_sha256,
+        "expected_source_replay_dataset_sha256",
+    )
+    expected = _require_count(expected_task_count, "expected_task_count")
+    source_replay = _absolute_path(source_replay_dir, "source replay directory")
+    protected = _normalize_protected_paths(protected_paths)
+    predictions = _read_source_predictions(
+        source_replay,
+        expected_source_replay_dataset_sha256=source_digest,
+        protected=protected,
+    )
+    if len(predictions.tasks) != expected:
+        raise SubmissionPredictionError(
+            "task_count_mismatch", "source replay task count differs"
+        )
+    deferred_by_task = _review_deferred_index(source_replay)
+
+    statuses: Counter[str] = Counter()
+    verdicts: Counter[str] = Counter()
+    field_statuses: dict[str, Counter[str]] = {}
+    missing_categories: Counter[str] = Counter()
+    complete_count = 0
+    tasks: list[dict[str, Any]] = []
+    for task in predictions.tasks:
+        statuses[task.status] += 1
+        deferred = dict(deferred_by_task.get(task.task_id, {}))
+        task_missing_categories = Counter()
+        report = task.validation
+        entry = task.entry
+        fields: dict[str, Any] = {}
+        incorrect_fields: list[str] = []
+        uncertain_fields: list[str] = []
+        report_missing_count = 0
+        report_missing_category_counts: dict[str, int] = {}
+        if task.complete:
+            assert entry is not None and report is not None
+            complete_count += 1
+            verdicts[report.verdict] += 1
+            report_missing_count = len(report.missing_information)
+            report_missing_category_counts = _count_missing_categories(
+                report.missing_information
+            )
+            task_missing_categories.update(report_missing_category_counts)
+            for name, field in sorted(report.fields.items()):
+                fields[name] = _field_review_summary(field)
+                field_statuses.setdefault(name, Counter())[field.status] += 1
+                if field.status == "incorrect":
+                    incorrect_fields.append(name)
+                elif field.status == "uncertain":
+                    uncertain_fields.append(name)
+        task_missing_categories.update(deferred.get("missing_category_counts", {}))
+        missing_categories.update(task_missing_categories)
+        tasks.append(
+            {
+                "task_id": task.task_id,
+                "input_line": task.input_line,
+                "status": task.status,
+                "complete": task.complete,
+                "review_posture": (
+                    "ready_for_submission"
+                    if task.status == "finalized"
+                    else (
+                        "producer_deferred"
+                        if not task.complete and deferred
+                        else "t1_manual_review"
+                    )
+                ),
+                "report_id": None if entry is None else entry["report_id"],
+                "entry_id": None if entry is None else entry["entry_id"],
+                "entry_sha256": None if entry is None else canonical_sha256(entry),
+                "validation_sha256": (
+                    None if report is None else canonical_sha256(report)
+                ),
+                "verdict": None if report is None else report.verdict,
+                "field_status_counts": (
+                    {}
+                    if report is None
+                    else dict(
+                        sorted(
+                            Counter(
+                                field.status for field in report.fields.values()
+                            ).items()
+                        )
+                    )
+                ),
+                "incorrect_fields": incorrect_fields,
+                "uncertain_fields": uncertain_fields,
+                "report_missing_information_count": report_missing_count,
+                "report_missing_category_counts": report_missing_category_counts,
+                "deferred": deferred or None,
+                "combined_missing_category_counts": dict(
+                    sorted(task_missing_categories.items())
+                ),
+                "fields": fields,
+            }
+        )
+
+    field_status_counts = {
+        name: dict(sorted(counter.items()))
+        for name, counter in sorted(field_statuses.items())
+    }
+    core = {
+        "contract_version": SUBMISSION_REVIEW_EVIDENCE_CONTRACT_VERSION,
+        "kind": "vulngym.submission-review-evidence.v1",
+        "source_replay_dataset_sha256": predictions.dataset_sha256,
+        "task_count": expected,
+        "complete_count": complete_count,
+        "incomplete_count": expected - complete_count,
+        "input_failure_count": predictions.input_failure_count,
+        "status_counts": dict(sorted(statuses.items())),
+        "verdict_counts": dict(sorted(verdicts.items())),
+        "field_status_counts": field_status_counts,
+        "missing_category_counts": dict(sorted(missing_categories.items())),
+        "tasks": tasks,
+    }
+    return {**core, "review_evidence_sha256": canonical_sha256(core)}
 
 
 def _is_reparse(value: os.stat_result) -> bool:
@@ -1751,9 +2021,11 @@ def write_submission_predictions(
 __all__ = [
     "SUBMISSION_PREDICTION_CONTRACT_VERSION",
     "SUBMISSION_PREDICTION_FILES",
+    "SUBMISSION_REVIEW_EVIDENCE_CONTRACT_VERSION",
     "SubmissionPredictionBundle",
     "SubmissionPredictionError",
     "SubmissionPredictionManifest",
+    "build_submission_review_evidence",
     "read_submission_predictions",
     "verify_submission_predictions",
     "write_submission_predictions",

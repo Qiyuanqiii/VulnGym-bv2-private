@@ -8,6 +8,28 @@ candidate together with the T1 report that validated that same candidate.
 This output is distinct from Lane B `findings.jsonl`. A Lane A submission
 contains complete 15-field VulnGym Entries and their full validation reports.
 
+## Review evidence
+
+Before formal export, use the read-only `review` operation to summarize one
+pinned replay for human review. It does not create an output directory and does
+not require native POSIX publication support, so it is suitable for Windows
+development hosts.
+
+```powershell
+python -B -m vulngym_agent.submission_prediction_cli review `
+  --replay-dir <REPLAY_DIR> `
+  --replay-dataset-sha256 <TRUSTED_REPLAY_DATASET_SHA256> `
+  --expected-task-count 20
+```
+
+The emitted JSON contains task-level status, completion state, Entry/report
+digests when present, field status counts, incorrect/uncertain field lists,
+missing-information categories, and producer-deferred reason digests when a
+task stopped before a terminal candidate/report pair. It deliberately omits
+field evidence text, source snippets, prompts, model responses, and local
+paths. This makes `manual_review` outcomes auditable without pretending they
+are finalized.
+
 ## Export
 
 Formal export is supported only on native POSIX hosts that provide

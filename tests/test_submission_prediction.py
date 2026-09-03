@@ -26,6 +26,7 @@ from vulngym_agent.orchestrator import (
 from vulngym_agent.submission_prediction import (
     SUBMISSION_PREDICTION_FILES,
     SubmissionPredictionError,
+    build_submission_review_evidence,
     read_submission_predictions,
     verify_submission_predictions,
     write_submission_predictions,
@@ -33,6 +34,144 @@ from vulngym_agent.submission_prediction import (
 from vulngym_agent.submission_prediction_cli import main
 from tests import test_orchestrator as orchestrator_fixtures
 from tests.producer_context_support import FixedProducerContextFactory
+
+
+class SubmissionReviewEvidenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        fixture = orchestrator_fixtures.ClosedLoopOrchestratorTests()
+        fixture.setUp()
+        self.fixture = fixture
+        self.entry = fixture.entry
+        self.task = fixture.task
+
+    def _manual_review(self):
+        outcome, _ = self.fixture._run(
+            orchestrator_fixtures._FakeProducer(self.entry),
+            [
+                orchestrator_fixtures._report(
+                    self.entry, {"trace": "uncertain"}, label="uncertain"
+                )
+            ],
+        )
+        self.assertEqual(outcome.status, "manual_review")
+        return outcome
+
+    def _deferred(self):
+        class Producer:
+            def generate(self, task, context):
+                return ProductionDeferredDraft(
+                    stage="task_contract",
+                    reason_code="missing_public_fact",
+                    missing_information=("public advisory is incomplete",),
+                )
+
+            def repair(self, *args, **kwargs):
+                raise AssertionError("repair must not run")
+
+        def no_validator(task):
+            raise AssertionError("validator must not run")
+
+        return ClosedLoopOrchestrator(
+            Producer(), no_validator, FixedProducerContextFactory()
+        ).run(self.task)
+
+    def _source_replay(self, parent: Path, outcome):
+        replay = parent / "source-replay"
+        manifest = write_closed_loop_artifacts(
+            replay, [ReplayRecord(7, self.task, outcome)]
+        )
+        return replay, manifest
+
+    def test_review_evidence_summarizes_manual_review_without_text(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            replay, source_manifest = self._source_replay(
+                root, self._manual_review()
+            )
+
+            review = build_submission_review_evidence(
+                replay,
+                expected_source_replay_dataset_sha256=(
+                    source_manifest.dataset_sha256
+                ),
+                expected_task_count=1,
+            )
+
+        self.assertEqual(review["kind"], "vulngym.submission-review-evidence.v1")
+        self.assertEqual(review["complete_count"], 1)
+        self.assertEqual(review["incomplete_count"], 0)
+        self.assertEqual(review["status_counts"], {"manual_review": 1})
+        self.assertEqual(review["verdict_counts"], {"uncertain": 1})
+        task = review["tasks"][0]
+        self.assertTrue(task["complete"])
+        self.assertEqual(task["review_posture"], "t1_manual_review")
+        self.assertEqual(task["entry_sha256"], canonical_sha256(self.entry))
+        self.assertEqual(task["field_status_counts"], {"uncertain": 1})
+        self.assertEqual(task["uncertain_fields"], ["trace"])
+        field = task["fields"]["trace"]
+        self.assertEqual(field["status"], "uncertain")
+        self.assertIn("evidence_sha256", field)
+        self.assertNotIn("evidence", field)
+        self.assertIsNone(field["suggested_fix_sha256"])
+        core = dict(review)
+        digest = core.pop("review_evidence_sha256")
+        self.assertEqual(digest, canonical_sha256(core))
+
+    def test_review_evidence_keeps_deferred_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            replay, source_manifest = self._source_replay(root, self._deferred())
+
+            review = build_submission_review_evidence(
+                replay,
+                expected_source_replay_dataset_sha256=(
+                    source_manifest.dataset_sha256
+                ),
+                expected_task_count=1,
+            )
+
+        self.assertEqual(review["complete_count"], 0)
+        self.assertEqual(review["incomplete_count"], 1)
+        task = review["tasks"][0]
+        self.assertFalse(task["complete"])
+        self.assertEqual(task["review_posture"], "producer_deferred")
+        self.assertIsNone(task["entry_sha256"])
+        self.assertIsNone(task["validation_sha256"])
+        self.assertEqual(task["fields"], {})
+        self.assertEqual(task["deferred"]["reason_code"], "missing_public_fact")
+        self.assertEqual(task["deferred"]["stage"], "task_contract")
+        self.assertEqual(
+            task["deferred"]["missing_category_counts"],
+            {"source_context": 1},
+        )
+
+    def test_cli_review_emits_read_only_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            replay, source_manifest = self._source_replay(
+                root, self._manual_review()
+            )
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    [
+                        "review",
+                        "--replay-dir",
+                        str(replay),
+                        "--replay-dataset-sha256",
+                        source_manifest.dataset_sha256,
+                        "--expected-task-count",
+                        "1",
+                    ]
+                )
+
+        self.assertEqual(code, submission_cli_module.EXIT_SUCCESS)
+        self.assertEqual(stderr.getvalue(), "")
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["kind"], "vulngym.submission-review-evidence.v1")
+        self.assertEqual(payload["complete_count"], 1)
+        self.assertFalse((root / "submission").exists())
 
 
 @unittest.skipUnless(os.name == "posix", "submission export requires POSIX")

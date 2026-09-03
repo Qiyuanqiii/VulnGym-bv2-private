@@ -11,6 +11,7 @@ from typing import Any, Final, Sequence
 
 from vulngym_agent.submission_prediction import (
     SubmissionPredictionError,
+    build_submission_review_evidence,
     verify_submission_predictions,
     write_submission_predictions,
 )
@@ -114,6 +115,22 @@ def _parser() -> argparse.ArgumentParser:
         help="trusted local path whose spelling must not occur in replay artifacts",
     )
     _add_common_count(verify)
+
+    review = subparsers.add_parser(
+        "review", help="emit read-only reviewer evidence for one pinned replay"
+    )
+    review.add_argument("--replay-dir", required=True, type=Path)
+    review.add_argument(
+        "--replay-dataset-sha256", required=True, type=_sha256
+    )
+    review.add_argument(
+        "--protected-path",
+        action="append",
+        default=[],
+        type=Path,
+        help="trusted local path whose spelling must not occur in replay artifacts",
+    )
+    _add_common_count(review)
     return parser
 
 
@@ -176,7 +193,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments_parsed = True
         if args.operation == "export":
             manifest = _run_export(args, mutation_state)
-        else:
+            _canonical_stdout(_summary(args.operation, manifest))
+        elif args.operation == "verify":
             bundle = verify_submission_predictions(
                 args.submission_dir,
                 args.replay_dir,
@@ -188,7 +206,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 protected_paths=args.protected_path,
             )
             manifest = bundle.manifest
-        _canonical_stdout(_summary(args.operation, manifest))
+            _canonical_stdout(_summary(args.operation, manifest))
+        else:
+            review = build_submission_review_evidence(
+                args.replay_dir,
+                expected_source_replay_dataset_sha256=(
+                    args.replay_dataset_sha256
+                ),
+                expected_task_count=args.expected_task_count,
+                protected_paths=args.protected_path,
+            )
+            _canonical_stdout(review)
         return EXIT_SUCCESS
     except SubmissionPredictionError as error:
         publication_may_exist = error.committed or mutation_state[0]
