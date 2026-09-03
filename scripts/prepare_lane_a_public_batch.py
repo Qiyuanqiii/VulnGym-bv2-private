@@ -300,23 +300,27 @@ def _fetch_advisory(ghsa_id: str) -> Mapping[str, Any]:
         "github.com",
         "-H",
         "Accept: application/vnd.github+json",
-        f"/advisories/{ghsa_id}",
+        f"/advisories/{ghsa_id.lower()}",
     ]
     environment = dict(os.environ)
     environment.update({"GH_PAGER": "cat", "NO_COLOR": "1"})
-    try:
-        result = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=60,
-            env=environment,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        raise _error("gh_failed", "the public advisory request failed") from None
-    if result.returncode != 0:
+    result: subprocess.CompletedProcess[bytes] | None = None
+    for _attempt in range(3):
+        try:
+            result = subprocess.run(
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=60,
+                env=environment,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            result = None
+        if result is not None and result.returncode == 0:
+            break
+    if result is None or result.returncode != 0:
         raise _error("gh_failed", "the public advisory request failed")
     if not 1 <= len(result.stdout) <= _MAX_API_BYTES:
         raise _error("gh_response_invalid", "the public advisory response size is invalid")
@@ -468,6 +472,80 @@ def _validate_materializer_anchor(
             "the selected advisory has no unique single-parent fix for the vulnerable commit",
         )
     return matching[0]
+
+
+def _materializer_anchor_diagnosis(
+    task: BenchmarkTask,
+    reports: Sequence[Mapping[str, Any]],
+    advisories_by_ghsa: Mapping[str, Mapping[str, Any]],
+    repository: GitRepository,
+) -> dict[str, object]:
+    """Return a compact report-level anchor diagnosis for one public task."""
+
+    passes: list[dict[str, str]] = []
+    blockers: list[dict[str, str]] = []
+    for report in reports:
+        report_id = str(report["report_id"])
+        advisory = advisories_by_ghsa.get(report_id)
+        if advisory is None:
+            blockers.append({"code": "advisory_missing", "report_id": report_id})
+            continue
+        try:
+            fix_commit = _validate_materializer_anchor(
+                task, report, advisory, repository
+            )
+        except LaneAPublicBatchError as exc:
+            blockers.append({"code": exc.code, "report_id": report_id})
+            continue
+        passes.append({"fix_commit": fix_commit, "report_id": report_id})
+
+    distinct_fixes = sorted({item["fix_commit"] for item in passes})
+    if not passes:
+        status = "blocked"
+    elif len(distinct_fixes) == 1:
+        status = "prepared"
+    else:
+        status = "ambiguous"
+        blockers.append(
+            {"code": "ambiguous_report_candidate", "report_id": task.task_id}
+        )
+    return {
+        "blockers": blockers,
+        "pass_count": len(passes),
+        "passes": passes,
+        "report_count": len(reports),
+        "status": status,
+        "task_id": task.task_id,
+    }
+
+
+def _select_materializer_anchor(
+    task: BenchmarkTask,
+    reports: Sequence[Mapping[str, Any]],
+    advisories_by_ghsa: Mapping[str, Mapping[str, Any]],
+    repository: GitRepository,
+) -> str:
+    diagnosis = _materializer_anchor_diagnosis(
+        task, reports, advisories_by_ghsa, repository
+    )
+    passes = tuple(diagnosis["passes"])
+    if diagnosis["status"] == "prepared" and passes:
+        return str(sorted(passes, key=lambda item: item["report_id"])[0]["fix_commit"])
+    blockers = tuple(diagnosis["blockers"])
+    if diagnosis["status"] == "ambiguous":
+        raise _error(
+            "ambiguous_report_candidate",
+            "the selected task has multiple public report anchors with different fixes",
+        )
+    if blockers:
+        raise _error(
+            str(blockers[0]["code"]),
+            "no public report candidate can anchor the selected task",
+        )
+    raise _error(
+        "fix_candidate_missing",
+        "no public report candidate can anchor the selected task",
+    )
 
 
 def _canonical_wires(
@@ -650,11 +728,10 @@ def prepare_lane_a_public_batch(
 
     fix_commits: dict[str, str] = {}
     for task in tasks:
-        selected_report = reports_by_task[task.task_id][0]
-        fix_commits[task.task_id] = _validate_materializer_anchor(
+        fix_commits[task.task_id] = _select_materializer_anchor(
             task,
-            selected_report,
-            by_ghsa[selected_report["report_id"]],
+            reports_by_task[task.task_id],
+            by_ghsa,
             repositories[task.repo_url.casefold()].repository,
         )
 
@@ -701,26 +778,123 @@ def prepare_lane_a_public_batch(
     }
 
 
+def diagnose_lane_a_public_batch(
+    *,
+    public_tasks_file: Path,
+    public_reports_file: Path,
+    local_repo_root: Path,
+    task_ids: Sequence[str],
+    advisory_fetcher: AdvisoryFetcher | None = None,
+) -> dict[str, object]:
+    """Diagnose public-materialization readiness without publishing outputs."""
+
+    _task_path, _task_input_wire, tasks = _load_public_tasks(public_tasks_file, task_ids)
+    _report_path, _report_input_wire, reports, reports_by_task = _load_public_reports(
+        public_reports_file, tasks
+    )
+    _repo_root, repositories = _load_repositories(local_repo_root, tasks)
+    fetcher = advisory_fetcher or _fetch_advisory
+    advisories_by_ghsa: dict[str, dict[str, Any]] = {}
+    advisory_errors: dict[str, str] = {}
+    for report in reports:
+        ghsa_id = report["report_id"]
+        if ghsa_id in advisories_by_ghsa or ghsa_id in advisory_errors:
+            continue
+        try:
+            advisories_by_ghsa[ghsa_id] = _sanitize_advisory(
+                fetcher(ghsa_id), ghsa_id
+            )
+        except LaneAPublicBatchError as exc:
+            advisory_errors[ghsa_id] = exc.code
+        except BaseException:
+            advisory_errors[ghsa_id] = "gh_failed"
+
+    task_results: list[dict[str, object]] = []
+    blocker_counts: dict[str, int] = {}
+    for task in tasks:
+        task_advisories = {
+            report["report_id"]: advisories_by_ghsa[report["report_id"]]
+            for report in reports_by_task[task.task_id]
+            if report["report_id"] in advisories_by_ghsa
+        }
+        diagnosis = _materializer_anchor_diagnosis(
+            task,
+            reports_by_task[task.task_id],
+            task_advisories,
+            repositories[task.repo_url.casefold()].repository,
+        )
+        blockers = list(diagnosis["blockers"])
+        for report in reports_by_task[task.task_id]:
+            code = advisory_errors.get(report["report_id"])
+            if code is not None:
+                blockers = [
+                    item
+                    for item in blockers
+                    if not (
+                        item["code"] == "advisory_missing"
+                        and item["report_id"] == report["report_id"]
+                    )
+                ]
+                blockers.append({"code": code, "report_id": report["report_id"]})
+        blockers.sort(key=lambda item: (item["code"], item["report_id"]))
+        diagnosis["blockers"] = blockers
+        for item in blockers:
+            code = str(item["code"])
+            blocker_counts[code] = blocker_counts.get(code, 0) + 1
+        task_results.append(diagnosis)
+
+    status_counts: dict[str, int] = {}
+    for item in task_results:
+        status = str(item["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "contract_version": CONTRACT_VERSION,
+        "kind": "vulngym.lane-a-public-batch-diagnosis.v1",
+        "summary": {
+            "advisory_count": len(advisories_by_ghsa),
+            "advisory_error_count": len(advisory_errors),
+            "blocker_counts": dict(sorted(blocker_counts.items())),
+            "report_count": len(reports),
+            "repository_count": len(repositories),
+            "split": tasks[0].split,
+            "status_counts": dict(sorted(status_counts.items())),
+            "task_count": len(tasks),
+        },
+        "tasks": task_results,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--public-tasks-file", required=True, type=Path)
     parser.add_argument("--public-reports-file", required=True, type=Path)
     parser.add_argument("--local-repo-root", required=True, type=Path)
     parser.add_argument("--task-id", action="append", required=True, dest="task_ids")
-    parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--diagnose-only", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         args = _parser().parse_args(argv)
-        result = prepare_lane_a_public_batch(
-            public_tasks_file=args.public_tasks_file,
-            public_reports_file=args.public_reports_file,
-            local_repo_root=args.local_repo_root,
-            task_ids=args.task_ids,
-            output_dir=args.output_dir,
-        )
+        if args.diagnose_only:
+            result = diagnose_lane_a_public_batch(
+                public_tasks_file=args.public_tasks_file,
+                public_reports_file=args.public_reports_file,
+                local_repo_root=args.local_repo_root,
+                task_ids=args.task_ids,
+            )
+        else:
+            if args.output_dir is None:
+                raise _error("invalid_output", "the output path is required")
+            result = prepare_lane_a_public_batch(
+                public_tasks_file=args.public_tasks_file,
+                public_reports_file=args.public_reports_file,
+                local_repo_root=args.local_repo_root,
+                task_ids=args.task_ids,
+                output_dir=args.output_dir,
+            )
     except LaneAPublicBatchError as exc:
         payload = {
             "code": exc.code,

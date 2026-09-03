@@ -289,6 +289,83 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
         self.assertEqual(captured.exception.code, "fix_candidate_missing")
         self.assertFalse((self.outputs / "no-fix").exists())
 
+    def test_prepare_uses_unique_passing_report_candidate(self) -> None:
+        alternate_report = "GHSA-3333-3333-3333"
+        self.reports_file.write_bytes(
+            b"".join(
+                _canonical_line(item)
+                for item in [
+                    self._report(self.report_id, self.vulnerable),
+                    self._report(
+                        alternate_report,
+                        self.vulnerable,
+                        entry_id="entry-00003",
+                        vuln_ids=[alternate_report],
+                    ),
+                ]
+            )
+        )
+
+        def fetcher(ghsa: str) -> dict[str, object]:
+            if ghsa == self.report_id:
+                return self._advisory(
+                    references=["https://github.com/example/repo/issues/1"]
+                )
+            return self._advisory(alternate_report)
+
+        result = self._prepare(output_name="alternate", fetcher=fetcher)
+
+        self.assertEqual(
+            result["summary"]["fix_commits"],
+            [{"fix_commit": self.fix, "task_id": self.task_id}],
+        )
+        self.assertTrue((self.outputs / "alternate").exists())
+
+    def test_diagnose_reports_passes_and_blockers_without_output(self) -> None:
+        alternate_report = "GHSA-3333-3333-3333"
+        self.reports_file.write_bytes(
+            b"".join(
+                _canonical_line(item)
+                for item in [
+                    self._report(self.report_id, self.vulnerable),
+                    self._report(
+                        alternate_report,
+                        self.vulnerable,
+                        entry_id="entry-00003",
+                        vuln_ids=[alternate_report],
+                    ),
+                ]
+            )
+        )
+
+        def fetcher(ghsa: str) -> dict[str, object]:
+            if ghsa == self.report_id:
+                return self._advisory(
+                    references=["https://github.com/example/repo/issues/1"]
+                )
+            return self._advisory(alternate_report)
+
+        result = prep.diagnose_lane_a_public_batch(
+            public_tasks_file=self.tasks_file,
+            public_reports_file=self.reports_file,
+            local_repo_root=self.repo_root,
+            task_ids=[self.task_id],
+            advisory_fetcher=fetcher,
+        )
+
+        self.assertEqual(result["summary"]["status_counts"], {"prepared": 1})
+        task = result["tasks"][0]
+        self.assertEqual(task["status"], "prepared")
+        self.assertEqual(
+            task["passes"],
+            [{"fix_commit": self.fix, "report_id": alternate_report}],
+        )
+        self.assertEqual(
+            task["blockers"],
+            [{"code": "fix_candidate_missing", "report_id": self.report_id}],
+        )
+        self.assertFalse((self.outputs / "diagnose").exists())
+
     def test_forbidden_input_name_is_rejected_without_reading_it(self) -> None:
         forbidden = self.inputs / "test_gold.jsonl"
         forbidden.write_bytes(self.tasks_file.read_bytes())
@@ -308,7 +385,7 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
         completed = subprocess.CompletedProcess(
             args=[], returncode=0, stdout=json.dumps(raw).encode("utf-8"), stderr=b""
         )
-        with mock.patch.object(prep, "_gh_executable", return_value="C:\\tools\\gh.exe"), mock.patch.object(
+        with mock.patch.object(prep, "_gh_executable", return_value="gh"), mock.patch.object(
             prep.subprocess, "run", return_value=completed
         ) as run:
             observed = prep._fetch_advisory(self.report_id)
@@ -317,16 +394,36 @@ class PrepareLaneAPublicBatchTests(unittest.TestCase):
         self.assertEqual(
             command,
             [
-                "C:\\tools\\gh.exe",
+                "gh",
                 "api",
                 "--hostname",
                 "github.com",
                 "-H",
                 "Accept: application/vnd.github+json",
-                f"/advisories/{self.report_id}",
+                f"/advisories/{self.report_id.lower()}",
             ],
         )
         self.assertIs(run.call_args.kwargs["stdin"], subprocess.DEVNULL)
+
+    def test_sanitize_normalizes_lowercase_ghsa_response(self) -> None:
+        sanitized = prep._sanitize_advisory(self._advisory(), self.report_id)
+
+        self.assertEqual(sanitized["ghsa_id"], self.report_id)
+        self.assertIn({"type": "GHSA", "value": self.report_id}, sanitized["identifiers"])
+
+    def test_fetch_retries_transient_gh_failure(self) -> None:
+        raw = self._advisory()
+        failed = subprocess.CompletedProcess(args=[], returncode=1, stdout=b"", stderr=b"unexpected EOF")
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout=json.dumps(raw).encode("utf-8"), stderr=b""
+        )
+        with mock.patch.object(prep, "_gh_executable", return_value="gh"), mock.patch.object(
+            prep.subprocess, "run", side_effect=[failed, completed]
+        ) as run:
+            observed = prep._fetch_advisory(self.report_id)
+
+        self.assertEqual(observed["ghsa_id"], self.report_id.lower())
+        self.assertEqual(run.call_count, 2)
 
 
 if __name__ == "__main__":

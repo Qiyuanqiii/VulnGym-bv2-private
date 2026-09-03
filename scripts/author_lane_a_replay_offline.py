@@ -552,17 +552,18 @@ class DecisionAuthoringBackend:
         self._task_counts[request.task_id] += 1
         return _plain(response)
 
-    def assert_healthy_and_complete(self) -> None:
+    def assert_healthy_and_complete(
+        self, *, producer_deferred_task_ids: Sequence[str] = ()
+    ) -> None:
         self.raise_if_failed()
+        producer_deferred = set(producer_deferred_task_ids)
         expected: set[tuple[str, int, str]] = set()
         for decision in self._decisions.values():
-            expected.update(
-                {
-                    (decision.task_id, 0, "plan"),
-                    (decision.task_id, 0, "semantic_judge"),
-                    (decision.task_id, 0, "reflection"),
-                }
-            )
+            expected.add((decision.task_id, 0, "plan"))
+            if decision.task_id in producer_deferred:
+                continue
+            expected.add((decision.task_id, 0, "semantic_judge"))
+            expected.add((decision.task_id, 0, "reflection"))
             for repair in decision.repairs:
                 expected.add((decision.task_id, repair.attempt, "repair"))
                 expected.add((decision.task_id, repair.attempt, "reflection"))
@@ -642,6 +643,7 @@ def _run_authoring_pass(
     backend: DecisionAuthoringBackend,
     limits: Limits,
     line_tolerance: int,
+    allow_producer_deferred: bool,
 ) -> tuple[ClosedLoopOutcome, ...]:
     producer = LocalStructuredT2Producer()
     t2_factory = LocalT2ContextFactory(package_root, repo_map, backend)
@@ -649,10 +651,21 @@ def _run_authoring_pass(
         package_root, repo_map, line_tolerance=line_tolerance
     )
     outcomes: list[ClosedLoopOutcome] = []
+    producer_deferred_task_ids: list[str] = []
     for task in tasks:
         outcome = ClosedLoopOrchestrator(
             producer, t1_factory, t2_factory, limits=limits
         ).run(task)
+        if (
+            allow_producer_deferred
+            and outcome.status == "manual_review"
+            and outcome.deferred_outcome is not None
+            and outcome.entry is None
+            and outcome.report is None
+        ):
+            outcomes.append(outcome)
+            producer_deferred_task_ids.append(task.task_id)
+            continue
         if (
             outcome.status not in {"finalized", "manual_review"}
             or outcome.entry is None
@@ -664,7 +677,9 @@ def _run_authoring_pass(
                 "a task did not produce a terminal candidate and T1 report",
             )
         outcomes.append(outcome)
-    backend.assert_healthy_and_complete()
+    backend.assert_healthy_and_complete(
+        producer_deferred_task_ids=producer_deferred_task_ids
+    )
     return tuple(outcomes)
 
 
@@ -789,6 +804,7 @@ def author_lane_a_replay(
     max_tool_calls: int = Limits().max_tool_calls,
     max_repair_iterations: int = Limits().max_repair_iterations,
     line_tolerance: int = 5,
+    allow_producer_deferred: bool = False,
 ) -> dict[str, Any]:
     """Create and internally exact-replay one complete Lane A batch."""
 
@@ -848,6 +864,7 @@ def author_lane_a_replay(
         backend=author_backend,
         limits=limits,
         line_tolerance=line_tolerance,
+        allow_producer_deferred=allow_producer_deferred,
     )
     document = _replay_document(author_backend.fixtures)
     replay_payload = canonical_json(document).encode("utf-8") + b"\n"
@@ -874,17 +891,29 @@ def author_lane_a_replay(
     )
     task_summaries = []
     for ordinal, (task, outcome) in enumerate(zip(tasks, exact_outcomes), 1):
-        assert outcome.entry is not None and outcome.report is not None
+        entry_sha256 = (
+            None if outcome.entry is None else canonical_sha256(outcome.entry)
+        )
+        validation_sha256 = (
+            None if outcome.report is None else canonical_sha256(outcome.report)
+        )
+        verdict = None if outcome.report is None else outcome.report.verdict
+        deferred_reason = (
+            None
+            if outcome.deferred_outcome is None
+            else outcome.deferred_outcome.reason_code
+        )
         task_summaries.append(
             {
-                "entry_sha256": canonical_sha256(outcome.entry),
+                "deferred_reason": deferred_reason,
+                "entry_sha256": entry_sha256,
                 "model_response_count": author_backend.response_count(task.task_id),
                 "ordinal": ordinal,
                 "state_sha256": canonical_sha256(outcome.state.to_dict()),
                 "status": outcome.status,
                 "task_id": task.task_id,
-                "validation_sha256": canonical_sha256(outcome.report),
-                "verdict": outcome.report.verdict,
+                "validation_sha256": validation_sha256,
+                "verdict": verdict,
             }
         )
     return {
@@ -927,6 +956,7 @@ def _parser() -> argparse.ArgumentParser:
         default=Limits().max_repair_iterations,
     )
     parser.add_argument("--line-tolerance", type=int, default=5)
+    parser.add_argument("--allow-producer-deferred", action="store_true")
     return parser
 
 
@@ -946,6 +976,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_tool_calls=args.max_tool_calls,
             max_repair_iterations=args.max_repair_iterations,
             line_tolerance=args.line_tolerance,
+            allow_producer_deferred=args.allow_producer_deferred,
         )
     except LaneAReplayAuthoringError as error:
         sys.stderr.write(

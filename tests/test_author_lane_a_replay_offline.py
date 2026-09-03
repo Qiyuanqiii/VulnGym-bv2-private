@@ -6,10 +6,12 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 import unittest
 from unittest.mock import patch
 
+from scripts import author_lane_a_replay_offline as author_module
 from scripts.author_lane_a_replay_offline import (
     DecisionAuthoringBackend,
     LaneAReplayAuthoringError,
@@ -255,6 +257,126 @@ class LaneAReplayAuthoringTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "candidate_ordinal_invalid")
         self.assertFalse(replay.exists())
+
+    def test_authoring_pass_allows_producer_deferred_when_explicit(self) -> None:
+        [task] = author_module._load_tasks(
+            self.tasks,
+            max_input_line_bytes=author_module.DEFAULT_MAX_INPUT_LINE_BYTES,
+            max_task_bytes=author_module.DEFAULT_MAX_TASK_BYTES,
+            max_records=author_module.DEFAULT_MAX_RECORDS,
+        )
+        decisions, _, _ = author_module.load_decisions(self.decisions)
+        backend = DecisionAuthoringBackend(decisions)
+        outcome = SimpleNamespace(
+            deferred_outcome=SimpleNamespace(
+                reason_code="guard_only_exists_on_fix_side"
+            ),
+            entry=None,
+            report=None,
+            status="manual_review",
+        )
+        plan_request = ModelRequest(
+            task_id=TASK_ID,
+            attempt=0,
+            policy_scope="t2.initial",
+            stage="plan",
+            model_call_id="MODEL-plan",
+            backend_id="exact-replay",
+            model_id="offline-v1",
+            payload={"allowed_critical_modes": ["sink"]},
+        )
+
+        def consume_plan(_task: object) -> object:
+            backend.invoke(plan_request)
+            return outcome
+
+        with patch.object(author_module, "ClosedLoopOrchestrator") as orchestrator:
+            orchestrator.return_value.run.side_effect = consume_plan
+            observed = author_module._run_authoring_pass(
+                [task],
+                package_root=self.package,
+                repo_map={REPO_URL: self.repository},
+                backend=backend,
+                limits=author_module.Limits(),
+                line_tolerance=5,
+                allow_producer_deferred=True,
+            )
+
+        self.assertEqual(observed, (outcome,))
+
+        backend = DecisionAuthoringBackend(decisions)
+        plan_request = ModelRequest(
+            task_id=TASK_ID,
+            attempt=0,
+            policy_scope="t2.initial",
+            stage="plan",
+            model_call_id="MODEL-plan",
+            backend_id="exact-replay",
+            model_id="offline-v1",
+            payload={"allowed_critical_modes": ["sink"]},
+        )
+
+        def consume_plan_then_reject(_task: object) -> object:
+            backend.invoke(plan_request)
+            return outcome
+
+        with patch.object(author_module, "ClosedLoopOrchestrator") as orchestrator:
+            orchestrator.return_value.run.side_effect = consume_plan_then_reject
+            with self.assertRaises(LaneAReplayAuthoringError) as raised:
+                author_module._run_authoring_pass(
+                    [task],
+                    package_root=self.package,
+                    repo_map={REPO_URL: self.repository},
+                    backend=backend,
+                    limits=author_module.Limits(),
+                    line_tolerance=5,
+                    allow_producer_deferred=False,
+                )
+
+        self.assertEqual(raised.exception.code, "terminal_prediction_missing")
+
+    def test_allow_producer_deferred_summary_uses_null_prediction_digests(self) -> None:
+        task = json.loads(self.tasks.read_text(encoding="utf-8"))
+        task["inputs"]["hints"]["critical_mode"] = "guard"
+        task["inputs"]["hints"]["entry_symbols"] = []
+        _write_json(self.tasks, task)
+        decision = json.loads(self.decisions.read_text(encoding="utf-8"))
+        decision["tasks"][0]["plan"]["critical_mode"] = "guard"
+        _write_json(self.decisions, decision)
+
+        replay = self.root / "producer-deferred.json"
+        with patch.object(author_module, "_run_authoring_pass") as authored, patch.object(
+            author_module, "_run_exact_pass"
+        ) as exact:
+            outcome = SimpleNamespace(
+                deferred_outcome=SimpleNamespace(
+                    reason_code="guard_only_exists_on_fix_side"
+                ),
+                entry=None,
+                report=None,
+                state=SimpleNamespace(to_dict=lambda: {"status": "manual_review"}),
+                status="manual_review",
+            )
+            authored.return_value = (outcome,)
+            exact.return_value = (outcome,)
+            summary = author_lane_a_replay(
+                tasks_path=self.tasks,
+                decisions_path=self.decisions,
+                repo_map_path=self.repo_map,
+                package_root=self.package,
+                output_replay=replay,
+                allow_producer_deferred=True,
+            )
+
+        document = json.loads(replay.read_text(encoding="utf-8"))
+        self.assertEqual(document["responses"], [])
+        self.assertEqual(summary["status_counts"], {"manual_review": 1})
+        self.assertEqual(summary["verdict_counts"], {})
+        [task_summary] = summary["tasks"]
+        self.assertEqual(task_summary["deferred_reason"], "guard_only_exists_on_fix_side")
+        self.assertIsNone(task_summary["entry_sha256"])
+        self.assertIsNone(task_summary["validation_sha256"])
+        self.assertIsNone(task_summary["verdict"])
 
     def test_contract_version_rejects_boolean_type_confusion(self) -> None:
         decision = json.loads(self.decisions.read_text(encoding="utf-8"))
