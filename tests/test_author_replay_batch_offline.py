@@ -85,6 +85,68 @@ class OfflineAuthoringHelperTests(unittest.TestCase):
             all(item["assessment"] == "supported" for item in response["reviews"][0]["criteria"])
         )
 
+    def test_d2_builder_defers_after_exhausted_empty_link_result(self) -> None:
+        plan = TaskPlan(
+            task_id="VG-TEST-0123456789ABCDEF0123",
+            split="test",
+            target_path="src/app.ts",
+            target_index=0,
+            inventory_cursor=0,
+            critical_line=20,
+            critical_query="readFile",
+            critical_token="readFile",
+            entry_line=8,
+            entry_token="entry",
+            relation_line=13,
+            relation_token="helper",
+            score=1,
+        )
+        payload = {
+            "allowed_actions": ("link", "defer", "select"),
+            "phase": "ANALYZE",
+            "catalog": {
+                "nodes": (
+                    {
+                        "type": "LEX",
+                        "path": "src/app.ts",
+                        "line": 20,
+                        "token": "readFile",
+                        "ref": {"artifact_id": "ART-struct", "node_id": "LEX-critical"},
+                    },
+                    {
+                        "type": "LEX",
+                        "path": "src/app.ts",
+                        "line": 8,
+                        "token": "entry",
+                        "ref": {"artifact_id": "ART-struct", "node_id": "LEX-entry"},
+                    },
+                    {
+                        "type": "LEX",
+                        "path": "src/app.ts",
+                        "line": 13,
+                        "token": "helper",
+                        "ref": {"artifact_id": "ART-struct", "node_id": "LEX-helper"},
+                    },
+                ),
+            },
+            "last_result": {
+                "action": "link",
+                "summary": {
+                    "complete": True,
+                    "next_cursor": None,
+                    "relationship_count": 0,
+                },
+            },
+            "relationships": (),
+        }
+
+        response = _build_d2_response(payload, plan)
+
+        self.assertIsNotNone(response)
+        assert response is not None
+        self.assertEqual("defer", response["action"])
+        self.assertEqual("no_selectable_relationship", response["reason_code"])
+
     def test_scan_prefers_actual_call_over_import_line(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tree = Path(directory)

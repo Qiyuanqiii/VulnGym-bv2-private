@@ -931,6 +931,31 @@ def _select_relationship(payload: Mapping[str, Any], relation_token: str | None)
     return None
 
 
+def _link_result_is_exhausted(payload: Mapping[str, Any]) -> bool:
+    last_result = payload.get("last_result")
+    if not isinstance(last_result, Mapping) or last_result.get("action") != "link":
+        return False
+    summary = last_result.get("summary")
+    return (
+        isinstance(summary, Mapping)
+        and summary.get("complete") is True
+        and summary.get("next_cursor") is None
+    )
+
+
+def _next_link_cursor(payload: Mapping[str, Any]) -> int | None:
+    last_result = payload.get("last_result")
+    if not isinstance(last_result, Mapping) or last_result.get("action") != "link":
+        return None
+    summary = last_result.get("summary")
+    if not isinstance(summary, Mapping):
+        return None
+    cursor = summary.get("next_cursor")
+    if type(cursor) is int and cursor >= 0:
+        return cursor
+    return None
+
+
 def _dedupe_refs(refs: Sequence[dict[str, str]]) -> list[dict[str, str]]:
     result: list[dict[str, str]] = []
     for ref in refs:
@@ -1174,12 +1199,21 @@ def _build_d2_response(payload: Mapping[str, Any], plan: TaskPlan) -> dict[str, 
                 }
 
         selected_relationship = _select_relationship(payload, plan.relation_token)
+        if selected_relationship is None and _link_result_is_exhausted(payload) and "defer" in allowed_set:
+            return {
+                "action": "defer",
+                "missing_information": [
+                    "source relationship search returned no selectable relationship for the planned entry and critical refs"
+                ],
+                "reason_code": "no_selectable_relationship",
+            }
         if selected_relationship is None and "link" in allowed_set:
+            next_cursor = _next_link_cursor(payload)
             structures = _structure_inputs(payload)
             if structures:
                 return {
                     "action": "link",
-                    "cursor": 0,
+                    "cursor": 0 if next_cursor is None else next_cursor,
                     "limit": MAX_LINK_RESULTS,
                     "structures": structures,
                 }
