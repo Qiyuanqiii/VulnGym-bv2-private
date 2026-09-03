@@ -565,6 +565,29 @@ class WorkerHandoffTests(unittest.TestCase):
         self.assertEqual(ledger.read_calls, 1)
         self.assertEqual(ledger.reads[0].sha256, hashlib.sha256(SOURCE).hexdigest())
 
+    def test_mounted_reverify_uses_bulk_manifest_reader(self) -> None:
+        with mock.patch.object(
+            sealed_tree_access_module._MountedTreeAuthority,
+            "read",
+            side_effect=AssertionError("mounted reverify must not use source read API"),
+        ):
+            tree = self._bind()
+            ledger = tree.finalize()
+        self.assertTrue(ledger.finalized)
+        self.assertTrue(ledger.verification_succeeded)
+        self.assertEqual(ledger.read_calls, 0)
+
+    def test_mounted_finalize_skips_full_tree_rescan(self) -> None:
+        tree = self._bind()
+        with mock.patch.object(
+            sealed_tree_access_module._MountedTreeAuthority,
+            "_assert_mounted_layout",
+            side_effect=AssertionError("mounted finalize must not rescan full tree"),
+        ):
+            ledger = tree.finalize()
+        self.assertTrue(ledger.finalized)
+        self.assertTrue(ledger.verification_succeeded)
+
     @unittest.skipUnless(os.name == "nt", "Windows long worker handoff")
     def test_worker_handoff_reads_and_finalizes_long_tree(self) -> None:
         components = tuple(
@@ -816,6 +839,10 @@ class WorkerHandoffTests(unittest.TestCase):
 
     def test_finalize_detects_content_change_and_permanently_closes(self) -> None:
         tree = self._bind()
+        self.assertEqual(
+            SOURCE,
+            tree.read_bytes(SOURCE_PATH, maximum_bytes=len(SOURCE)),
+        )
         target = self.snapshot_root / "tree" / SOURCE_PATH
         target.write_bytes(SOURCE.replace(b"critical", b"changed_"))
         with self.assertRaises(SealedTreeAccessError) as captured:

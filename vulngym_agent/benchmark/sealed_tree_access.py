@@ -33,7 +33,6 @@ from vulngym_agent.benchmark.sealed_snapshot import (
     SnapshotPolicy,
     VerifiedSealedSnapshot,
     _reject_windows_device_path,
-    _scan_tree,
     _stable_path_identity,
     _windows_assert_no_named_streams,
     _windows_extended_path,
@@ -289,7 +288,12 @@ class _TreeAuthority(Protocol):
 
     def read(self, record: SealedTreeFile) -> bytes: ...
 
-    def reverify(self, task: DiscoveryTaskInputV1) -> None: ...
+    def reverify(
+        self,
+        task: DiscoveryTaskInputV1,
+        *,
+        reads: tuple[SourceReadUsage, ...] = (),
+    ) -> None: ...
 
     def close(self) -> None: ...
 
@@ -877,7 +881,34 @@ class _TrustedTreeAuthority:
                 opened_tree, expected=self._directories[""]
             )
 
-    def reverify(self, task: DiscoveryTaskInputV1) -> None:
+    def assert_root_chain_identity(self) -> None:
+        for component, expected in self._base_chain:
+            _, current = _safe_directory(component)
+            if current != expected:
+                raise SealedTreeAccessError(
+                    "source_changed", "a trusted source directory identity changed"
+                )
+        if os.name != "nt":
+            if self._tree_descriptor is None:
+                raise SealedTreeAccessError(
+                    "source_changed", "the authenticated source root is not pinned"
+                )
+            try:
+                opened_tree = os.fstat(self._tree_descriptor)
+            except OSError:
+                raise SealedTreeAccessError(
+                    "source_changed", "the authenticated source root is unavailable"
+                ) from None
+            _assert_safe_open_directory(
+                opened_tree, expected=self._directories[""]
+            )
+
+    def reverify(
+        self,
+        task: DiscoveryTaskInputV1,
+        *,
+        reads: tuple[SourceReadUsage, ...] = (),
+    ) -> None:
         try:
             verified = verify_sealed_snapshot(
                 self._snapshot_root,
@@ -1060,6 +1091,70 @@ def _manifest_directories(files: tuple[SealedTreeFile, ...]) -> frozenset[str]:
     return frozenset(directories)
 
 
+def _scan_mounted_manifest_layout(
+    tree: Path,
+    files: tuple[SealedTreeFile, ...],
+) -> tuple[dict[str, _FileIdentity], dict[str, _DirectoryIdentity]]:
+    expected_files = frozenset(record.path for record in files)
+    expected_directories = _manifest_directories(files)
+    expected_children: dict[str, set[str]] = {"": set()}
+    for relative in (*expected_files, *expected_directories):
+        parts = relative.split("/")
+        parent = "/".join(parts[:-1])
+        expected_children.setdefault(parent, set()).add(parts[-1])
+        if relative in expected_directories:
+            expected_children.setdefault(relative, set())
+
+    observed_files: dict[str, _FileIdentity] = {}
+    observed_directories: dict[str, _DirectoryIdentity] = {}
+    stack: list[tuple[Path, str]] = [(tree, "")]
+    try:
+        _safe_directory(tree)
+        while stack:
+            directory, relative_directory = stack.pop()
+            expected_names = expected_children.get(relative_directory, set())
+            observed_names: set[str] = set()
+            with os.scandir(_windows_extended_path(directory)) as entries:
+                for entry in entries:
+                    observed_names.add(entry.name)
+                    relative = (
+                        f"{relative_directory}/{entry.name}"
+                        if relative_directory
+                        else entry.name
+                    )
+                    child = directory / entry.name
+                    if relative in expected_directories:
+                        _, identity = _safe_directory(child)
+                        observed_directories[relative] = identity
+                        stack.append((child, relative))
+                    elif relative in expected_files:
+                        _, identity = _safe_regular(child)
+                        observed_files[relative] = identity
+                    else:
+                        raise SealedTreeAccessError(
+                            "source_changed",
+                            "the mounted source layout contains an unexpected member",
+                        )
+            if observed_names != expected_names:
+                raise SealedTreeAccessError(
+                    "source_changed", "the mounted source layout changed"
+                )
+    except SealedTreeAccessError:
+        raise
+    except OSError:
+        raise SealedTreeAccessError(
+            "source_changed", "the mounted source tree cannot be enumerated"
+        ) from None
+
+    if set(observed_files) != set(expected_files) or set(observed_directories) != set(
+        expected_directories
+    ):
+        raise SealedTreeAccessError(
+            "source_changed", "the mounted source layout changed"
+        )
+    return observed_files, observed_directories
+
+
 class _MountedTreeAuthority(_TrustedTreeAuthority):
     """Key-free authority over one evaluator-verified read-only mount.
 
@@ -1113,6 +1208,7 @@ class _MountedTreeAuthority(_TrustedTreeAuthority):
                 self._tree_descriptor = _posix_open_tree_descriptor(
                     self._tree, expected=self._directories[""]
                 )
+            self._assert_mounted_layout(check_final_paths=False)
             self.reverify(handoff.task)
         except BaseException:
             _best_effort_close(self)
@@ -1123,32 +1219,8 @@ class _MountedTreeAuthority(_TrustedTreeAuthority):
         self._handoff_sha256 = ""
         self._task_binding = ()
 
-    def _assert_mounted_layout(self) -> None:
-        expected_files = frozenset(record.path for record in self._files)
-        expected_directories = _manifest_directories(self._files)
-        try:
-            files, directories = _scan_tree(
-                self._tree,
-                self._policy,
-                expected_files=expected_files,
-                expected_directories=expected_directories,
-            )
-        except SealedSnapshotError as error:
-            code = (
-                "unsafe_source_path"
-                if error.code
-                in {"unsafe_snapshot_path", "snapshot_path_collision"}
-                else "source_changed"
-            )
-            raise SealedTreeAccessError(
-                code, "the mounted source tree does not match its verified handoff"
-            ) from None
-        if set(files) != set(expected_files) or set(directories) != set(
-            expected_directories
-        ):
-            raise SealedTreeAccessError(
-                "source_changed", "the mounted source layout changed"
-            )
+    def _assert_mounted_layout(self, *, check_final_paths: bool = True) -> None:
+        files, directories = _scan_mounted_manifest_layout(self._tree, self._files)
         for path, identity in files.items():
             if identity != self._file_identities[path]:
                 raise SealedTreeAccessError(
@@ -1159,9 +1231,76 @@ class _MountedTreeAuthority(_TrustedTreeAuthority):
                 raise SealedTreeAccessError(
                     "source_changed", "a mounted source directory identity changed"
                 )
-        self.assert_identity_state()
+        if check_final_paths:
+            self.assert_identity_state()
+        else:
+            self.assert_root_chain_identity()
 
-    def reverify(self, task: DiscoveryTaskInputV1) -> None:
+    def _read_mounted_manifest_record(self, record: SealedTreeFile) -> None:
+        parts = record.path.split("/")
+        path = self._tree.joinpath(*parts)
+        _, before_identity = _safe_regular(path)
+        if before_identity != self._file_identities[record.path]:
+            raise SealedTreeAccessError(
+                "source_changed", "a mounted source file identity changed"
+            )
+        _assert_no_named_streams(path)
+
+        descriptor: int | None = None
+        try:
+            if os.name == "nt":
+                descriptor, opened = _windows_open_source_descriptor(
+                    path,
+                    expected_final_path=self._windows_final_paths[record.path],
+                    expected_file=before_identity,
+                    expected_size=record.size,
+                )
+            else:
+                if self._tree_descriptor is None:
+                    raise SealedTreeAccessError(
+                        "source_changed", "the authenticated source root is not pinned"
+                    )
+                descriptor, opened = _posix_open_relative_file(
+                    self._tree_descriptor,
+                    tuple(parts),
+                    directories=self._directories,
+                    expected_file=before_identity,
+                    expected_size=record.size,
+                )
+            data = _read_stable_descriptor(descriptor, opened, record)
+        finally:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+        _, after_identity = _safe_regular(path)
+        if after_identity != before_identity:
+            raise SealedTreeAccessError(
+                "source_changed", "a mounted source file identity changed"
+            )
+        _assert_no_named_streams(path)
+
+        git_header = f"blob {len(data)}\0".encode("ascii")
+        git_oid = hashlib.sha1(
+            git_header + data, usedforsecurity=False
+        ).hexdigest()
+        if (
+            len(data) != record.size
+            or hashlib.sha256(data).hexdigest() != record.sha256
+            or git_oid != record.blob_oid
+        ):
+            raise SealedTreeAccessError(
+                "source_changed", "mounted source bytes no longer match the manifest"
+            )
+
+    def reverify(
+        self,
+        task: DiscoveryTaskInputV1,
+        *,
+        reads: tuple[SourceReadUsage, ...] = (),
+    ) -> None:
         if (
             type(task) is not DiscoveryTaskInputV1
             or _task_authority_fingerprint(task) != self._task_binding
@@ -1170,10 +1309,31 @@ class _MountedTreeAuthority(_TrustedTreeAuthority):
             raise SealedTreeAccessError(
                 "invalid_binding", "mounted source task binding is invalid"
             )
-        self._assert_mounted_layout()
-        for record in self._files:
-            self.read(record)
-        self._assert_mounted_layout()
+        if type(reads) is not tuple or any(
+            type(receipt) is not SourceReadUsage for receipt in reads
+        ):
+            raise SealedTreeAccessError(
+                "invalid_binding", "mounted source read receipts are invalid"
+            )
+        self.assert_root_chain_identity()
+        records = {record.path: record for record in self._files}
+        checked_paths: set[str] = set()
+        for receipt in reads:
+            record = records.get(receipt.path)
+            if (
+                record is None
+                or receipt.bytes_read != record.size
+                or receipt.sha256 != record.sha256
+                or receipt.blob_oid != record.blob_oid
+            ):
+                raise SealedTreeAccessError(
+                    "invalid_binding", "mounted source read receipts are invalid"
+                )
+            if record.path in checked_paths:
+                continue
+            checked_paths.add(record.path)
+            self._read_mounted_manifest_record(record)
+        self.assert_root_chain_identity()
 
 
 _CONSTRUCTION_TOKEN: Final[object] = object()
@@ -1403,7 +1563,7 @@ class BoundSealedTree:
         with self.__lock:
             authority = self._require_active(_claim_token)
             try:
-                authority.reverify(self.__task)
+                authority.reverify(self.__task, reads=tuple(self.__reads))
                 authority.close()
                 self.__authority = None
                 self.__finalized = True
