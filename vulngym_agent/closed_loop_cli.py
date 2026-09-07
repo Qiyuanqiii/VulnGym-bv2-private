@@ -35,6 +35,7 @@ from vulngym_agent.agents.model_runtime import (
     MODEL_STAGES,
     ModelBlocked,
     ModelRequest,
+    StructuredModelBackend,
     structured_json_sha256,
 )
 from vulngym_agent.agents.real_t2_producer import LocalStructuredT2Producer
@@ -904,8 +905,8 @@ class ClosedLoopTaskRunner(Protocol):
     def finalize_batch(self) -> None: ...
 
 
-class LocalClosedLoopTaskRunner:
-    """Composition root for one offline batch; each task gets a fresh run."""
+class _LocalTaskExecution:
+    """Shared local T2/T1 execution, without a model-source closure policy."""
 
     __slots__ = ("_backend", "_limits", "_producer", "_t1_factory", "_t2_factory")
 
@@ -914,15 +915,15 @@ class LocalClosedLoopTaskRunner:
         *,
         package_root: str | os.PathLike[str],
         repo_map: Mapping[str, Path],
-        backend: ExactReplayBackend,
+        backend: StructuredModelBackend,
         limits: Limits | Mapping[str, Any] | None = None,
         line_tolerance: int = 5,
         t1_max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
         t1_max_package_bytes: int = DEFAULT_MAX_PACKAGE_BYTES,
         t1_max_package_files: int = DEFAULT_MAX_PACKAGE_FILES,
     ) -> None:
-        if not isinstance(backend, ExactReplayBackend):
-            raise ValueError("backend must be an ExactReplayBackend")
+        if not isinstance(backend, StructuredModelBackend):
+            raise ValueError("backend must implement StructuredModelBackend")
         self._backend = backend
         self._limits = (
             limits
@@ -952,6 +953,16 @@ class LocalClosedLoopTaskRunner:
             limits=self._limits,
         )
         return orchestrator.run(task)
+
+class LocalClosedLoopTaskRunner(_LocalTaskExecution):
+    """Exact-replay composition root; unused responses still abort publication."""
+
+    __slots__ = ()
+
+    def __init__(self, *, backend: ExactReplayBackend, **configuration: Any) -> None:
+        if not isinstance(backend, ExactReplayBackend):
+            raise ValueError("backend must be an ExactReplayBackend")
+        super().__init__(backend=backend, **configuration)
 
     def finalize_batch(self) -> None:
         self._backend.assert_complete()
@@ -1146,9 +1157,9 @@ def run_closed_loop_batch(
                 emitted_task_ids.add(record.task.task_id)
                 yield _make_replay_event(record, outcome)
 
-            # Exact replay closure is a batch publication precondition.  It is
-            # deliberately inside the writer's one-shot consumption so its
-            # staging transaction is abandoned on unused/missing/reused calls.
+            # Runner-specific closure is a batch publication precondition.
+            # In exact-replay mode this still rejects unused/missing/reused
+            # calls inside the writer's one-shot staging transaction.
             runner.finalize_batch()
             stream_completed = True
         finally:
@@ -1220,13 +1231,14 @@ def _run_artifact_cli_batch(
     return summary
 
 
-def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="python -m vulngym_agent.closed_loop_cli",
-        description="Run the bounded offline VulnGym T2 -> T1 closed loop.",
-    )
+def _add_batch_arguments(
+    parser: argparse.ArgumentParser, *, exact_replay: bool
+) -> None:
+    """Keep task, resource and artifact limits identical across entry points."""
+
     parser.add_argument("--tasks", required=True, type=Path)
-    parser.add_argument("--replay-responses", required=True, type=Path)
+    if exact_replay:
+        parser.add_argument("--replay-responses", required=True, type=Path)
     parser.add_argument("--repo-map", required=True, type=Path)
     parser.add_argument("--package-root", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
@@ -1248,14 +1260,19 @@ def _parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_RECORDS,
         help=(
             "process at most this many tasks, then record the first overflow "
-            "line and stop; replay fixtures for unprocessed lines remain unused "
-            "and therefore reject publication"
+            "line and stop"
+            + (
+                "; replay fixtures for unprocessed lines remain unused "
+                "and therefore reject publication"
+                if exact_replay else ""
+            )
         ),
     )
-    parser.add_argument("--max-replay-bytes", type=int, default=DEFAULT_MAX_REPLAY_BYTES)
-    parser.add_argument(
-        "--max-replay-responses", type=int, default=DEFAULT_MAX_REPLAY_RESPONSES
-    )
+    if exact_replay:
+        parser.add_argument("--max-replay-bytes", type=int, default=DEFAULT_MAX_REPLAY_BYTES)
+        parser.add_argument(
+            "--max-replay-responses", type=int, default=DEFAULT_MAX_REPLAY_RESPONSES
+        )
     parser.add_argument("--max-llm-calls", type=int, default=Limits().max_llm_calls)
     parser.add_argument("--max-tool-calls", type=int, default=Limits().max_tool_calls)
     parser.add_argument(
@@ -1278,6 +1295,14 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="return 1 when any valid task is routed to manual review",
     )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="python -m vulngym_agent.closed_loop_cli",
+        description="Run the bounded offline VulnGym T2 -> T1 closed loop.",
+    )
+    _add_batch_arguments(parser, exact_replay=True)
     return parser
 
 

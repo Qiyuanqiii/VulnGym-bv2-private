@@ -16,7 +16,7 @@
   → [辅助T1 → 有依据的有限修正 → 重新验证]
 ```
 
-这是交付目标；**当前Lane A CLI依赖exact replay，新报告自主生产入口和质量证据仍是#12/#97缺口**。
+这是交付目标；**历史Lane A CLI依赖exact replay；新通用模型入口已接线，但具体模型、新报告实跑和质量证据仍是#12/#97缺口**。
 现有40个完整候选/报告对不等于40条已确认为正确的数据。缺失字段应保留证据和原因，
 不能为凑schema编造值；完整记录与partial/deferred记录须分流。
 
@@ -24,6 +24,11 @@
 
 `LocalStructuredT2Producer`、`ClosedLoopOrchestrator` 和
 `python -m vulngym_agent.closed_loop_cli` 已有受控生产/复现基础。
+
+新增 `python -m vulngym_agent.t2_production_cli` 通过可信的 `module:factory` 接入
+`StructuredModelBackend`，不要求预编 response；共享本地执行层但采用独立的批次关闭策略。
+旧入口仍强制 ExactReplayBackend 完整消费。配置、输出计数及构造测试边界见
+[生产 runbook](../t2_production_runbook.md)；具体模型适配器尚待选择与验证。
 
 - plan选择analyze/defer及critical mode。
 - 控制器读取本地公告、引用/patch和Git对象，提取字段、定位有界代码候选、检查schema。
