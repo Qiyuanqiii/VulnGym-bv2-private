@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "status": "exact_request_structure_reconstructed",
+  "external_calls": 0,
+  "not_a_new_model_run": true,
+  "observed_request_and_response_hashes_matched": 4,
+  "method": "deterministic_local_reconstruction_with_responses_verified_against_recorded_live_hashes",
+  "model_reasoning_inspected": false,
+  "results": [
+    {
+      "task_id": "VG-TRAIN-40D4B88B06CDE8FCFF5C",
+      "request_sha256": "852b4446106d364dc630cc4af1176b93ea06cbd946503e5f163b2f08e8a66eff",
+      "advisory_chars": 2000,
+      "critical_candidate_count": 3,
+      "critical_code_lines": [
+        1,
+        1,
+        1
+      ],
+      "entry_candidate_count": 12,
+      "entry_code_lines": [
+        6,
+        11,
+        6,
+        5,
+        7,
+        6,
+        6,
+        7,
+        5,
+        5,
+        4,
+        1
+      ],
+      "diff_field_present": false,
+      "response_contains_specific_defer_reason": false
+    },
+    {
+      "task_id": "VG-TRAIN-46D6453D5B4663CF0D13",
+      "request_sha256": "c421ac4f5e3f4e33aa1b580944e2a6188ef3383451f97f69acfa4da1bff8a3c5",
+      "advisory_chars": 2000,
+      "critical_candidate_count": 2,
+      "critical_code_lines": [
+        1,
+        1
+      ],
+      "entry_candidate_count": 1,
+      "entry_code_lines": [
+        1
+      ],
+      "diff_field_present": false,
+      "response_contains_specific_defer_reason": false
+    }
+  ]
+}

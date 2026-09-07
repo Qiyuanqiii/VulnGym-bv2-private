@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "purpose": "authorized_two_public_input_live_retest_not_unseen_quality_evaluation",
+  "code_commit": "8313bac54ccd139a339c768914123a5705562b32",
+  "backend_id": "deepseek:t2-json-v2:a3fb6702149e09a16dcc8073",
+  "settings": {
+    "automatic_retries": 0,
+    "endpoint": "https://api.deepseek.com/chat/completions",
+    "max_request_bytes": 2097152,
+    "max_response_bytes": 2097152,
+    "max_tokens": 8192,
+    "model": "deepseek-v4-pro",
+    "prompt_sha256": "760f8dc35f95bfae25310360227fa722a77bc149d74e19d66cbee1f38dbb5545",
+    "prompt_version": "t2-json-v2",
+    "reasoning_effort": "high",
+    "response_format": "json_object",
+    "stream": false,
+    "thinking": "enabled",
+    "timeout_seconds": 120
+  },
+  "input_manifest_sha256": "948589c5c80da83c9ab41432893f323b8f08d43523662d69ac0120e81fe77952",
+  "input_files_unchanged": 6,
+  "runner_sha256": "c0390ada274b1db3f97d493652302f09e43e1a8218f6e3df280807d621209b3b",
+  "bounded_transport_helper_sha256": "52bda82f3794a5164f69d5adcf76c237043966443fcd29168c75362253ec5eca",
+  "limits": {
+    "tasks": 2,
+    "llm_calls_per_task": 3,
+    "total_transport_attempts": 6,
+    "tool_calls_per_task": 80,
+    "repair_iterations": 0
+  },
+  "actual": {
+    "http_200": 4,
+    "reported_model_matches": 4,
+    "stages": {
+      "plan": 2,
+      "semantic_judge": 2,
+      "reflection": 0,
+      "repair": 0
+    },
+    "tool_calls": 23,
+    "tool_success": 23,
+    "complete_entries": 0,
+    "candidates": 0,
+    "t1_calls": 0,
+    "finalized": 0,
+    "manual_review": 2,
+    "deferred": 2,
+    "failed": 0,
+    "input_failures": 0,
+    "exit_code": 0,
+    "usage": {
+      "total_tokens": 14705,
+      "prompt_tokens": 11770,
+      "completion_tokens": 2935
+    },
+    "money_spent": null
+  },
+  "tasks": [
+    {
+      "task_id": "VG-TRAIN-40D4B88B06CDE8FCFF5C",
+      "plan_mode": "guard",
+      "stage": "semantic_judge",
+      "reason_code": "model_deferred",
+      "specific_model_defer_reason_available": false,
+      "complete_entries": 0,
+      "t1_calls": 0
+    },
+    {
+      "task_id": "VG-TRAIN-46D6453D5B4663CF0D13",
+      "plan_mode": "guard",
+      "stage": "semantic_judge",
+      "reason_code": "model_deferred",
+      "specific_model_defer_reason_available": false,
+      "complete_entries": 0,
+      "t1_calls": 0
+    }
+  ],
+  "readback": {
+    "independent_processes": 2,
+    "exit_codes": [
+      0,
+      0
+    ],
+    "canonical_stdout_equal": true,
+    "dataset_sha256": "227b305523e44894bf10eb6dd7099fa33ba8c7207d80a13222736a8dbefd5915"
+  },
+  "offline_regression": {
+    "tests_run": 40,
+    "passed": 40,
+    "skipped": 0,
+    "failed": 0,
+    "exit_code": 0,
+    "elapsed_seconds": 26.716,
+    "command": "python -B -m unittest tests.test_deepseek_backend tests.test_t2_evidence_first_planning -q"
+  },
+  "credential_handling": {
+    "usage_finished": true,
+    "replacement_credential_used_only_for_this_batch": true,
+    "earlier_credential_revoked_user_report": true,
+    "current_credential_revocation_reminder_sent": true,
+    "current_server_revocation_verified": false,
+    "credential_in_repository_or_runtime_outputs": false
+  },
+  "runtime_check": {
+    "files_checked": 21,
+    "bytes": 98120,
+    "credential_pattern_matches": 0
+  },
+  "semantic_quality_proven": false,
+  "issues_remain_open": [
+    12,
+    90,
+    94
+  ]
+}

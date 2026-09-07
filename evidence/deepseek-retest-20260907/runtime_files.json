@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "path": "output/candidates.jsonl",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "output/deferred.jsonl",
+      "bytes": 5073,
+      "sha256": "d4a78140bd12e76aec4764b2154c5f1b731a1bd7bce8861696973826cfd5fa6b"
+    },
+    {
+      "path": "output/entries.jsonl",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "output/errors.jsonl",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "output/evidence.jsonl",
+      "bytes": 16064,
+      "sha256": "da3ee31e5b341d8d434c7b9d12e573375d1f5d70bacb20c53ea2f9ea357649de"
+    },
+    {
+      "path": "output/model_calls.jsonl",
+      "bytes": 5352,
+      "sha256": "31e642b4af645ec6478822975ddfcf3c652fc01be754674c29df722bb44cfc3f"
+    },
+    {
+      "path": "output/repair_history.jsonl",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "output/run_manifest.jsonl",
+      "bytes": 3994,
+      "sha256": "23bcd9d204c8f78016e682a77bbbf042ebdac5810ccc6b014aa3ab2ab1272536"
+    },
+    {
+      "path": "output/states.jsonl",
+      "bytes": 10699,
+      "sha256": "0c00fe71e7a60dd4ce57e7a8ccae7be11278b620c8a17473d33e4ae9ac32c352"
+    },
+    {
+      "path": "output/tool_calls.jsonl",
+      "bytes": 26777,
+      "sha256": "19c135541a9c8ac56b9e3c5a500ad538a5d0898cb571c00de37640fbed6815ea"
+    },
+    {
+      "path": "output/validation.jsonl",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "output/validations.jsonl",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "input-manifest.json",
+      "bytes": 2559,
+      "sha256": "948589c5c80da83c9ab41432893f323b8f08d43523662d69ac0120e81fe77952"
+    },
+    {
+      "path": "run-exit.json",
+      "bytes": 153,
+      "sha256": "424126d239316f948c072a629cb307a33fee8decd42ac4c30e3dc947d7939b0d"
+    },
+    {
+      "path": "transport-events.jsonl",
+      "bytes": 1299,
+      "sha256": "cf3f16ab61d8d58d7fbb643df2f3c0e19f6599404fb1addd062c90edfd9d43af"
+    }
+  ]
+}
