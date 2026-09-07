@@ -6,6 +6,8 @@
 
 最新 [2 条真实复测](deepseek_t2_retest_receipt.md)已完成：4 次成功请求、14,705 tokens，两条均到达 semantic_judge 后模型弃答，完整 Entry/T1 仍为 0。当前需先离线补齐语义上下文及具体弃答说明，不扩大付费批次。新临时凭证的使用也已结束并通知撤销。
 
+当前代码的 [离线上下文修正](t2_semantic_context_receipt.md)已完成，提示词身份为 **t2-json-v3**：新生产语义与初始自检共享固定 diff/源码上下文，合法语义弃答必须提供有当前证据引用的结构化说明。276 项回归为 275 通过、1 跳过。用户确认临时 key 已撤销；v3 尚未调用真实模型，不沿用旧 key、不将离线探针视为真实质量结果。
+
 ## 1. 模型与调用约定
 
 按 [DeepSeek 官方入口说明](https://api-docs.deepseek.com/) 使用模型 ID `deepseek-v4-pro` 和官方主机 `api.deepseek.com`。适配器调用 `/chat/completions`，不换成旧别名、Flash 或第三方中转。

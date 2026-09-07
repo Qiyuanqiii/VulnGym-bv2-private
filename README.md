@@ -272,8 +272,12 @@ zero complete entries and zero T1 calls. New-report quality evaluation is pendin
 A subsequent [evidence-first routing fix](docs/t2_evidence_first_planning.md)
 passed offline regressions. A [live two-input retest](docs/deepseek_t2_retest_receipt.md)
 then reached semantic review on both inputs, but both model responses deferred:
-still zero complete entries or T1 calls. Bounded semantic context and specific
-defer explanations need improvement before expanding paid runs.
+still zero complete entries or T1 calls. A subsequent
+[bounded semantic-context/defer-contract fix](docs/t2_semantic_context_receipt.md)
+passed 276 offline regressions (275 passed, one skipped). It carries pinned
+diff/source context into semantic review and reflection and requires current
+evidence references for structured semantic defers. Prompt v3 has not been
+live-tested; improved real-model completeness or quality is not yet established.
 Current integration tests use synthetic test doubles, not real-model quality data.
 The existing exact-replay CLI and its mandatory replay closure remain unchanged.
 

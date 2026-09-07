@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "scope": "offline_context_delivery_and_defer_contract_not_semantic_quality",
+  "baseline_commit": "bda058f3690002305b750ad510ffe0b479621649",
+  "implementation_commit": "the_commit_containing_this_receipt",
+  "new_external_model_calls": 0,
+  "new_public_input_complete_entries": 0,
+  "new_public_input_t1_calls": 0,
+  "prompt_version": "t2-json-v3",
+  "credential_revocation": "user_reported_revoked_not_provider_verified",
+  "tests": {
+    "python_version": "3.13.12",
+    "temporary_drive": "D",
+    "total": 276,
+    "passed": 275,
+    "skipped": 1,
+    "failures": 0,
+    "exit_code": 0,
+    "elapsed_seconds": 181.523,
+    "new_semantic_context_tests": 27,
+    "skip": "existing_windows_symlink_privilege_test",
+    "includes_structured_defer_artifact_write_and_two_readbacks": true
+  },
+  "legacy_same_synthetic_fixture_exact_byte_comparison": {
+    "draft": true,
+    "model_requests": true,
+    "controller_projection": true
+  },
+  "historical_live_retest_runtime_files_matched": 15,
+  "historical_live_retest_dataset_sha256": "227b305523e44894bf10eb6dd7099fa33ba8c7207d80a13222736a8dbefd5915",
+  "historical_live_retest_outputs_modified": false,
+  "cleared_input_sha256": {
+    "tasks.jsonl": "f7b4b6bbef533972a3bc88b639d97b2a364de3b2ae8a44285c55c168b745970a",
+    "repos.json": "492e369017c0d5da64ec2f2b4cc3c0edf9fc8af0c4447b08dc2948cf24daf29e"
+  },
+  "executed_worktree_file_sha256": {
+    "vulngym_agent/agents/t2_semantic_context.py": "dd0f4b7500081b3d426bfdc8286669b819ff6a5f2040fd930b150dd0876a1659",
+    "vulngym_agent/agents/real_t2_producer.py": "4fbae35921a0c7cc6ef8ad358e77d0b92d45a4bff1a6629607cc5e8140749a80",
+    "vulngym_agent/agents/deepseek_backend.py": "f6d2dc7898417b29bb89bc8d36b40b137ca2d866d8e31892a0500f835c99417c",
+    "vulngym_agent/t2_production_cli.py": "d062d33e2b8ba7074e185901043476c45f4406da21b7d822c4553a8fca7b65d1",
+    "scripts/probe_t2_routing_offline.py": "955c427614f5e4b6f4c8d85524036bf0be631c60cf0a8f99ffb9a00fb952033b"
+  },
+  "issues_kept_open": [12, 90, 94]
+}

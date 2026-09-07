@@ -35,8 +35,13 @@ class _DiagnosticBackend:
         if request.stage == "plan":
             return {"action": "analyze", "critical_mode": request.payload["allowed_critical_modes"][0]}
         if request.stage == "semantic_judge":
-            return {"action": "defer", "critical_candidate_id": None, "entry_candidate_id": None,
+            result = {"action": "defer", "critical_candidate_id": None, "entry_candidate_id": None,
                     "project": None, "vuln_title": None, "vuln_category_l1": None, "vuln_category_l2": None}
+            if request.payload.get("contract_version") == 2:
+                result["defer_details"] = {"reason_code": "insufficient_context", "missing_fields": ["relationship"],
+                    "evidence_refs": [request.payload["defer_contract"]["allowed_evidence_refs"][0]],
+                    "explanation": "Diagnostic script deliberately declines semantic evaluation; this is not a model quality finding."}
+            return result
         raise ValueError("diagnostic_never_emits_reflects_or_repairs")
 
 
@@ -75,6 +80,17 @@ def main(argv=None):
                                      plan.payload["planning_evidence"]["mode_inventory"]} if plan else {},
                 "semantic_stage_reached": semantic is not None,
                 "entry_candidates": len(semantic.payload["entry_candidates"]) if semantic else None,
+                "semantic_context": ({
+                    "advisory_chars": len(semantic.payload["semantic_context"]["advisory"]["text"]),
+                    "advisory_truncated": semantic.payload["semantic_context"]["advisory"]["truncated"],
+                    "diffs": len(semantic.payload["semantic_context"]["diffs"]),
+                    "source_blocks": len(semantic.payload["semantic_context"]["source_contexts"]),
+                    "source_chars": semantic.payload["semantic_context"]["source_chars"],
+                    "source_code_lines": [block["line_end"] - block["line_start"] + 1 for block in semantic.payload["semantic_context"]["source_contexts"]],
+                    "complete_python_functions": sum(block["complete_function"] for block in semantic.payload["semantic_context"]["source_contexts"]),
+                    "omitted_candidates": sum(row["status"] != "included" for row in semantic.payload["semantic_context"]["candidate_context_coverage"]),
+                    "specific_defer_contract": True,
+                } if semantic and "semantic_context" in semantic.payload else None),
                 "complete_entries": 0, "t1_calls": 0,
             })
             backend.requests.clear()

@@ -122,7 +122,10 @@ class EvidenceFirstPlanningTests(unittest.TestCase):
             if request.stage == "semantic_judge":
                 backend.requests.append(request)
                 return {"action": "defer", "critical_candidate_id": None, "entry_candidate_id": None,
-                        "project": None, "vuln_title": None, "vuln_category_l1": None, "vuln_category_l2": None}
+                        "project": None, "vuln_title": None, "vuln_category_l1": None, "vuln_category_l2": None,
+                        "defer_details": {"reason_code": "unsupported_relationship", "missing_fields": ["relationship"],
+                                          "evidence_refs": [request.payload["defer_contract"]["allowed_evidence_refs"][0]],
+                                          "explanation": "The scripted fixture declines the role relationship."}}
             return original(request)
         backend.invoke = invoke
         outcome = self.runner(backend).run(task)

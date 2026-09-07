@@ -28,7 +28,7 @@ from vulngym_agent.agents.model_runtime import ModelBlocked, ModelRequest, struc
 MODEL_ID = "deepseek-v4-pro"
 API_HOST = "api.deepseek.com"
 API_PATH = "/chat/completions"
-PROMPT_VERSION = "t2-json-v2"
+PROMPT_VERSION = "t2-json-v3"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -55,6 +55,11 @@ is missing, contradictory or insufficient, output
 {"action":"analyze","critical_mode":"guard"} or the permitted sink mode. This
 is routing for later semantic review, not a correctness or human-review verdict.""",
     "semantic_judge": """Evaluate the supplied advisory and issued code candidates.
+For payload.contract_version=2, also use payload.semantic_context: its pinned
+source windows, diffs, longer advisory excerpt and candidate coverage are the
+actual evidence for this independent request. Read truncation/omission flags;
+windows and Python function bounds do not prove a call relationship. Do not
+assume previous plan messages are available, or infer missing code as fact.
 Select an entry point and critical operation only when their semantic roles and
 relationship are supported by this evidence. Entry clues or changed lines alone
 are insufficient. Select only candidate IDs issued in this request; no free-form
@@ -62,9 +67,19 @@ locations. Choose a specific title and evidence-supported project/categories.
 The exact select shape is {"action":"select","critical_candidate_id":"<issued ID>",
 "entry_candidate_id":"<issued ID>","project":"<project>","vuln_title":"<title>",
 "vuln_category_l1":"<category>","vuln_category_l2":"<subcategory>"}.
-If evidence is insufficient or conflicting, output {"action":"defer",
+If evidence is insufficient or conflicting, the base defer object is {"action":"defer",
 "critical_candidate_id":null,"entry_candidate_id":null,"project":null,
-"vuln_title":null,"vuln_category_l1":null,"vuln_category_l2":null}.""",
+"vuln_title":null,"vuln_category_l1":null,"vuln_category_l2":null}.
+For contract_version=2, you MUST add exactly one defer_details object to that
+defer response, with keys reason_code, missing_fields, evidence_refs, explanation.
+Choose one code and 1-6 missing fields from payload.defer_contract, and cite 1-8
+unique current allowed_evidence_refs that show the limitation or contradiction.
+Explain the specific missing fact or ambiguity in 1-400 characters (no newline),
+not hidden reasoning or generic 'insufficient evidence'. For example the details
+shape is {"reason_code":"unsupported_relationship","missing_fields":["relationship"],
+"evidence_refs":["<current allowed ID>"],"explanation":"The supplied windows do not establish the candidate-to-candidate call relationship."}.
+This is your unverified self-report, not a human review or a factual verdict.
+On select, OMIT defer_details. Contract_version=1 retains the base defer shape.""",
     "reflection": """Self-check payload.review_context.candidate against the
 supplied review evidence. This is producer self-review, not independent or human
 verification. Check that the claimed version, selected roles and metadata are
@@ -120,6 +135,9 @@ def build_chat_request(request: ModelRequest, settings: DeepSeekSettings) -> byt
 
     if type(request) is not ModelRequest:
         raise ModelBlocked("deepseek_request_invalid")
+    if request.stage == "semantic_judge" and request.payload.get("contract_version") == 2:
+        if not isinstance(request.payload.get("semantic_context"), Mapping) or not isinstance(request.payload.get("defer_contract"), Mapping):
+            raise ModelBlocked("deepseek_semantic_context_missing")
     if request.stage == "reflection":
         context = request.payload.get("review_context")
         if not isinstance(context, Mapping) or not isinstance(context.get("candidate"), Mapping):

@@ -375,6 +375,9 @@ class DeepSeekProductionIntegrationTests(unittest.TestCase):
         self.assertEqual(context["candidate"], fixture._plain(outcome.entry))
         self.assertIn("advisory_snippet", context)
         self.assertIn("selected_critical", context)
+        self.assertEqual(staged[1]["payload"]["contract_version"], 2)
+        self.assertEqual(context["semantic_context"], staged[1]["payload"]["semantic_context"])
+        self.assertTrue(staged[1]["payload"]["defer_contract"]["required_on_semantic_defer"])
         self.assertNotIn(KEY, repr(outcome))
         self.assertNotIn("private-provider-reasoning", repr(outcome))
 

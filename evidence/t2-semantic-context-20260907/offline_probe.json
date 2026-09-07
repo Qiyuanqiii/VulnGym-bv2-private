@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "status": "diagnostic_complete",
+  "network_calls": 0,
+  "backend": "diagnostic.evidence-first-stop-at-semantic",
+  "model": "offline-script-not-a-model",
+  "producer_sha256": "4fbae35921a0c7cc6ef8ad358e77d0b92d45a4bff1a6629607cc5e8140749a80",
+  "results": [
+    {
+      "task_id": "VG-TRAIN-40D4B88B06CDE8FCFF5C",
+      "stage": "semantic_judge",
+      "reason_code": "model_deferred",
+      "offered_modes": ["guard"],
+      "candidate_counts": {"guard": 3, "sink": 0},
+      "semantic_stage_reached": true,
+      "entry_candidates": 12,
+      "semantic_context": {
+        "advisory_chars": 2164,
+        "advisory_truncated": false,
+        "diffs": 2,
+        "source_blocks": 12,
+        "source_chars": 14686,
+        "source_code_lines": [11, 7, 30, 69, 13, 67, 19, 18, 43, 28, 40, 35],
+        "complete_python_functions": 11,
+        "omitted_candidates": 1,
+        "specific_defer_contract": true
+      },
+      "complete_entries": 0,
+      "t1_calls": 0
+    },
+    {
+      "task_id": "VG-TRAIN-46D6453D5B4663CF0D13",
+      "stage": "semantic_judge",
+      "reason_code": "model_deferred",
+      "offered_modes": ["guard"],
+      "candidate_counts": {"guard": 2, "sink": 0},
+      "semantic_stage_reached": true,
+      "entry_candidates": 1,
+      "semantic_context": {
+        "advisory_chars": 6000,
+        "advisory_truncated": true,
+        "diffs": 1,
+        "source_blocks": 2,
+        "source_chars": 2263,
+        "source_code_lines": [39, 25],
+        "complete_python_functions": 0,
+        "omitted_candidates": 0,
+        "specific_defer_contract": true
+      },
+      "complete_entries": 0,
+      "t1_calls": 0
+    }
+  ]
+}

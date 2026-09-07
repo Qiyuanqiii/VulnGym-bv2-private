@@ -52,6 +52,7 @@ from vulngym_agent.tools import ToolResult
 
 from .model_runtime import ModelResult
 from .t2_inputs import T2TaskInput, T2TaskInputV2, parse_t2_task_input
+from . import t2_semantic_context as semantic_context_tools
 
 
 _MAX_SEMANTIC_CANDIDATES = 64
@@ -235,14 +236,14 @@ class _Attempt:
         return stage
 
     def tool_call(
-        self, name: str, arguments: Mapping[str, Any] | None = None
+        self, name: str, arguments: Mapping[str, Any] | None = None, *, stage: str | None = None
     ) -> ToolResult:
         self.tool_sequence += 1
         call_id = (
             f"TOOL-{self.digest[:16]}-A{self.attempt}-"
             f"{self.tool_sequence:03d}-{name}"
         )
-        self.last_stage = self._tool_stage(name)
+        self.last_stage = stage or self._tool_stage(name)
         result = self.context.call_tool(call_id, name, arguments or {})
         if result.status != "success":
             raise _Stop(
@@ -293,11 +294,12 @@ class _Attempt:
 class LocalStructuredT2Producer:
     """Produce formal candidates through a controller-owned execution facade."""
 
-    __slots__ = ("_include_reflection_context", "_evidence_first_planning")
+    __slots__ = ("_include_reflection_context", "_evidence_first_planning", "_include_semantic_context")
 
     def __init__(
         self, *, include_reflection_context: bool = False,
         evidence_first_planning: bool = False,
+        include_semantic_context: bool = False,
     ) -> None:
         if type(include_reflection_context) is not bool:
             raise ValueError("include_reflection_context must be boolean")
@@ -307,6 +309,9 @@ class LocalStructuredT2Producer:
         if type(evidence_first_planning) is not bool:
             raise ValueError("evidence_first_planning must be boolean")
         self._evidence_first_planning = evidence_first_planning
+        if type(include_semantic_context) is not bool:
+            raise ValueError("include_semantic_context must be boolean")
+        self._include_semantic_context = include_semantic_context
 
     @staticmethod
     def _deferred_without_attempt(
@@ -595,6 +600,88 @@ class LocalStructuredT2Producer:
             "semantic_role_verified": False,
         }
 
+    def _semantic_context(
+        self, run: _Attempt, *, repo_ref: str, vulnerable_commit: str, fix_commit: str,
+        advisory_text: str, choices: Sequence[_CriticalChoice | _EntryChoice],
+        diff_context: Sequence[Mapping[str, Any]], diff_call_ids: Mapping[str, str],
+        changed_path_count: int, advisory_call_id: str,
+    ) -> dict[str, Any]:
+        """Read only pinned declared files; retain exactly the context sent to the model."""
+        advisory_id = run.evidence_id("SEMANTIC-ADVISORY")
+        advisory_truncated = len(advisory_text) > semantic_context_tools.MAX_ADVISORY_CHARS
+        advisory_text = advisory_text[:semantic_context_tools.MAX_ADVISORY_CHARS]
+        run.evidence.append(EvidenceItem(
+            evidence_id=advisory_id, report_id=run.task.report_id, entry_id=run.task.entry_id,
+            source_type="advisory", snippet=advisory_text, tool_call_id=advisory_call_id,
+        ))
+        diffs = []
+        for index, diff in enumerate(diff_context):
+            evidence_id = run.evidence_id(f"SEMANTIC-DIFF-{index + 1:03d}")
+            row = {**_thaw(diff), "evidence_id": evidence_id,
+                   "before_commit": vulnerable_commit, "after_commit": fix_commit}
+            run.evidence.append(EvidenceItem(
+                evidence_id=evidence_id, report_id=run.task.report_id, entry_id=run.task.entry_id,
+                source_type="patch", snippet=_canonical_json(row), file=str(diff["file"]),
+                commit=fix_commit, tool_call_id=diff_call_ids[str(diff["file"])],
+            ))
+            diffs.append(row)
+        blobs: dict[str, tuple[str, str, str]] = {}
+        blocks: list[dict[str, Any]] = []
+        coverage = []
+        used_chars = 0
+        for choice in choices:
+            path, line = str(choice.location["file"]), int(choice.location["line"])
+            covered = next((block for block in blocks if block["file"] == path
+                            and block["line_start"] <= line <= block["line_end"]
+                            and block["anchor_line_complete"]), None)
+            if covered is not None:
+                covered["candidate_ids"].append(choice.issued_id)
+                coverage.append({"candidate_id": choice.issued_id, "evidence_id": covered["evidence_id"], "status": "included"})
+                continue
+            remaining = semantic_context_tools.MAX_SOURCE_CHARS - used_chars
+            if (len(blocks) >= semantic_context_tools.MAX_SOURCE_BLOCKS or remaining < 256
+                    or (path not in blobs and len(blobs) >= semantic_context_tools.MAX_SOURCE_FILES)):
+                coverage.append({"candidate_id": choice.issued_id, "evidence_id": None, "status": "omitted_context_budget"})
+                continue
+            if path not in blobs:
+                result = run.tool_call("git_show", {"repo": repo_ref, "commit": vulnerable_commit, "path": path}, stage="semantic_judge")
+                payload = run.artifact_payload(result, expected_kind="t2.git_blob")
+                text = payload.get("text")
+                if (payload.get("commit") != vulnerable_commit or payload.get("path") != path
+                        or not isinstance(text, str)
+                        or payload.get("text_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()):
+                    raise _Stop("semantic_judge", "invalid_context_evidence", ("source context did not match its pinned blob",))
+                blobs[path] = (text, payload["text_sha256"], result.tool_call_id)
+            text, digest, call_id = blobs[path]
+            try:
+                block = semantic_context_tools.source_window(text, path, line, max_chars=min(semantic_context_tools.MAX_BLOCK_CHARS, remaining))
+            except ValueError:
+                raise _Stop("semantic_judge", "invalid_context_anchor", ("a candidate anchor is outside the pinned source context",)) from None
+            block.update(evidence_id=run.evidence_id(f"SEMANTIC-SOURCE-{len(blocks) + 1:03d}"),
+                         commit=vulnerable_commit, blob_sha256=digest, tool_call_id=call_id,
+                         candidate_ids=[choice.issued_id])
+            blocks.append(block)
+            used_chars += len(block["text"])
+            coverage.append({"candidate_id": choice.issued_id, "evidence_id": block["evidence_id"],
+                             "status": "included" if block["anchor_line_complete"] else "anchor_truncated"})
+        for block in blocks:
+            run.evidence.append(EvidenceItem(
+                evidence_id=block["evidence_id"], report_id=run.task.report_id, entry_id=run.task.entry_id,
+                source_type="source", snippet=_canonical_json(block), commit=vulnerable_commit,
+                file=block["file"], line_start=block["line_start"], line_end=block["line_end"], tool_call_id=block["tool_call_id"],
+            ))
+        return {
+            "contract_version": 1,
+            "advisory": {"evidence_id": advisory_id, "text": advisory_text, "truncated": advisory_truncated,
+                         "source": "loaded_advisory_text", "tool_call_id": advisory_call_id},
+            "diffs": diffs, "omitted_diff_count": changed_path_count - len(diffs),
+            "source_contexts": blocks, "candidate_context_coverage": coverage,
+            "coverage_basis": "candidate_anchor_line_not_entire_candidate_span",
+            "source_chars": used_chars, "source_files_read": len(blobs),
+            "scope": "declared_paths_pinned_version_bounded_context_not_a_complete_call_graph",
+            "semantic_relationship_verified": False,
+        }
+
     def _generate(
         self, run: _Attempt, task_input: T2TaskInput
     ) -> Mapping[str, Any]:
@@ -759,6 +846,7 @@ class LocalStructuredT2Producer:
         critical_choices: list[_CriticalChoice] = []
         changed_paths: list[str] = []
         diff_context: list[dict[str, Any]] = []
+        diff_call_ids: dict[str, str] = {}
         diagnostics: list[dict[str, Any]] = []
         search_modes = allowed_modes if self._evidence_first_planning else (critical_mode,)
         for source_path in task_input.hints.source_paths:
@@ -772,7 +860,7 @@ class LocalStructuredT2Producer:
             if not isinstance(diff.output, Mapping) or diff.output.get("changed") is not True:
                 continue
             changed_paths.append(source_path)
-            if self._evidence_first_planning and len(diff_context) < 8:
+            if (self._evidence_first_planning or self._include_semantic_context) and len(diff_context) < 8:
                 diff_payload = run.artifact_payload(diff, expected_kind="t2.git_diff")
                 text = diff_payload.get("unified_diff")
                 if not isinstance(text, str):
@@ -782,6 +870,7 @@ class LocalStructuredT2Producer:
                     "deleted_lines": diff.output.get("deleted_lines"),
                     "excerpt": text[:2000], "truncated": len(text) > 2000,
                 })
+                diff_call_ids[source_path] = diff.tool_call_id
             for mode in search_modes:
                 resolution_result = run.tool_call(
                     "dataflow_candidate_search",
@@ -928,9 +1017,20 @@ class LocalStructuredT2Producer:
                 ("entry candidates exceed the bounded semantic review set",),
             )
 
-        semantic_result = run.model_call(
-            "semantic_judge",
-            {
+        semantic_context = None
+        if self._include_semantic_context:
+            # Reuse the already-loaded advisory, not the extracted 2,000-character
+            # summary. Each backend call is stateless and needs its own context.
+            advisory_payload = run.artifact_payload(advisory, expected_kind="t2.local_advisory")
+            full_advisory_text = advisory_payload.get("text")
+            if not isinstance(full_advisory_text, str) or not full_advisory_text.strip():
+                raise _Stop("semantic_judge", "invalid_context_evidence", ("loaded advisory text is unavailable",))
+            semantic_context = self._semantic_context(
+                run, repo_ref=repo_ref, vulnerable_commit=vulnerable_commit, fix_commit=fix_commit,
+                advisory_text=full_advisory_text, choices=(*critical_choices, *entry_choices), diff_context=diff_context,
+                diff_call_ids=diff_call_ids, changed_path_count=len(changed_paths), advisory_call_id=advisory.tool_call_id,
+            )
+        semantic_payload = {
                 "contract_version": 1,
                 "task_id": run.task.task_id,
                 "report_id": run.task.report_id,
@@ -965,34 +1065,45 @@ class LocalStructuredT2Producer:
                     ],
                     "trace": [],
                 },
-            },
-        )
+            }
+        context_evidence_ids: list[str] = []
+        if semantic_context is not None:
+            context_evidence_ids = [semantic_context["advisory"]["evidence_id"],
+                                    *(item["evidence_id"] for item in semantic_context["diffs"]),
+                                    *(item["evidence_id"] for item in semantic_context["source_contexts"])]
+            semantic_payload.update(contract_version=2, semantic_context=semantic_context,
+                                    defer_contract=semantic_context_tools.defer_contract(context_evidence_ids))
+        semantic_result = run.model_call("semantic_judge", semantic_payload)
+        semantic_keys = frozenset({"action", "critical_candidate_id", "entry_candidate_id", "project",
+                                   "vuln_title", "vuln_category_l1", "vuln_category_l2"})
+        if (semantic_context is not None and isinstance(semantic_result.response, Mapping)
+                and semantic_result.response.get("action") == "defer"):
+            semantic_keys = semantic_keys | {"defer_details"}
         semantic = self._exact_response(
             semantic_result,
-            frozenset(
-                {
-                    "action",
-                    "critical_candidate_id",
-                    "entry_candidate_id",
-                    "project",
-                    "vuln_title",
-                    "vuln_category_l1",
-                    "vuln_category_l2",
-                }
-            ),
+            semantic_keys,
             "semantic_judge",
         )
         if semantic["action"] == "defer":
             if any(
                 semantic[name] is not None
                 for name in semantic
-                if name != "action"
+                if name not in {"action", "defer_details"}
             ):
                 raise _Stop(
                     "semantic_judge",
                     "invalid_model_output",
                     ("a deferred semantic response cannot supply candidate content",),
                 )
+            if semantic_context is not None:
+                try:
+                    details = semantic_context_tools.validate_defer_details(semantic["defer_details"], context_evidence_ids)
+                except ValueError:
+                    raise _Stop("semantic_judge", "invalid_model_output", ("semantic defer details must reference current evidence and permitted missing fields",)) from None
+                raise _Stop("semantic_judge", "model_deferred", (
+                    f"Model-reported defer [{details['reason_code']}]: {details['explanation']}",
+                    "model_defer_details:" + _canonical_json(details),
+                ))
             raise _Stop(
                 "semantic_judge",
                 "model_deferred",
@@ -1105,6 +1216,7 @@ class LocalStructuredT2Producer:
                     "selected_critical": selected_critical.model_value(),
                     "selected_entry": selected_entry.model_value(),
                     "review_kind": "producer_self_review_not_independent",
+                    **({"semantic_context": semantic_context} if semantic_context is not None else {}),
                 }} if self._include_reflection_context else {}),
             },
         )

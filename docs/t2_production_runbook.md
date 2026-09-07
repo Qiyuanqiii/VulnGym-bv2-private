@@ -6,6 +6,8 @@
 
 最新 [新版真实复测](deepseek_t2_retest_receipt.md)：两条均实际进入语义阶段后弃答，完整 Entry/T1 仍为 0。语义请求的 diff/函数上下文及具体弃答理由存在已核实的覆盖缺口，先做离线改进，不直接再跑更多任务。
 
+当前 [上下文及可解释弃答增量](t2_semantic_context_receipt.md)已离线验证：276 项回归为 275 通过、1 跳过；提示词 t2-json-v3 尚未真实复测，临时 key 已由用户确认撤销。
+
 ## 1. 两种入口不混用
 
 | 入口 | 模型来源 | 用途 |
@@ -49,11 +51,13 @@ python -B -m vulngym_agent.t2_production_cli `
 | stage | 响应对象（不允许额外键） | 不确定时 |
 | --- | --- | --- |
 | plan | `action`、`critical_mode`；analyze 时 mode 必须在本次允许集合中 | `{"action":"defer","critical_mode":null}` |
-| semantic_judge | `action`、`critical_candidate_id`、`entry_candidate_id`、`project`、`vuln_title`、`vuln_category_l1`、`vuln_category_l2` | action=defer，其余六个值均为 null |
+| semantic_judge | select：`action`、`critical_candidate_id`、`entry_candidate_id`、`project`、`vuln_title`、`vuln_category_l1`、`vuln_category_l2`；新生产请求 contract_version=2 | action=defer，其余六个值为 null，并须提供 `defer_details`；旧回放 contract_version=1 不加该字段 |
 | reflection | `{"action":"emit"}` 或 `{"action":"defer"}` | defer |
 | repair | `action`、`repair_fields`；只能选择计划允许且有 T1 suggested_fix 的字段 | `{"action":"defer","repair_fields":[]}` |
 
 semantic_judge 的 select 只允许本次控制器签发的候选 ID；不得自由编造路径、行号或任意补丁内容。字段边界、schema、候选身份和预算仍由现有 producer/runtime 校验。所有机器生成记录保持 `verify=0`，不代表人工已审。
+
+新语义请求带 `semantic_context` 和 `defer_contract`。后者列出允许的 reason_code、missing_fields、当前证据 ID 与长度上限；`defer_details` 必须恰好包含 reason_code、missing_fields、evidence_refs、explanation。结构合法也只是模型自述，不是独立确认的原因。详情以 `model_defer_details:` JSON 保留到 `missing_information`，引用的上下文进入 evidence；完整规则和预算见 [增量记录](t2_semantic_context_receipt.md#2-新的-semantic-defer-契约)。语义和初始 reflection 共享同一有界上下文，但不声称完整调用图。
 
 新生产路径在 plan 前收集公告、版本、真实 diff 和输入允许模式的候选清单；计划请求版本为 2，内容和数量均有界，候选可用性不代表语义正确。显式模式不能覆盖，无候选时先记录提取/模式/事实条件的具体缺口，不产生模型费用。旧回放保留 plan-first 和摘要/ID 形式的 reflection 请求；新生产 reflection 有实际候选及对应自检依据。该阶段仍是生产者自检，不能叫作独立质量复核；真实小批仍需评价上下文是否充分。具体边界见 [修复记录](t2_evidence_first_planning.md)。
 
@@ -77,4 +81,4 @@ python -B -m unittest tests.test_t2_production_cli tests.test_closed_loop_batch 
 
 执行前沿用上述 TEMP/TMP 设置；代码与记录由引入本 runbook 的 commit 固定。`git diff --check` 通过。
 
-上述 167 项是首次入口接线的历史回归；路由增量的 249 项命令和结果见 [修复记录](t2_evidence_first_planning.md)，后续真实复测记录见文首。下一步仍属 #12/#97：先离线补齐语义阶段的有界上下文与具体弃答说明，再确认受限调用；检查原 40 条中的 5 incorrect、分类 35 uncertain；冻结提示词与评价口径后选新输入，不按结果挑样本。当前不关闭 #12，也不改变 #90/#94 的开放状态。
+上述 167 项是首次入口接线的历史回归；路由增量的 249 项命令和结果见 [修复记录](t2_evidence_first_planning.md)，当前上下文增量的 276 项回归及历史字节兼容性检查见 [最新记录](t2_semantic_context_receipt.md)。下一步仍属 #12/#97：确认新的受限调用授权与凭证，实测而非推定上下文改进有效；检查原 40 条中的 5 incorrect、分类 35 uncertain；冻结提示词与评价口径后选新输入，不按结果挑样本。当前不关闭 #12，也不改变 #90/#94 的开放状态。

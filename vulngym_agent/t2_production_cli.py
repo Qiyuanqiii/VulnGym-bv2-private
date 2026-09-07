@@ -109,6 +109,7 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
         super().__init__(backend=backend, **configuration)
         self._producer = LocalStructuredT2Producer(
             include_reflection_context=True, evidence_first_planning=True,
+            include_semantic_context=True,
         )
         self._identity = (backend.backend_id, backend.model_id)
         self._closed = False
