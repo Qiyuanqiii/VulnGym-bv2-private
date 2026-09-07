@@ -4,6 +4,11 @@
 > **没有完成实质语义评价，也没有新的真实模型产出**。
 > T2 为主、T1 辅助，沿用 [当前任务参考](../current_task_reference.md) 的 A3/A5/A6。
 
+2026-09-08后续：原固定cohort、空模板和初始null指标保持不变；另存的
+[实际开发自评](../../evidence/t2-quality-self-review-dev12-20260908/review_report.md)现已考虑108项。
+这是AI辅助自评，不是独立人审或新输入成绩。正文“未评价”描述的是协议首次发布状态，
+不可用新版自评反写原模板。最新模型单例按[另一分组](../../evidence/t2-current-candidate-self-review-20260908/review_report.md)记录，不并入本协议的固定12条分母。
+
 ## 1. 这次固定了什么
 
 协议 ID 为 `t2-quality-review-v1`。准则和开发子集由承载本文件的 Git commit 固定。
