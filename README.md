@@ -265,8 +265,9 @@ ds = load_dataset("json", data_files={
 
 A separate [T2 production entry point](docs/t2_production_runbook.md) now accepts
 an explicitly configured `StructuredModelBackend` via `--backend-factory`, without
-per-task answer fixtures. The adapter/service is not bundled or selected yet;
-current integration tests use synthetic test doubles, not real-model quality data.
+per-task answer fixtures. The selected [DeepSeek V4 Pro adapter](docs/deepseek_t2_setup.md)
+is now included; local key setup and live evaluation are still pending.
+Current integration tests use synthetic test doubles, not real-model quality data.
 The existing exact-replay CLI and its mandatory replay closure remain unchanged.
 
 The B-v2 tools require Python 3.10 or newer. For a reproducible test

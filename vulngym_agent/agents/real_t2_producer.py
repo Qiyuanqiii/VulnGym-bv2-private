@@ -293,7 +293,14 @@ class _Attempt:
 class LocalStructuredT2Producer:
     """Produce formal candidates through a controller-owned execution facade."""
 
-    __slots__ = ()
+    __slots__ = ("_include_reflection_context",)
+
+    def __init__(self, *, include_reflection_context: bool = False) -> None:
+        if type(include_reflection_context) is not bool:
+            raise ValueError("include_reflection_context must be boolean")
+        # Opt in only for fresh production. Legacy exact-replay request bytes
+        # must remain unchanged, including both reflection stages.
+        self._include_reflection_context = include_reflection_context
 
     @staticmethod
     def _deferred_without_attempt(
@@ -974,6 +981,14 @@ class LocalStructuredT2Producer:
                 "critical_candidate_id": selected_critical.issued_id,
                 "entry_candidate_id": selected_entry.issued_id,
                 "allowed_actions": ["emit", "defer"],
+                **({"review_context": {
+                    "candidate": _thaw(candidate),
+                    "advisory_snippet": snippet[:2_000],
+                    "fix_commit": fix_commit,
+                    "selected_critical": selected_critical.model_value(),
+                    "selected_entry": selected_entry.model_value(),
+                    "review_kind": "producer_self_review_not_independent",
+                }} if self._include_reflection_context else {}),
             },
         )
         reflection = self._exact_response(
@@ -1245,6 +1260,12 @@ class LocalStructuredT2Producer:
                 "changed_fields": list(changed),
                 "schema_valid": True,
                 "allowed_actions": ["emit", "defer"],
+                **({"review_context": {
+                    "candidate": _thaw(candidate),
+                    "previous_candidate": _thaw(previous),
+                    "check_evidence": check_evidence,
+                    "review_kind": "bounded_repair_self_review_not_independent",
+                }} if self._include_reflection_context else {}),
             },
         )
         reflection = self._exact_response(

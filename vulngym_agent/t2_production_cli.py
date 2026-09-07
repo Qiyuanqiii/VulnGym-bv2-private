@@ -27,6 +27,7 @@ from vulngym_agent.agents.model_runtime import (
     ReplayStructuredModelBackend,
     StructuredModelBackend,
 )
+from vulngym_agent.agents.real_t2_producer import LocalStructuredT2Producer
 from vulngym_agent.closed_loop_cli import (
     EXIT_FATAL,
     HARD_MAX_INPUT_LINE_BYTES,
@@ -106,6 +107,7 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
     def __init__(self, *, backend: StructuredModelBackend, **configuration: Any) -> None:
         backend = _validate_backend(backend)
         super().__init__(backend=backend, **configuration)
+        self._producer = LocalStructuredT2Producer(include_reflection_context=True)
         self._identity = (backend.backend_id, backend.model_id)
         self._closed = False
 

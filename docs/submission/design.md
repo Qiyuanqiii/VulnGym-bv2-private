@@ -16,7 +16,7 @@
   → [辅助T1 → 有依据的有限修正 → 重新验证]
 ```
 
-这是交付目标；**历史Lane A CLI依赖exact replay；新通用模型入口已接线，但具体模型、新报告实跑和质量证据仍是#12/#97缺口**。
+这是交付目标；**历史Lane A CLI依赖exact replay；新通用入口和DeepSeek V4 Pro适配器已实现，但真实模型连通、新报告实跑和质量证据仍是#12/#97缺口**。
 现有40个完整候选/报告对不等于40条已确认为正确的数据。缺失字段应保留证据和原因，
 不能为凑schema编造值；完整记录与partial/deferred记录须分流。
 
@@ -28,7 +28,8 @@
 新增 `python -m vulngym_agent.t2_production_cli` 通过可信的 `module:factory` 接入
 `StructuredModelBackend`，不要求预编 response；共享本地执行层但采用独立的批次关闭策略。
 旧入口仍强制 ExactReplayBackend 完整消费。配置、输出计数及构造测试边界见
-[生产 runbook](../t2_production_runbook.md)；具体模型适配器尚待选择与验证。
+[生产 runbook](../t2_production_runbook.md)；用户选择的具体适配器为
+[DeepSeek V4 Pro](../deepseek_t2_setup.md)，当前仅完成离线测试，未实际调用付费服务。
 
 - plan选择analyze/defer及critical mode。
 - 控制器读取本地公告、引用/patch和Git对象，提取字段、定位有界代码候选、检查schema。
@@ -36,6 +37,8 @@
   候选身份约束可以防止任意编路径，但本身不保证语义正确。
 - reflection选择emit/defer；T1对候选进行真实检查，可靠suggested_fix可触发有限字段修正，
   然后重新schema/self-check和新T1检查，保留修改轨迹。
+- 新生产路径给reflection提供实际候选及对应自检依据，repair提供修前/修后候选；
+  旧回放默认payload形状保持不变。自检不能冒充独立或人工复核。
 - 任务、工具/模型记录、预算、replay及sidecar用于追踪过程；发布为新目录，保留不确定现场。
 - `T2TaskInputV2` 固定公开repo/commit identity；当前要求与唯一脆弱父提交推导一致。
   这是当前支持范围，并非所有报告都有唯一fix-parent。多父/回移/无patch需另行裁决或明确defer。
