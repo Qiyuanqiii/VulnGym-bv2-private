@@ -80,25 +80,31 @@ def source_window(text: str, path: str, line: int, *, max_chars: int = MAX_BLOCK
     }
 
 
-def defer_contract(evidence_ids: Sequence[str]) -> dict[str, Any]:
+def defer_contract(evidence_ids: Sequence[str], *, stage: str = "semantic_judge") -> dict[str, Any]:
+    if stage not in ("semantic_judge", "reflection"):
+        raise ValueError("invalid_defer_stage")
     return {
-        "contract_version": 1, "required_on_semantic_defer": True,
-        "reason_codes": list(DEFER_REASONS), "missing_fields": list(MISSING_FIELDS),
+        "contract_version": 1, ("required_on_semantic_defer" if stage == "semantic_judge" else "required_on_reflection_defer"): True,
+        "reason_codes": list(DEFER_REASONS),
+        "missing_fields": list(MISSING_FIELDS if stage == "semantic_judge" else (*MISSING_FIELDS, "project", "trace")),
         "allowed_evidence_refs": list(evidence_ids), "max_evidence_refs": 8,
         "max_explanation_chars": 400,
         "assessment_origin": "model_self_report_not_independently_verified",
     }
 
 
-def validate_defer_details(value: Any, evidence_ids: Sequence[str]) -> dict[str, Any]:
+def validate_defer_details(value: Any, evidence_ids: Sequence[str], *, stage: str = "semantic_judge") -> dict[str, Any]:
     """Validate a small reason object, without endorsing its semantic claims."""
+    if stage not in ("semantic_judge", "reflection"):
+        raise ValueError("invalid_defer_stage")
     if not isinstance(value, Mapping) or set(value) != {"reason_code", "missing_fields", "evidence_refs", "explanation"}:
         raise ValueError("invalid_semantic_defer_details")
     reason = value["reason_code"]
     if not isinstance(reason, str) or reason not in DEFER_REASONS:
         raise ValueError("invalid_semantic_defer_reason")
     normalized = {}
-    for name, allowed, maximum in (("missing_fields", MISSING_FIELDS, 6), ("evidence_refs", evidence_ids, 8)):
+    fields = MISSING_FIELDS if stage == "semantic_judge" else (*MISSING_FIELDS, "project", "trace")
+    for name, allowed, maximum in (("missing_fields", fields, 6), ("evidence_refs", evidence_ids, 8)):
         items = value[name]
         if (isinstance(items, (str, bytes, Mapping)) or not isinstance(items, Sequence)
                 or not 1 <= len(items) <= maximum
@@ -110,6 +116,6 @@ def validate_defer_details(value: Any, evidence_ids: Sequence[str]) -> dict[str,
     if (not isinstance(explanation, str) or not explanation.strip() or len(explanation) > 400
             or re.search(r"[\x00-\x1f\x7f]", explanation)):
         raise ValueError("invalid_semantic_defer_explanation")
-    return {"kind": "model_semantic_defer_v1", "reason_code": reason, **normalized,
+    return {"kind": "model_semantic_defer_v1" if stage == "semantic_judge" else "model_reflection_defer_v1", "reason_code": reason, **normalized,
             "explanation": explanation,
             "assessment_origin": "model_self_report_not_independently_verified"}

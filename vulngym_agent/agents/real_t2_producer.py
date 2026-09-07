@@ -294,12 +294,13 @@ class _Attempt:
 class LocalStructuredT2Producer:
     """Produce formal candidates through a controller-owned execution facade."""
 
-    __slots__ = ("_include_reflection_context", "_evidence_first_planning", "_include_semantic_context")
+    __slots__ = ("_include_reflection_context", "_evidence_first_planning", "_include_semantic_context", "_include_reflection_defer_details")
 
     def __init__(
         self, *, include_reflection_context: bool = False,
         evidence_first_planning: bool = False,
         include_semantic_context: bool = False,
+        include_reflection_defer_details: bool = False,
     ) -> None:
         if type(include_reflection_context) is not bool:
             raise ValueError("include_reflection_context must be boolean")
@@ -312,6 +313,34 @@ class LocalStructuredT2Producer:
         if type(include_semantic_context) is not bool:
             raise ValueError("include_semantic_context must be boolean")
         self._include_semantic_context = include_semantic_context
+        if type(include_reflection_defer_details) is not bool:
+            raise ValueError("include_reflection_defer_details must be boolean")
+        if include_reflection_defer_details and not (include_reflection_context and include_semantic_context):
+            raise ValueError("reflection defer details require reflection and semantic context")
+        self._include_reflection_defer_details = include_reflection_defer_details
+
+    def _reflection_decision(self, result: ModelResult, evidence_ids: Sequence[str], *, repaired: bool = False) -> None:
+        keys = frozenset({"action"})
+        if (self._include_reflection_defer_details and isinstance(result.response, Mapping)
+                and result.response.get("action") == "defer"):
+            keys = keys | {"defer_details"}
+        response = self._exact_response(result, keys, "reflection")
+        if response["action"] == "defer":
+            if self._include_reflection_defer_details:
+                try:
+                    details = semantic_context_tools.validate_defer_details(
+                        response["defer_details"], evidence_ids, stage="reflection")
+                except ValueError:
+                    raise _Stop("reflection", "invalid_model_output", (
+                        "reflection defer details must reference current evidence and permitted missing fields",)) from None
+                raise _Stop("reflection", "model_deferred", (
+                    f"Model-reported reflection defer [{details['reason_code']}]: {details['explanation']}",
+                    "model_defer_details:" + _canonical_json(details),
+                ))
+            message = "reflection declined to emit the repaired candidate" if repaired else "reflection declined to emit the candidate"
+            raise _Stop("reflection", "model_deferred", (message,))
+        if response["action"] != "emit":
+            raise _Stop("reflection", "invalid_model_output", ("reflection may only emit or defer",))
 
     @staticmethod
     def _deferred_without_attempt(
@@ -1238,23 +1267,11 @@ class LocalStructuredT2Producer:
                     "review_kind": "producer_self_review_not_independent",
                     **({"semantic_context": semantic_context} if semantic_context is not None else {}),
                 }} if self._include_reflection_context else {}),
+                **({"contract_version": 2, "defer_contract": semantic_context_tools.defer_contract(
+                    context_evidence_ids, stage="reflection")} if self._include_reflection_defer_details else {}),
             },
         )
-        reflection = self._exact_response(
-            reflection_result, frozenset({"action"}), "reflection"
-        )
-        if reflection["action"] == "defer":
-            raise _Stop(
-                "reflection",
-                "model_deferred",
-                ("reflection declined to emit the candidate",),
-            )
-        if reflection["action"] != "emit":
-            raise _Stop(
-                "reflection",
-                "invalid_model_output",
-                ("reflection may only emit or defer",),
-            )
+        self._reflection_decision(reflection_result, context_evidence_ids)
         return candidate
 
     def repair(
@@ -1499,6 +1516,20 @@ class LocalStructuredT2Producer:
                 "schema_validation_failed",
                 ("the repaired candidate did not satisfy the formal schema",),
             )
+        reflection_evidence: list[dict[str, Any]] = []
+        if self._include_reflection_defer_details:
+            # A current schema fact is available even if no advisory read is
+            # authorized for this repair. It does not prove semantic truth.
+            item = EvidenceItem(
+                evidence_id=run.evidence_id("REPAIR-REFLECTION-SCHEMA"),
+                report_id=run.task.report_id, entry_id=run.task.entry_id,
+                source_type="schema", tool_call_id=validation.tool_call_id,
+                snippet=_canonical_json({"candidate_sha256": canonical_sha256(candidate),
+                                         "schema_valid": True, "semantic_verified": False}),
+            )
+            run.evidence.append(item)
+            reflection_evidence = [e.to_dict() for e in run.evidence]
+        reflection_ids = [e["evidence_id"] for e in reflection_evidence]
         reflection_result = run.model_call(
             "reflection",
             {
@@ -1514,24 +1545,13 @@ class LocalStructuredT2Producer:
                     "previous_candidate": _thaw(previous),
                     "check_evidence": check_evidence,
                     "review_kind": "bounded_repair_self_review_not_independent",
+                    **({"evidence": reflection_evidence} if self._include_reflection_defer_details else {}),
                 }} if self._include_reflection_context else {}),
+                **({"contract_version": 2, "defer_contract": semantic_context_tools.defer_contract(
+                    reflection_ids, stage="reflection")} if self._include_reflection_defer_details else {}),
             },
         )
-        reflection = self._exact_response(
-            reflection_result, frozenset({"action"}), "reflection"
-        )
-        if reflection["action"] == "defer":
-            raise _Stop(
-                "reflection",
-                "model_deferred",
-                ("reflection declined to emit the repaired candidate",),
-            )
-        if reflection["action"] != "emit":
-            raise _Stop(
-                "reflection",
-                "invalid_model_output",
-                ("reflection may only emit or defer",),
-            )
+        self._reflection_decision(reflection_result, reflection_ids, repaired=True)
         return candidate
 
     def _prepare_repair_checks(

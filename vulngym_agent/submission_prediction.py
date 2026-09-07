@@ -35,6 +35,7 @@ from vulngym_agent.orchestrator.replay import (
     ReplayArtifactError,
     VerifiedSubmissionPredictions,
     _validation_report_from_dict,
+    read_closed_loop_artifacts,
     read_verified_submission_predictions,
 )
 from vulngym_agent.trusted_inputs import paths_overlap_v1
@@ -729,6 +730,119 @@ def build_submission_review_evidence(
         "tasks": tasks,
     }
     return {**core, "review_evidence_sha256": canonical_sha256(core)}
+
+
+def build_submission_handoff(
+    source_replay_dir: str | os.PathLike[str],
+    *,
+    expected_source_replay_dataset_sha256: str,
+    expected_task_count: int,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+) -> Mapping[str, Any]:
+    """Read-only mixed-batch handoff, NOT a formal submission export.
+
+    Full candidates and T1 reports contain source/evidence text. Unlike review,
+    this is a local reviewer artifact, not a metadata-only public projection.
+    No entry, verdict, task, or missing reason is manufactured here.
+    """
+    digest = _require_sha256(expected_source_replay_dataset_sha256, "expected_source_replay_dataset_sha256")
+    expected = _require_count(expected_task_count, "expected_task_count")
+    source = _absolute_path(source_replay_dir, "source replay directory")
+    protected = _normalize_protected_paths(protected_paths)
+    try:
+        bundle = read_closed_loop_artifacts(source, protected_paths=(source, *protected))
+    except (ReplayArtifactError, OSError, TypeError, ValueError):
+        raise SubmissionPredictionError("source_replay_rejected", "source replay could not be verified") from None
+    if bundle.manifest.dataset_sha256 != digest:
+        raise SubmissionPredictionError("source_replay_rejected", "source replay digest differs")
+    if bundle.manifest.input_failures:
+        raise SubmissionPredictionError("input_failures", "resolve input failures before building a task handoff")
+    if len(bundle.verified_predictions) != expected:
+        raise SubmissionPredictionError("task_count_mismatch", "source replay task count differs")
+    # Bind the exact extra bytes consumed, not just a second pathname read.
+    deferred_bytes = _read_replay_sidecar(source / "deferred.jsonl")
+    summary = bundle.manifest.files["deferred.jsonl"]
+    if len(deferred_bytes) != summary["byte_count"] or hashlib.sha256(deferred_bytes).hexdigest() != summary["content_sha256"]:
+        raise SubmissionPredictionError("source_replay_rejected", "deferred sidecar differs from verified bytes")
+    deferred: dict[str, list[dict[str, Any]]] = {}
+    for row in _parse_lines(deferred_bytes, "deferred.jsonl"):
+        payload = row["payload"]
+        core = payload["deferred"]
+        # Explicit projection excludes task inputs and model/tool responses.
+        deferred.setdefault(core["task_id"], []).append({
+            **{k: core[k] for k in ("attempt", "mode", "stage", "reason_code", "missing_information")},
+            "deferred_sha256": payload["deferred_sha256"],
+        })
+    entries: list[dict[str, Any]] = []
+    validations: list[dict[str, Any]] = []
+    tasks: list[dict[str, Any]] = []
+    statuses: Counter[str] = Counter()
+    verdicts: Counter[str] = Counter()
+    for task in bundle.verified_predictions:
+        entry = None if task.entry is None else _plain(task.entry)
+        report = None if task.validation is None else task.validation.to_dict()
+        if entry is not None and (type(entry["verify"]) is not int or entry["verify"] != 0):
+            raise SubmissionPredictionError("verify_not_zero", "machine candidate verify must remain 0")
+        ordinal = None
+        if task.complete:
+            assert entry is not None and report is not None
+            entries.append(entry)
+            validations.append(report)
+            ordinal = len(entries)
+        if report is not None:
+            verdicts[report["verdict"]] += 1
+        statuses[task.status] += 1
+        tasks.append({
+            "task_id": task.task_id, "input_line": task.input_line,
+            "status": task.status, "complete": task.complete,
+            "pair_ordinal": ordinal,
+            "candidate_sha256": None if entry is None else canonical_sha256(entry),
+            "validation_sha256": None if report is None else canonical_sha256(report),
+            "verdict": None if report is None else report["verdict"],
+            "partial_candidate": entry if not task.complete else None,
+            "unpaired_validation": report if not task.complete else None,
+            "deferred": deferred.pop(task.task_id, []),
+        })
+    if deferred:
+        raise SubmissionPredictionError("source_replay_rejected", "deferred task has no terminal task")
+    core = {
+        "contract_version": 1, "kind": "vulngym.mixed-batch-handoff.v1",
+        "source_replay_dataset_sha256": digest, "task_count": expected,
+        "complete_count": len(entries), "incomplete_count": expected - len(entries),
+        "input_failure_count": 0, "status_counts": dict(sorted(statuses.items())),
+        "verdict_counts": dict(sorted(verdicts.items())),
+        "formal_submission_export": False, "independent_quality_review_completed": False,
+        "contains_candidate_code_and_t1_evidence": True,
+        "entries": entries, "validation": validations, "tasks": tasks,
+    }
+    result = {**core, "handoff_sha256": canonical_sha256(core)}
+    if len(_line(result)) > _MAX_FILE_BYTES:
+        raise SubmissionPredictionError("handoff_too_large", "handoff exceeds the bounded file limit")
+    return result
+
+
+def verify_submission_handoff(
+    handoff_file: str | os.PathLike[str],
+    source_replay_dir: str | os.PathLike[str],
+    *,
+    expected_handoff_sha256: str,
+    expected_source_replay_dataset_sha256: str,
+    expected_task_count: int,
+    protected_paths: Sequence[str | os.PathLike[str]] = (),
+) -> Mapping[str, Any]:
+    """Regenerate from a pinned source; never trust a handoff's self-digest."""
+    digest = _require_sha256(expected_handoff_sha256, "expected_handoff_sha256")
+    expected = build_submission_handoff(
+        source_replay_dir, expected_source_replay_dataset_sha256=expected_source_replay_dataset_sha256,
+        expected_task_count=expected_task_count, protected_paths=protected_paths,
+    )
+    actual = _read_replay_sidecar(_absolute_path(handoff_file, "handoff file"))
+    if expected["handoff_sha256"] != digest or actual != _line(expected):
+        raise SubmissionPredictionError("handoff_mismatch", "handoff differs from pinned source projection")
+    return {"kind": "vulngym.mixed-batch-handoff-verification.v1", "verified": True,
+            "handoff_sha256": digest, "source_replay_dataset_sha256": expected["source_replay_dataset_sha256"],
+            "task_count": expected["task_count"], "complete_count": expected["complete_count"],
+            "incomplete_count": expected["incomplete_count"], "formal_submission_export": False}
 
 
 def _is_reparse(value: os.stat_result) -> bool:
@@ -2266,6 +2380,8 @@ __all__ = [
     "SubmissionPredictionExportInput",
     "SubmissionPredictionManifest",
     "build_submission_review_evidence",
+    "build_submission_handoff",
+    "verify_submission_handoff",
     "combine_submission_prediction_exports",
     "read_submission_predictions",
     "verify_submission_predictions",

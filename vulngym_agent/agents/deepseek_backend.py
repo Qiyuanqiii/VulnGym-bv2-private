@@ -28,7 +28,7 @@ from vulngym_agent.agents.model_runtime import ModelBlocked, ModelRequest, struc
 MODEL_ID = "deepseek-v4-pro"
 API_HOST = "api.deepseek.com"
 API_PATH = "/chat/completions"
-PROMPT_VERSION = "t2-json-v3"
+PROMPT_VERSION = "t2-json-v4"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -86,7 +86,16 @@ verification. Check that the claimed version, selected roles and metadata are
 supported; do not approve merely because schema_valid is true. For a repair,
 compare the previous candidate and changed_fields against check_evidence; do not
 claim broader verification. Output {"action":"emit"} only if this bounded review
-supports emission as an unverified candidate; otherwise {"action":"defer"}.""",
+supports emission as an unverified candidate. Otherwise defer. For
+payload.contract_version=2, the exact defer shape is {"action":"defer",
+"defer_details":{"reason_code":"<allowed code>","missing_fields":["<allowed field>"],
+"evidence_refs":["<current allowed evidence ID>"],"explanation":"<brief missing fact>"}}.
+Use payload.defer_contract: one permitted code, 1-6 unique missing fields and
+1-8 unique allowed_evidence_refs. State the specific missing fact or conflict
+in 1-400 characters without newlines, not hidden reasoning. This is an
+unverified self-report, never an independent verdict. Initial review may cite
+review_context.semantic_context; repair may cite review_context.evidence.
+On emit, OMIT defer_details. Contract_version=1 keeps {"action":"defer"}.""",
     "repair": """Choose only allowed repair_fields that have an evidenced
 T1 suggested_fix in the supplied repair plan. The controller applies the values;
 you may not invent replacement values or change locked fields. Output
@@ -142,6 +151,8 @@ def build_chat_request(request: ModelRequest, settings: DeepSeekSettings) -> byt
         context = request.payload.get("review_context")
         if not isinstance(context, Mapping) or not isinstance(context.get("candidate"), Mapping):
             raise ModelBlocked("deepseek_reflection_context_missing")
+        if request.payload.get("contract_version") == 2 and not isinstance(request.payload.get("defer_contract"), Mapping):
+            raise ModelBlocked("deepseek_reflection_defer_contract_missing")
     body = _json_bytes({
         "model": MODEL_ID,
         "messages": [

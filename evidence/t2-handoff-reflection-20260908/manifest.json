@@ -1,0 +1,1 @@
+{"excluded_paths_and_credential_pattern_check_passed":true,"files":[{"bytes":2435,"path":"verification.json","sha256":"704b691d7934fc84cd12e982979f3779c7a9484f45f669dbfe308f6cec7ef189"},{"bytes":341,"path":"handoff_verification.json","sha256":"1b303ef3e42bd753201e2b01ce0c951c87f1ccad42dd19ba77cf1a2dc3072ad0"}],"metadata_only":true,"schema_version":1}

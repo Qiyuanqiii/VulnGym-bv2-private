@@ -266,19 +266,17 @@ ds = load_dataset("json", data_files={
 A separate [T2 production entry point](docs/t2_production_runbook.md) now accepts
 an explicitly configured `StructuredModelBackend` via `--backend-factory`, without
 per-task answer fixtures. The selected [DeepSeek V4 Pro adapter](docs/deepseek_t2_setup.md)
-is now included. A [two-report live smoke run](docs/deepseek_t2_smoke_receipt.md)
-confirmed API connectivity, but both tasks deferred before semantic generation:
-zero complete entries and zero T1 calls. New-report quality evaluation is pending.
-A subsequent [evidence-first routing fix](docs/t2_evidence_first_planning.md)
-passed offline regressions. A [live two-input retest](docs/deepseek_t2_retest_receipt.md)
-then reached semantic review on both inputs, but both model responses deferred:
-still zero complete entries or T1 calls. A subsequent
-[bounded semantic-context/defer-contract fix](docs/t2_semantic_context_receipt.md)
-passed 276 offline regressions (275 passed, one skipped). It carries pinned
-diff/source context into semantic review and reflection and requires current
-evidence references for structured semantic defers. Prompt v3 has not been
-live-tested; improved real-model completeness or quality is not yet established.
-Current integration tests use synthetic test doubles, not real-model quality data.
+is now included. The latest [real two-input development retest](docs/deepseek_t2_candidate_retest_receipt.md)
+used prompt v3 and produced one complete candidate with an uncertain T1 report;
+the other task deferred at reflection. Both remain manual_review. This is
+one-of-two complete production on already-used development inputs, not an
+accuracy claim or unseen-input evaluation.
+
+The subsequent [offline product increment](docs/t2_handoff_reflection_receipt.md)
+adds evidence-referenced reflection defer reasons (prompt v4) and a read-only
+mixed-batch handoff. Its 324 regressions passed with one existing conditional
+skip. Prompt v4 has not been live-tested. Integration test doubles are not
+real-model quality data; independent semantic evaluation is still pending.
 The existing exact-replay CLI and its mandatory replay closure remain unchanged.
 
 The B-v2 tools require Python 3.10 or newer. For a reproducible test
@@ -461,6 +459,13 @@ The export contains `entries.jsonl`, `validation.jsonl`, and
 into a pass. See
 [`docs/submission_prediction_runbook.md`](docs/submission_prediction_runbook.md)
 for the trust boundary, no-replace recovery rules, and protected-path options.
+
+For a batch containing complete pairs **and** deferred tasks, use the separate
+read-only handoff/verify-handoff commands documented in
+[mixed-batch handoff](docs/submission_prediction_runbook.md#mixed-batch-handoff).
+They preserve all tasks and actual reports without changing the strict export
+rule. Handoff JSON contains candidate code and evidence: keep it local or share
+only with an authorized reviewer; use review for a metadata-only public index.
 
 Artifacts intentionally retain bounded, public or otherwise cleared Evidence
 snippets and the Schema-required Entry code snippets. Keep bundles in the

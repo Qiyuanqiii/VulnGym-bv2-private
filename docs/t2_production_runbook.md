@@ -1,5 +1,7 @@
 # T2 新报告生产入口：配置、输出与当前边界
 
+**最新代码状态（2026-09-08）**：[自检理由与混合批次交接](t2_handoff_reflection_receipt.md)已离线完成。新生产reflection v2在defer时要求结构化短说明和当前证据引用，提示词t2-json-v4；旧默认/回放保留。handoff可交接完整候选加弃答的混合批次，不改变严格export。最新真实模型记录仍为[同两条开发输入产出1份候选/T1](deepseek_t2_candidate_retest_receipt.md)，不是新输入质量验收。下面早期阶段记录不代表当前最新计数。
+
 状态：2026-09-07，Issue #12 的**入口与适配器增量**。用户已选择 DeepSeek V4 Pro，通用接口和官方 API 适配器已实现并离线测试；[真实两条试跑](deepseek_t2_smoke_receipt.md)已确认接口连通，但完整 Entry=0、T1 调用=0，两条在候选提取阶段 deferred。新报告生产质量实测尚未完成，不能据此宣称 T2 总体验收完成。
 
 后续 [证据先行路由修复](t2_evidence_first_planning.md)已完成离线验证：相同两条公开输入在明确的诊断脚本下均到达语义判断阶段后主动弃答。249 项针对性回归为 248 通过、1 跳过；没有新模型调用或完整 Entry，不改写上述真实试跑结论。
@@ -20,6 +22,8 @@
 两种入口共享任务读取、真实本地 T2 producer、每轮新建的 T1 validator、预算、结构校验和工件格式；没有降低旧 replay 的完成条件。生产入口拒绝内置两种 replay backend，也不接受 `--replay-responses`。这不能识别所有自定义假模型：使用者必须如实标注 test double、规则系统或实际模型，不能仅凭入口名字认定是模型实跑。
 
 新生产的入口 code 在 2,000 字符预算内只保留完整行，并记录实际片段结束行和裁短说明；首个锚点行过长则不签发残行候选。该策略由 `LocalProductionTaskRunner` 强制启用。旧 exact-replay 与低层默认保留历史字符裁剪以保持字节兼容，可能复现原始格式错误，**不得把旧回放当成已修正的新生产**。完整行只修复文本事实，不证明角色语义。
+
+新生产自检（包括repair后自检）在contract_version=2时：emit仅返回action；defer还必须返回defer_details，含reason_code、missing_fields、evidence_refs、explanation。允许值和当前引用由payload.defer_contract给出；解释最多400字符，明确为未经独立核实的模型自述。不完整/过期引用拒绝为invalid_model_output，不能伪装成有依据的合法弃答；历史理由不追写。
 
 ## 2. 运行前准备
 

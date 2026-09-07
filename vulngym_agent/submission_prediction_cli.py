@@ -13,8 +13,10 @@ from vulngym_agent.submission_prediction import (
     SubmissionPredictionError,
     SubmissionPredictionExportInput,
     build_submission_review_evidence,
+    build_submission_handoff,
     combine_submission_prediction_exports,
     verify_submission_predictions,
+    verify_submission_handoff,
     write_submission_predictions,
 )
 
@@ -133,6 +135,18 @@ def _parser() -> argparse.ArgumentParser:
         help="trusted local path whose spelling must not occur in replay artifacts",
     )
     _add_common_count(review)
+
+    for name in ("handoff", "verify-handoff"):
+        command = subparsers.add_parser(name, help=(
+            "emit a read-only mixed-batch JSON handoff (includes candidate code)"
+            if name == "handoff" else "verify a handoff against pinned source and external digest"))
+        command.add_argument("--replay-dir", required=True, type=Path)
+        command.add_argument("--replay-dataset-sha256", required=True, type=_sha256)
+        command.add_argument("--protected-path", action="append", default=[], type=Path)
+        _add_common_count(command)
+        if name == "verify-handoff":
+            command.add_argument("--handoff-file", required=True, type=Path)
+            command.add_argument("--handoff-sha256", required=True, type=_sha256)
 
     combine = subparsers.add_parser(
         "combine", help="combine pinned submission exports"
@@ -294,6 +308,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             manifest = bundle.manifest
             _canonical_stdout(_summary(args.operation, manifest))
+        elif args.operation in {"handoff", "verify-handoff"}:
+            options = {
+                "expected_source_replay_dataset_sha256": args.replay_dataset_sha256,
+                "expected_task_count": args.expected_task_count,
+                "protected_paths": args.protected_path,
+            }
+            if args.operation == "handoff":
+                result = build_submission_handoff(args.replay_dir, **options)
+            else:
+                result = verify_submission_handoff(
+                    args.handoff_file, args.replay_dir,
+                    expected_handoff_sha256=args.handoff_sha256, **options)
+            _canonical_stdout(result)
         else:
             review = build_submission_review_evidence(
                 args.replay_dir,

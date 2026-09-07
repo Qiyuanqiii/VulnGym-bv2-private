@@ -30,6 +30,65 @@ field evidence text, source snippets, prompts, model responses, and local
 paths. This makes `manual_review` outcomes auditable without pretending they
 are finalized.
 
+## Mixed-batch handoff
+
+Use this when a pinned batch contains both complete candidate/report pairs and
+producer-deferred tasks. The read-only handoff is a separate local-review JSON
+artifact, **not** a formal submission. It preserves every terminal task, actual
+verdict and missing-information record; incomplete tasks do not get fake Entries.
+An incorrect report is not dropped. Input-failure rows are currently rejected;
+inspect the original errors before preparing a task handoff.
+
+```powershell
+python -B -m vulngym_agent.submission_prediction_cli handoff `
+  --replay-dir <REPLAY_DIR> `
+  --replay-dataset-sha256 <TRUSTED_REPLAY_DATASET_SHA256> `
+  --expected-task-count 2
+```
+
+Unlike review, stdout includes full candidate code and T1 evidence, so keep it
+local or share only with an authorized reviewer. It contains entries and
+validation arrays, a tasks ledger with pair_ordinal (1-based, or null), and an
+independent handoff_sha256. It does not claim semantic correctness or completed
+human review. It leaves the strict export behavior unchanged.
+
+To save canonical bytes without overwriting a file, use a small Python caller
+(replace placeholders). The parent directory must already exist. On a failed
+write, preserve the partial file and diagnose it; this is not the formal
+transactional publication workflow:
+
+```python
+import subprocess
+from pathlib import Path
+import sys
+
+data = subprocess.check_output([
+    sys.executable, "-B", "-m", "vulngym_agent.submission_prediction_cli", "handoff",
+    "--replay-dir", "<REPLAY_DIR>",
+    "--replay-dataset-sha256", "<TRUSTED_REPLAY_DATASET_SHA256>",
+    "--expected-task-count", "2",
+])
+with Path("<NEW_HANDOFF_FILE.json>").open("xb") as stream:
+    stream.write(data)
+```
+
+Record the resulting handoff digest outside the file. Verify from the pinned
+source, not just its own digest; the comparison is byte-exact (UTF-8, no BOM,
+canonical JSON and a final LF). The readback neither runs T2/T1 nor writes files:
+
+```powershell
+python -B -m vulngym_agent.submission_prediction_cli verify-handoff `
+  --handoff-file <HANDOFF_FILE.json> `
+  --handoff-sha256 <EXTERNAL_HANDOFF_SHA256> `
+  --replay-dir <REPLAY_DIR> `
+  --replay-dataset-sha256 <TRUSTED_REPLAY_DATASET_SHA256> `
+  --expected-task-count 2
+```
+
+See the [offline product receipt](t2_handoff_reflection_receipt.md) for the
+two-task real-output readback (one complete pair, one deferred). This does not
+rerun the model or change that historical batch's generic reflection reason.
+
 ## Export
 
 Formal export is supported on both POSIX and Windows-native development hosts.

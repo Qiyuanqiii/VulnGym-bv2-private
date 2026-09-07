@@ -1,5 +1,7 @@
 # DeepSeek V4 Pro：T2 模型配置与实跑前检查
 
+**当前代码（2026-09-08离线增量）**：[自检弃答与交接](t2_handoff_reflection_receipt.md)已实现，提示词身份为t2-json-v4。新生产reflection contract_version=2的defer须给有当前证据引用的短说明，emit仍只有action；旧默认保持原形状。324项回归323通过、1跳过，尚未调用真实服务验证v4；下面最新实跑仍是0190850/t2-json-v3的历史结果，不再使用那枚key。
+
 **最新（2026-09-08）**：[候选覆盖修正后的真实复测](deepseek_t2_candidate_retest_receipt.md)已结束：6次成功HTTP、61,907 tokens，Flowise生成1份完整候选及T1报告（uncertain），Langflow在reflection阶段defer；两条最终manual_review，finalized=0。完整候选由同输入上次0/2变为1/2，不是正确率。临时key已用完并通知撤销，不再调用。下一步离线评价、补自检理由/混合批次交付说明，然后做新输入评价。以下记录均保留各自历史阶段含义。
 
 此前[v3同输入真实复测](deepseek_t2_context_retest_receipt.md)：4次成功请求、33,208 tokens，两条均在semantic阶段defer，完整Entry/T1为0。候选/入口范围局限随后已离线修正并由上方新批次复测，旧结果未覆盖。
