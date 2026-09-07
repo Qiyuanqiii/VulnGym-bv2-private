@@ -1,9 +1,17 @@
 # Lane A manual-review evidence note
 
-This note explains the current hybrid Lane A result for submission review. It
-is intentionally conservative: `manual_review` means the T2 candidate reached
-the real deterministic T1 validator, but T1 did not have enough exact,
-mechanically reproducible evidence to mark the full Entry as `correct`.
+This note explains the historical hybrid Lane A result for submission review.
+`manual_review` is a workflow status, not a claim that the input itself lacks
+evidence. Of 40 complete candidate/report pairs, T1 reported 35 `uncertain` and
+5 `incorrect`. Confirmed contradictions must not be described as mere unknowns.
+
+The [2026-09-07 offline annotation audit](../lane_a_review_audit_receipt.md)
+confirmed all five entry-code mismatches came from a 2,000-character crop that
+cut the last source line. Whole-line replacement excerpts pass zero-tolerance
+location checks; their semantic roles are still unverified. The production path
+now avoids this crop defect, while the original Entries, reports and hashes
+remain unchanged. The new review cards are unsigned triage, not completed
+human review or revised submission predictions.
 
 It is not a runtime failure. The expanded hybrid batches completed with zero
 input failures:
@@ -59,7 +67,8 @@ complete candidate/report pair:
 The fields that remain semantic are deliberately left for review rather than
 being promoted by weak heuristics:
 
-- `entry_point` reachability and exact location;
+- `entry_point` reachability; five original location mismatches are separately
+  confirmed formatting defects, not semantic uncertainties;
 - `critical_operation` as the real vulnerable sink or missing guard;
 - `trace` completeness;
 - `project` naming;
@@ -121,13 +130,15 @@ with `submission_prediction_cli combine`. Its combined source-set SHA-256 is
 submission SHA-256 is
 `0ff24779c984e82f4f83773d3f9b1694a8a4a4bb2c0134c5c6eeaa89b1430508`.
 
-The next engineering choice is therefore not whether the pipeline runs. It
-does. The choice is how aggressively to promote semantic facts:
+The historical replay pipeline runs, but that is not proof that new-report
+autonomous production or semantic quality meets the main T2 acceptance goal.
+Next steps follow [the current T2-primary reference](../current_task_reference.md):
 
-1. Keep the current strict T1 and submit `manual_review` evidence as the honest
-   audit trail for uncertain fields.
-2. Add narrow T1 promotions only for facts that can be re-proved from public
-   advisory text, local Git topology, and exact source snippets without using
-   hidden answers.
-3. Leave rows with incorrect `entry_point` or missing vulnerable-side operation
-   evidence unfinalized until stronger evidence exists.
+1. Keep original errors visible; if corrected candidates are adopted, create a
+   separate revision and obtain matching new reports without rewriting history.
+2. Use the 40 review cards to evaluate metadata, roles and trace completeness.
+   Current checker limitations are not automatically missing source evidence;
+   source-text matches are not semantic correctness.
+3. Demonstrate useful real-model production and evaluate representative results.
+   Keep unresolved rows unfinalized and machine verify flags at zero; a higher
+   finalized count is not the objective.

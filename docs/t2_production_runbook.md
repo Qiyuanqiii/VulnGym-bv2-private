@@ -8,6 +8,8 @@
 
 当前 [上下文及可解释弃答增量](t2_semantic_context_receipt.md)已离线验证：276 项回归为 275 通过、1 跳过；提示词 t2-json-v3 尚未真实复测，临时 key 已由用户确认撤销。
 
+后续 [Lane A 复核分流与整行修复](lane_a_review_audit_receipt.md)：历史 5 个 incorrect 已确认是入口代码的字符截断缺陷，40 份待审卡已生成；新生产入口强制完整行片段。338 项回归为 337 通过、1 跳过；没有新模型调用或历史判定升级。
+
 ## 1. 两种入口不混用
 
 | 入口 | 模型来源 | 用途 |
@@ -16,6 +18,8 @@
 | `python -m vulngym_agent.closed_loop_cli` | `--replay-responses` 精确答案注册表 | 原回放/回归；所有已登记 response 必须消费，闭合失败仍禁止发布 |
 
 两种入口共享任务读取、真实本地 T2 producer、每轮新建的 T1 validator、预算、结构校验和工件格式；没有降低旧 replay 的完成条件。生产入口拒绝内置两种 replay backend，也不接受 `--replay-responses`。这不能识别所有自定义假模型：使用者必须如实标注 test double、规则系统或实际模型，不能仅凭入口名字认定是模型实跑。
+
+新生产的入口 code 在 2,000 字符预算内只保留完整行，并记录实际片段结束行和裁短说明；首个锚点行过长则不签发残行候选。该策略由 `LocalProductionTaskRunner` 强制启用。旧 exact-replay 与低层默认保留历史字符裁剪以保持字节兼容，可能复现原始格式错误，**不得把旧回放当成已修正的新生产**。完整行只修复文本事实，不证明角色语义。
 
 ## 2. 运行前准备
 
@@ -81,4 +85,4 @@ python -B -m unittest tests.test_t2_production_cli tests.test_closed_loop_batch 
 
 执行前沿用上述 TEMP/TMP 设置；代码与记录由引入本 runbook 的 commit 固定。`git diff --check` 通过。
 
-上述 167 项是首次入口接线的历史回归；路由增量的 249 项命令和结果见 [修复记录](t2_evidence_first_planning.md)，当前上下文增量的 276 项回归及历史字节兼容性检查见 [最新记录](t2_semantic_context_receipt.md)。下一步仍属 #12/#97：确认新的受限调用授权与凭证，实测而非推定上下文改进有效；检查原 40 条中的 5 incorrect、分类 35 uncertain；冻结提示词与评价口径后选新输入，不按结果挑样本。当前不关闭 #12，也不改变 #90/#94 的开放状态。
+上述 167 项是首次入口接线的历史回归；路由增量的 249 项见 [路由记录](t2_evidence_first_planning.md)，上下文增量的 276 项见 [上下文记录](t2_semantic_context_receipt.md)，整行修复后的 338 项及五条根因证据见 [历史复核记录](lane_a_review_audit_receipt.md)。下一步仍属 #12/#97：确认新的受限调用授权与凭证，实测而非推定上下文改进有效；对已分流的40份卡做实质评价，如采用修正片段则另建候选/报告，不改写原包。冻结提示词与评价口径后选新输入，不按结果挑样本。当前不关闭 #12，也不改变 #90/#94 的开放状态。

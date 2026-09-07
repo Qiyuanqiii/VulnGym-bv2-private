@@ -180,6 +180,7 @@ class LocalT2Toolbox:
         "_repository",
         "_repo_path",
         "_schema_adapter",
+        "_whole_line_entry_snippets",
         "task",
         "task_input",
     )
@@ -190,7 +191,11 @@ class LocalT2Toolbox:
         task_input: T2TaskInput,
         package_root: str | Path,
         repo_path: str | Path,
+        *, whole_line_entry_snippets: bool = False,
     ) -> None:
+        if type(whole_line_entry_snippets) is not bool:
+            raise ValueError("whole_line_entry_snippets must be boolean")
+        self._whole_line_entry_snippets = whole_line_entry_snippets
         if not isinstance(task, RunTask):
             raise ValueError("task must be a RunTask")
         if parse_t2_task_input(task) != task_input:
@@ -801,6 +806,7 @@ class LocalT2Toolbox:
             repository,
             max_files=len(self.task_input.hints.source_paths),
             max_bytes=MAX_ROUTE_BYTES,
+            whole_line_snippets=self._whole_line_entry_snippets,
         ).search(
             commit,
             paths=self.task_input.hints.source_paths,

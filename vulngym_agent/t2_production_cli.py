@@ -106,6 +106,9 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
 
     def __init__(self, *, backend: StructuredModelBackend, **configuration: Any) -> None:
         backend = _validate_backend(backend)
+        if configuration.get("whole_line_entry_snippets", True) is not True:
+            raise ValueError("production requires whole-line entry snippets")
+        configuration["whole_line_entry_snippets"] = True
         super().__init__(backend=backend, **configuration)
         self._producer = LocalStructuredT2Producer(
             include_reflection_context=True, evidence_first_planning=True,

@@ -100,14 +100,18 @@ class LocalT2ContextFactory:
     projection, or an exception message.
     """
 
-    __slots__ = ("_backend", "_package_root", "_repo_map")
+    __slots__ = ("_backend", "_package_root", "_repo_map", "_whole_line_entry_snippets")
 
     def __init__(
         self,
         package_root: str | Path,
         repo_map: Mapping[str, str | Path],
         backend: StructuredModelBackend,
+        *, whole_line_entry_snippets: bool = False,
     ) -> None:
+        if type(whole_line_entry_snippets) is not bool:
+            raise ValueError("whole_line_entry_snippets must be boolean")
+        self._whole_line_entry_snippets = whole_line_entry_snippets
         self._package_root = _configured_directory(
             package_root, name="package_root"
         )
@@ -194,6 +198,7 @@ class LocalT2ContextFactory:
             task_input,
             self._package_root,
             repo_path,
+            whole_line_entry_snippets=self._whole_line_entry_snippets,
         )
         allowed_tools = (
             LOCAL_T2_TOOL_NAMES

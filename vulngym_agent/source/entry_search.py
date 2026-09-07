@@ -425,16 +425,39 @@ def _relation(
     return False, False, None
 
 
+def whole_line_excerpt(text: str, *, max_chars: int = _MAX_SNIPPET_CHARS) -> str | None:
+    """Keep a bounded prefix of whole source lines, never a partial final token.
+
+    None means even the first line cannot be represented within the budget.
+    This helper does not evaluate semantic roles or change source text.
+    """
+    if not isinstance(text, str) or type(max_chars) is not int or max_chars < 1:
+        raise ValueError("invalid_snippet_budget")
+    if not text or not text.strip():
+        return None
+    if len(text) <= max_chars:
+        return text
+    prefix = text[:max_chars]
+    # A limit exactly at a newline boundary already contains complete lines.
+    if text[max_chars] == "\n":
+        return prefix
+    boundary = prefix.rfind("\n")
+    return prefix[:boundary] if boundary >= 0 and prefix[:boundary].strip() else None
+
+
 def _same_file_review_anchor(
     path: str,
     lines: Sequence[str],
     critical_paths: Sequence[str],
+    *, whole_line_snippets: bool = False,
 ) -> EntryPointCandidate | None:
     if path not in set(critical_paths):
         return None
     for index, line in enumerate(lines):
         if not line.strip():
             continue
+        if whole_line_snippets and len(line) > _MAX_SNIPPET_CHARS:
+            return None  # Do not issue a partial source line as a correct fact.
         return EntryPointCandidate(
             "uncertain",
             "correct",
@@ -469,7 +492,11 @@ class EntryPointSearcher:
         max_files: int = DEFAULT_MAX_FILES,
         max_bytes: int = DEFAULT_MAX_BYTES,
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
+        whole_line_snippets: bool = False,
     ) -> None:
+        if type(whole_line_snippets) is not bool:
+            raise ValueError("whole_line_snippets must be boolean")
+        self.whole_line_snippets = whole_line_snippets
         self.max_files = _positive_limit("max_files", max_files, HARD_MAX_FILES)
         self.max_bytes = _positive_limit("max_bytes", max_bytes, HARD_MAX_BYTES)
         self.max_candidates = _positive_limit("max_candidates", max_candidates, HARD_MAX_CANDIDATES)
@@ -582,18 +609,39 @@ class EntryPointSearcher:
                     if marker.explicit and direct
                     else "The heuristic candidate must not be promoted to a verified entry point."
                 )
+                snippet = scope_text[:_MAX_SNIPPET_CHARS]
+                snippet_end = end + 1
+                if self.whole_line_snippets:
+                    snippet = whole_line_excerpt(scope_text)
+                    if snippet is None:
+                        issues.append(EntryPointSearchIssue(
+                            "uncertain", "entry_snippet_first_line_too_large", path,
+                            "The entry anchor line exceeds the snippet budget; no partial-line candidate was issued.",
+                        ))
+                        continue
+                    snippet_end = marker.line + len(snippet.splitlines())
+                    if snippet != scope_text:
+                        caveat += " Snippet truncated at a complete line; remaining construct text is omitted."
                 candidates.append(EntryPointCandidate(
-                    status, "correct", path, marker.line + 1, end + 1, language, marker.kind,
+                    status, "correct", path, marker.line + 1, snippet_end, language, marker.kind,
                     marker.symbol, marker.explicit, direct, matched, False, False,
-                    scope_text[:_MAX_SNIPPET_CHARS],
+                    snippet,
                     f"Observed {construct}; the {relation} {matched}. {caveat}",
                 ))
             if truncated:
                 issues.append(EntryPointSearchIssue("uncertain", "max_candidates_exceeded", path, f"Candidate output was truncated at {self.max_candidates}.")); break
             if len(candidates) == path_candidate_start and len(candidates) < self.max_candidates:
-                anchor = _same_file_review_anchor(path, lines, critical_path_values)
+                anchor = _same_file_review_anchor(path, lines, critical_path_values,
+                                                  whole_line_snippets=self.whole_line_snippets)
                 if anchor is not None:
                     candidates.append(anchor)
+                elif (self.whole_line_snippets and path in critical_path_values
+                      and any(line.strip() for line in lines)
+                      and len(next(line for line in lines if line.strip())) > _MAX_SNIPPET_CHARS):
+                    issues.append(EntryPointSearchIssue(
+                        "uncertain", "entry_snippet_first_line_too_large", path,
+                        "The review anchor line exceeds the snippet budget; no partial-line candidate was issued.",
+                    ))
 
         incomplete = bool(issues) or truncated
         if incomplete: status, fact_status = "uncertain", "uncertain"
