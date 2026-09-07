@@ -1,6 +1,6 @@
 # DeepSeek V4 Pro：T2 模型配置与实跑前检查
 
-2026-09-07：用户选择 DeepSeek V4 Pro。适配器已实现；当前验证使用本地构造数据与模拟 HTTP，**尚未完成真实 API 连通性或新报告质量测试**。本会话的进程环境中没有 `DEEPSEEK_API_KEY`；未读取其他应用密钥，未产生模型调用费用。
+2026-09-07：用户选择 DeepSeek V4 Pro。适配器已实现；随后获准的 [两条公开输入试跑](deepseek_t2_smoke_receipt.md)得到 2 次真实成功响应，但两条均在本地候选提取阶段 deferred，完整 Entry 和 T1 调用均为 0。**接口连通已验证，新报告生产质量尚未验证。**临时运行已结束并提醒用户撤销密钥；不再使用本次凭证。
 
 ## 1. 模型与调用约定
 
@@ -69,7 +69,7 @@ python -B -m vulngym_agent.t2_production_cli `
 
 后续 #12/#97 仍须真实小批、新输入评价、5 incorrect 核查及 35 uncertain 分类；#12 不因适配器接通就关闭。
 
-## 5. 本次验证记录
+## 5. 适配器首次实现时的离线验证记录
 
 2026-09-07，Python 3.13.12，临时目录放 D 盘：针对性回归 192 项，191 通过、1 跳过、0 失败；其中新增 DeepSeek 配置/协议/传输/生产集成测试 25 项。跳过的是既有 Windows 符号链接读取测试（账号缺少创建链接特权），未更改权限。
 
@@ -77,4 +77,4 @@ python -B -m vulngym_agent.t2_production_cli `
 python -B -m unittest tests.test_deepseek_backend tests.test_t2_production_cli tests.test_closed_loop_batch tests.test_real_t2_producer tests.test_model_runtime tests.test_t2_execution tests.test_t2_inputs tests.test_t2_toolbox tests.test_producer_contracts tests.test_producer_context tests.test_closed_loop_replay tests.test_submission_prediction -q
 ```
 
-实际本机 `--check-config` 返回 `deepseek_configuration_missing_or_invalid`，另以仅检查变量是否存在的方式确认 key 缺失；network_calls=0。此处的模拟 HTTP 测试、真实本地 T1 调用和缺配置预检，均不证明真实 DeepSeek 账号可用或新报告语义正确。`git diff --check` 通过；完整代码版本以引入本文的 commit 为准。
+首次实现时，本机 `--check-config` 返回 `deepseek_configuration_missing_or_invalid`，另以仅检查变量是否存在的方式确认 key 缺失；network_calls=0。此处的模拟 HTTP 测试、真实本地 T1 调用和缺配置预检，均不证明真实 DeepSeek 账号可用或新报告语义正确。`git diff --check` 通过；完整代码版本以引入本文的 commit 为准。后续真实试跑状态见本文开头，不改写该次离线测试的历史记录。

@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "run_id": "deepseek-smoke-20260907-v2",
+  "purpose": "real_provider_integration_smoke_not_heldout_quality_evaluation",
+  "code_commit": "28590ff78f8d157310cfd323404cecb1ac14e083",
+  "model_id": "deepseek-v4-pro",
+  "backend_id": "deepseek:t2-json-v1:c8f87761d03f3ff918ea6bff",
+  "dataset_sha256": "c8dec568e247c189df29448d5480ed421356a893b887441f6179811b9c8f5ec2",
+  "exit_code": 0,
+  "counts": {
+    "tasks": 2,
+    "http_200": 2,
+    "model_plan_calls": 2,
+    "model_semantic_judge_calls": 0,
+    "model_reflection_calls": 0,
+    "model_repair_calls": 0,
+    "tool_calls": 18,
+    "complete_t2_entries": 0,
+    "deferred_records": 2,
+    "workflow_manual_review": 2,
+    "t1_validation_attempts": 0,
+    "input_failures": 0
+  },
+  "provider_reported_usage": {
+    "prompt_tokens": 1848,
+    "completion_tokens": 980,
+    "total_tokens": 2828
+  },
+  "monetary_charge": "not_measured_use_provider_billing",
+  "budgets": {
+    "records": 2,
+    "llm_calls_per_task": 3,
+    "total_transport_attempts": 6,
+    "tool_calls_per_task": 80,
+    "repair_iterations": 0,
+    "automatic_retries": 0
+  },
+  "readback": {
+    "verified_passes": 2,
+    "matching": true,
+    "reran_models": false
+  },
+  "offline_tests": {
+    "command": "python -B -m unittest tests.test_deepseek_backend -q",
+    "run": 25,
+    "passed": 25,
+    "failed": 0
+  },
+  "earlier_local_rejection": {
+    "run_id": "deepseek-smoke-20260907-v1",
+    "code": "input_line_mismatch",
+    "count": 2,
+    "transport_attempts": 0,
+    "preserved": true,
+    "correction": "renumber_only_subset_input_line_to_physical_line_and_preflight_parse"
+  },
+  "credential": {
+    "copied_to_artifacts": false,
+    "revocation_requested": true,
+    "revocation_verified": false
+  },
+  "deferred": [
+    {
+      "task_id": "VG-TRAIN-40D4B88B06CDE8FCFF5C",
+      "report_id": "GHSA-8C4J-F57C-35CF",
+      "stage": "resolve_critical",
+      "reason_code": "no_vulnerable_side_candidate"
+    },
+    {
+      "task_id": "VG-TRAIN-46D6453D5B4663CF0D13",
+      "report_id": "GHSA-MQ4R-H2GH-QV7X",
+      "stage": "resolve_critical",
+      "reason_code": "no_vulnerable_side_candidate"
+    }
+  ]
+}

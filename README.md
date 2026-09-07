@@ -266,7 +266,9 @@ ds = load_dataset("json", data_files={
 A separate [T2 production entry point](docs/t2_production_runbook.md) now accepts
 an explicitly configured `StructuredModelBackend` via `--backend-factory`, without
 per-task answer fixtures. The selected [DeepSeek V4 Pro adapter](docs/deepseek_t2_setup.md)
-is now included; local key setup and live evaluation are still pending.
+is now included. A [two-report live smoke run](docs/deepseek_t2_smoke_receipt.md)
+confirmed API connectivity, but both tasks deferred before semantic generation:
+zero complete entries and zero T1 calls. New-report quality evaluation is pending.
 Current integration tests use synthetic test doubles, not real-model quality data.
 The existing exact-replay CLI and its mandatory replay closure remain unchanged.
 
