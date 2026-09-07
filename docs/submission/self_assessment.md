@@ -8,6 +8,8 @@
 
 ## 1. 评价对象及样本身份
 
+9月8日同输入真实复测已完成，见[v3记录](../deepseek_t2_context_retest_receipt.md)：4次成功请求，33,208 tokens；完整Entry=0/2、T1=0，2条均在语义阶段defer。模型理由与本地候选核对把下一步缩小到提名覆盖/入口资料范围；不能称为产出质量改善，也不是冻结后新输入评价。key已结束使用，不自动重复付费请求。
+
 评价主对象是“报告资料输入→完整VulnGym Entry或有理由的待复核结果”。
 Lane B Finding/authoring、Source sealing、单元测试另列，不混入T2质量分。
 
