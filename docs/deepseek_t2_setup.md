@@ -2,6 +2,8 @@
 
 2026-09-07：用户选择 DeepSeek V4 Pro。适配器已实现；随后获准的 [两条公开输入试跑](deepseek_t2_smoke_receipt.md)得到 2 次真实成功响应，但两条均在本地候选提取阶段 deferred，完整 Entry 和 T1 调用均为 0。**接口连通已验证，新报告生产质量尚未验证。**临时运行已结束并提醒用户撤销密钥；不再使用本次凭证。
 
+后续 [离线路由修复](t2_evidence_first_planning.md)已将生产 plan 改为先看有界公告/diff/候选证据，提示词身份为 `t2-json-v2`；249 项回归为 248 通过、1 跳过。相同输入在非模型诊断下到达语义阶段后主动弃答；新版提示词尚未进行真实模型复测，不改变上面的零产出事实。
+
 ## 1. 模型与调用约定
 
 按 [DeepSeek 官方入口说明](https://api-docs.deepseek.com/) 使用模型 ID `deepseek-v4-pro` 和官方主机 `api.deepseek.com`。适配器调用 `/chat/completions`，不换成旧别名、Flash 或第三方中转。

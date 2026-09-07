@@ -293,14 +293,20 @@ class _Attempt:
 class LocalStructuredT2Producer:
     """Produce formal candidates through a controller-owned execution facade."""
 
-    __slots__ = ("_include_reflection_context",)
+    __slots__ = ("_include_reflection_context", "_evidence_first_planning")
 
-    def __init__(self, *, include_reflection_context: bool = False) -> None:
+    def __init__(
+        self, *, include_reflection_context: bool = False,
+        evidence_first_planning: bool = False,
+    ) -> None:
         if type(include_reflection_context) is not bool:
             raise ValueError("include_reflection_context must be boolean")
         # Opt in only for fresh production. Legacy exact-replay request bytes
         # must remain unchanged, including both reflection stages.
         self._include_reflection_context = include_reflection_context
+        if type(evidence_first_planning) is not bool:
+            raise ValueError("evidence_first_planning must be boolean")
+        self._evidence_first_planning = evidence_first_planning
 
     @staticmethod
     def _deferred_without_attempt(
@@ -385,7 +391,7 @@ class LocalStructuredT2Producer:
     def generate(
         self, task: RunTask, context: ProducerExecutionContext
     ) -> ProducerDraftResult:
-        """Run Plan -> tools -> semantic judge -> schema -> reflection."""
+        """Generate with legacy routing or opt-in evidence-before-plan routing."""
 
         if not isinstance(task, RunTask):
             raise ValueError("task must be a RunTask")
@@ -437,6 +443,158 @@ class LocalStructuredT2Producer:
                 ),
             )
 
+    def _select_mode(
+        self, run: _Attempt, plan_payload: Mapping[str, Any],
+        allowed_modes: Sequence[str],
+    ) -> str:
+        plan = run.model_call("plan", plan_payload)
+        plan_response = self._exact_response(
+            plan, frozenset({"action", "critical_mode"}), "plan"
+        )
+        action = plan_response["action"]
+        critical_mode = plan_response["critical_mode"]
+        if action == "defer":
+            if critical_mode is not None:
+                raise _Stop(
+                    "plan",
+                    "invalid_model_output",
+                    ("a deferred plan cannot select a critical mode",),
+                )
+            raise _Stop(
+                "plan", "model_deferred", ("the planning stage declined analysis",)
+            )
+        if action != "analyze" or critical_mode not in allowed_modes:
+            raise _Stop(
+                "plan",
+                "invalid_model_output",
+                ("the plan selected an unauthorized critical mode",),
+            )
+        return critical_mode
+
+    def _collect_critical_choices(
+        self, run: _Attempt, resolution_result: ToolResult, *,
+        source_path: str, vulnerable_commit: str, fix_commit: str,
+        critical_choices: list[_CriticalChoice],
+    ) -> dict[str, Any]:
+        before_count = len(critical_choices)
+        resolution_artifact = run.artifact_payload(
+            resolution_result, expected_kind="t2.critical_candidates"
+        )
+        resolution = resolution_artifact.get("critical_resolution")
+        if not isinstance(resolution, Mapping):
+            raise _Stop(
+                "resolve_critical",
+                "invalid_critical_evidence",
+                ("critical resolver output is incomplete",),
+            )
+        provisional_ids = set(
+            self._ordered_strings(
+                resolution.get("provisional_candidate_ids"),
+                field="provisional_candidate_ids",
+            )
+        )
+        candidates = resolution.get("candidates")
+        if (
+            isinstance(candidates, (str, bytes, Mapping))
+            or not isinstance(candidates, Sequence)
+        ):
+            raise _Stop(
+                "resolve_critical",
+                "invalid_critical_evidence",
+                ("critical candidate evidence is not an ordered array",),
+            )
+        for assessment in candidates:
+            if not isinstance(assessment, Mapping):
+                continue
+            source_id = assessment.get("candidate_id")
+            location = assessment.get("location")
+            if source_id not in provisional_ids or not isinstance(location, Mapping):
+                continue
+            if (
+                assessment.get("fact_status") != "correct"
+                or assessment.get("in_removed_or_changed_side") is not True
+                or assessment.get("change_kind") not in {"removed", "changed", "context"}
+                or assessment.get("vulnerable_commit") != vulnerable_commit
+                or assessment.get("fix_commit") != fix_commit
+                or location.get("file") != source_path
+                or not isinstance(location.get("line"), int)
+                or isinstance(location.get("line"), bool)
+                or location.get("line", 0) < 1
+                or not isinstance(location.get("code"), str)
+                or not location.get("code")
+            ):
+                continue
+            if len(location["code"]) > _MAX_MODEL_CODE_CHARS:
+                raise _Stop(
+                    "resolve_critical",
+                    "candidate_too_large",
+                    ("a critical candidate exceeds the semantic review bound",),
+                )
+            issued_id = f"critical-{len(critical_choices) + 1:04d}"
+            critical_choices.append(
+                _CriticalChoice(
+                    issued_id=issued_id,
+                    source_candidate_id=str(source_id),
+                    location=_freeze_public_json(
+                        {
+                            "file": location["file"],
+                            "line": location["line"],
+                            "code": location["code"],
+                        }
+                    ),
+                    mode=str(resolution.get("mode")),
+                    change_kind=str(assessment.get("change_kind")),
+                    evidence=str(assessment.get("evidence") or "fact-checked diff location"),
+                    tool_call_id=resolution_result.tool_call_id,
+                )
+            )
+        reason_counts: dict[str, int] = {}
+        for assessment in candidates:
+            reason = assessment.get("error_code") if isinstance(assessment, Mapping) else None
+            if reason is None:
+                reason = "none"
+            elif not isinstance(reason, str) or re.fullmatch(r"[a-z0-9_]{1,64}", reason) is None:
+                reason = "unclassified"
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        accepted = len(critical_choices) - before_count
+        return {
+            "kind": "critical_candidate_inventory_v1",
+            "mode": resolution.get("mode"), "assessed_count": len(candidates),
+            "provisional_count": len(provisional_ids), "accepted_count": accepted,
+            "not_accepted_count": len(candidates) - accepted,
+            "resolver_reason_counts": reason_counts,
+            "semantic_role_verified": False,
+        }
+
+    @staticmethod
+    def _planning_evidence(
+        *, snippet: str, vulnerable_commit: str, fix_commit: str,
+        changed_paths: Sequence[str], diff_context: Sequence[Mapping[str, Any]],
+        allowed_modes: Sequence[str], critical_choices: Sequence[_CriticalChoice],
+    ) -> dict[str, Any]:
+        inventory = []
+        for mode in allowed_modes:
+            choices = [choice for choice in critical_choices if choice.mode == mode]
+            samples = []
+            for choice in choices[:4]:
+                value = choice.model_value()
+                code = value["location"]["code"]
+                value["location"]["code"] = code[:1000]
+                value["code_truncated"] = len(code) > 1000
+                value["evidence"] = value["evidence"][:500]
+                samples.append(value)
+            inventory.append({"mode": mode, "candidate_count": len(choices), "samples": samples})
+        return {
+            "contract_version": 1, "basis": "declared_diff_candidates_v1",
+            "advisory_snippet": snippet[:2000], "advisory_snippet_truncated": len(snippet) > 2000,
+            "vulnerable_commit": vulnerable_commit, "fix_commit": fix_commit,
+            "changed_path_count": len(changed_paths), "diffs": list(diff_context),
+            "omitted_diff_count": len(changed_paths) - len(diff_context),
+            "mode_inventory": inventory,
+            "scope": "declared_paths_and_bounded_lexical_candidates_only",
+            "semantic_role_verified": False,
+        }
+
     def _generate(
         self, run: _Attempt, task_input: T2TaskInput
     ) -> Mapping[str, Any]:
@@ -473,28 +631,9 @@ class LocalStructuredT2Producer:
             plan_payload["expected_vulnerable_commit"] = (
                 task_input.expected_vulnerable_commit
             )
-        plan = run.model_call("plan", plan_payload)
-        plan_response = self._exact_response(
-            plan, frozenset({"action", "critical_mode"}), "plan"
-        )
-        action = plan_response["action"]
-        critical_mode = plan_response["critical_mode"]
-        if action == "defer":
-            if critical_mode is not None:
-                raise _Stop(
-                    "plan",
-                    "invalid_model_output",
-                    ("a deferred plan cannot select a critical mode",),
-                )
-            raise _Stop(
-                "plan", "model_deferred", ("the planning stage declined analysis",)
-            )
-        if action != "analyze" or critical_mode not in allowed_modes:
-            raise _Stop(
-                "plan",
-                "invalid_model_output",
-                ("the plan selected an unauthorized critical mode",),
-            )
+        critical_mode = None
+        if not self._evidence_first_planning:
+            critical_mode = self._select_mode(run, plan_payload, allowed_modes)
 
         advisory = run.tool_call("read_local_advisory")
         advisory_ref = advisory.artifact_refs[0]
@@ -619,105 +758,83 @@ class LocalStructuredT2Producer:
 
         critical_choices: list[_CriticalChoice] = []
         changed_paths: list[str] = []
+        diff_context: list[dict[str, Any]] = []
+        diagnostics: list[dict[str, Any]] = []
+        search_modes = allowed_modes if self._evidence_first_planning else (critical_mode,)
         for source_path in task_input.hints.source_paths:
             diff = run.tool_call(
                 "git_diff",
                 {
-                    "repo": repo_ref,
-                    "before_commit": vulnerable_commit,
-                    "after_commit": fix_commit,
-                    "path": source_path,
+                    "repo": repo_ref, "before_commit": vulnerable_commit,
+                    "after_commit": fix_commit, "path": source_path,
                 },
             )
             if not isinstance(diff.output, Mapping) or diff.output.get("changed") is not True:
                 continue
             changed_paths.append(source_path)
-            resolution_result = run.tool_call(
-                "dataflow_candidate_search",
-                {
-                    "repo": repo_ref,
-                    "diff": diff.artifact_refs[0],
-                    "mode": critical_mode,
-                },
-            )
-            resolution_artifact = run.artifact_payload(
-                resolution_result, expected_kind="t2.critical_candidates"
-            )
-            resolution = resolution_artifact.get("critical_resolution")
-            if not isinstance(resolution, Mapping):
-                raise _Stop(
-                    "resolve_critical",
-                    "invalid_critical_evidence",
-                    ("critical resolver output is incomplete",),
+            if self._evidence_first_planning and len(diff_context) < 8:
+                diff_payload = run.artifact_payload(diff, expected_kind="t2.git_diff")
+                text = diff_payload.get("unified_diff")
+                if not isinstance(text, str):
+                    raise _Stop("analyze_patch", "invalid_diff_evidence", ("a bounded textual diff is required",))
+                diff_context.append({
+                    "file": source_path, "added_lines": diff.output.get("added_lines"),
+                    "deleted_lines": diff.output.get("deleted_lines"),
+                    "excerpt": text[:2000], "truncated": len(text) > 2000,
+                })
+            for mode in search_modes:
+                resolution_result = run.tool_call(
+                    "dataflow_candidate_search",
+                    {"repo": repo_ref, "diff": diff.artifact_refs[0], "mode": mode},
                 )
-            provisional_ids = set(
-                self._ordered_strings(
-                    resolution.get("provisional_candidate_ids"),
-                    field="provisional_candidate_ids",
+                diagnostic = self._collect_critical_choices(
+                    run, resolution_result, source_path=source_path,
+                    vulnerable_commit=vulnerable_commit, fix_commit=fix_commit,
+                    critical_choices=critical_choices,
                 )
-            )
-            candidates = resolution.get("candidates")
-            if (
-                isinstance(candidates, (str, bytes, Mapping))
-                or not isinstance(candidates, Sequence)
-            ):
-                raise _Stop(
-                    "resolve_critical",
-                    "invalid_critical_evidence",
-                    ("critical candidate evidence is not an ordered array",),
-                )
-            for assessment in candidates:
-                if not isinstance(assessment, Mapping):
-                    continue
-                source_id = assessment.get("candidate_id")
-                location = assessment.get("location")
-                if source_id not in provisional_ids or not isinstance(location, Mapping):
-                    continue
-                if (
-                    assessment.get("fact_status") != "correct"
-                    or assessment.get("in_removed_or_changed_side") is not True
-                    or assessment.get("change_kind") not in {"removed", "changed", "context"}
-                    or assessment.get("vulnerable_commit") != vulnerable_commit
-                    or assessment.get("fix_commit") != fix_commit
-                    or location.get("file") != source_path
-                    or not isinstance(location.get("line"), int)
-                    or isinstance(location.get("line"), bool)
-                    or location.get("line", 0) < 1
-                    or not isinstance(location.get("code"), str)
-                    or not location.get("code")
-                ):
-                    continue
-                if len(location["code"]) > _MAX_MODEL_CODE_CHARS:
-                    raise _Stop(
-                        "resolve_critical",
-                        "candidate_too_large",
-                        ("a critical candidate exceeds the semantic review bound",),
-                    )
-                issued_id = f"critical-{len(critical_choices) + 1:04d}"
-                critical_choices.append(
-                    _CriticalChoice(
-                        issued_id=issued_id,
-                        source_candidate_id=str(source_id),
-                        location=_freeze_public_json(
-                            {
-                                "file": location["file"],
-                                "line": location["line"],
-                                "code": location["code"],
-                            }
-                        ),
-                        mode=str(resolution.get("mode")),
-                        change_kind=str(assessment.get("change_kind")),
-                        evidence=str(assessment.get("evidence") or "fact-checked diff location"),
+                if self._evidence_first_planning:
+                    diagnostics.append(diagnostic)
+                    run.evidence.append(EvidenceItem(
+                        evidence_id=run.evidence_id(f"INVENTORY-{len(diagnostics):03d}"),
+                        report_id=run.task.report_id, entry_id=run.task.entry_id,
+                        source_type="patch", snippet=_canonical_json(diagnostic),
+                        file=source_path, commit=vulnerable_commit,
                         tool_call_id=resolution_result.tool_call_id,
-                    )
-                )
+                    ))
+                    if sum(choice.mode == mode for choice in critical_choices) > _MAX_SEMANTIC_CANDIDATES:
+                        raise _Stop("resolve_critical", "candidate_set_too_large",
+                                    ("one routing mode exceeds the bounded candidate set",))
 
         if not changed_paths:
             raise _Stop(
-                "analyze_patch",
-                "no_declared_source_change",
+                "analyze_patch", "no_declared_source_change",
                 ("none of the declared source paths changed in the unique fix",),
             )
+        if self._evidence_first_planning:
+            available_modes = tuple(mode for mode in allowed_modes if any(
+                choice.mode == mode for choice in critical_choices
+            ))
+            if not available_modes:
+                assessed = sum(item["assessed_count"] for item in diagnostics)
+                mismatched = sum(item["resolver_reason_counts"].get("candidate_mode_mismatch", 0)
+                                 for item in diagnostics)
+                reason = ("critical_extractor_no_candidates" if assessed == 0 else
+                          "critical_mode_unsupported_by_candidates" if mismatched == assessed else
+                          "critical_candidates_rejected")
+                raise _Stop("resolve_critical", reason, (
+                    "declared-path extraction provided no admissible candidates for the permitted modes",
+                    "review the recorded candidate inventories; this does not establish that the report is unresolvable",
+                ))
+            plan_payload["contract_version"] = 2
+            plan_payload["allowed_critical_modes"] = list(available_modes)
+            plan_payload["planning_evidence"] = self._planning_evidence(
+                snippet=snippet, vulnerable_commit=vulnerable_commit, fix_commit=fix_commit,
+                changed_paths=changed_paths, diff_context=diff_context,
+                allowed_modes=allowed_modes, critical_choices=critical_choices,
+            )
+            critical_mode = self._select_mode(run, plan_payload, available_modes)
+            critical_choices = [choice for choice in critical_choices if choice.mode == critical_mode]
+
         if not critical_choices:
             reason = (
                 "guard_only_exists_on_fix_side"

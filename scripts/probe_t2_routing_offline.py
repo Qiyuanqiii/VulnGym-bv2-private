@@ -1,0 +1,95 @@
+"""Probe local T2 routing without any model service or candidate publication.
+
+The diagnostic script selects the first available routing mode and deliberately
+defers at semantic_judge. This is a test double, never semantic-quality evidence.
+Only answer-free task inputs, a trusted repo map and cleared public packages are
+accepted. Existing run directories and production outputs are never modified.
+"""
+from __future__ import annotations
+
+import argparse
+from hashlib import sha256
+from itertools import islice
+import json
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from vulngym_agent.closed_loop_cli import iter_task_jsonl, load_trusted_repo_map
+from vulngym_agent.orchestrator import Limits
+from vulngym_agent.t2_production_cli import LocalProductionTaskRunner
+
+
+class _DiagnosticBackend:
+    backend_id = "diagnostic.evidence-first-stop-at-semantic"
+    model_id = "offline-script-not-a-model"
+
+    def __init__(self):
+        self.requests = []
+
+    def invoke(self, request):
+        self.requests.append(request)
+        if request.stage == "plan":
+            return {"action": "analyze", "critical_mode": request.payload["allowed_critical_modes"][0]}
+        if request.stage == "semantic_judge":
+            return {"action": "defer", "critical_candidate_id": None, "entry_candidate_id": None,
+                    "project": None, "vuln_title": None, "vuln_category_l1": None, "vuln_category_l2": None}
+        raise ValueError("diagnostic_never_emits_reflects_or_repairs")
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tasks", required=True, type=Path)
+    parser.add_argument("--repo-map", required=True, type=Path)
+    parser.add_argument("--package-root", required=True, type=Path)
+    parser.add_argument("--max-records", type=int, default=2)
+    args = parser.parse_args(argv)
+    try:
+        if not 1 <= args.max_records <= 100:
+            raise ValueError("invalid_record_limit")
+        records = tuple(islice(iter_task_jsonl(args.tasks, max_task_bytes=1024 * 1024),
+                               args.max_records + 1))
+        if not records or len(records) > args.max_records or any(r.task is None for r in records):
+            raise ValueError("input_preflight_failed")
+        backend = _DiagnosticBackend()
+        runner = LocalProductionTaskRunner(
+            package_root=args.package_root, repo_map=load_trusted_repo_map(args.repo_map),
+            backend=backend, limits=Limits(max_llm_calls=3, max_tool_calls=80, max_repair_iterations=0),
+        )
+        rows = []
+        for record in records:
+            outcome = runner.run(record.task)
+            requests = [r for r in backend.requests if r.task_id == record.task.task_id]
+            plan = next((r for r in requests if r.stage == "plan"), None)
+            semantic = next((r for r in requests if r.stage == "semantic_judge"), None)
+            deferred = outcome.deferred_outcome
+            if outcome.production_outcomes or outcome.validation_outcomes or deferred is None:
+                raise ValueError("diagnostic_must_stop_before_production")
+            rows.append({
+                "task_id": record.task.task_id, "stage": deferred.stage, "reason_code": deferred.reason_code,
+                "offered_modes": list(plan.payload["allowed_critical_modes"]) if plan else [],
+                "candidate_counts": {item["mode"]: item["candidate_count"] for item in
+                                     plan.payload["planning_evidence"]["mode_inventory"]} if plan else {},
+                "semantic_stage_reached": semantic is not None,
+                "entry_candidates": len(semantic.payload["entry_candidates"]) if semantic else None,
+                "complete_entries": 0, "t1_calls": 0,
+            })
+            backend.requests.clear()
+        runner.finalize_batch()
+        result = {"schema_version": 1, "status": "diagnostic_complete", "network_calls": 0,
+                  "backend": backend.backend_id, "model": backend.model_id,
+                  "producer_sha256": sha256((REPO_ROOT / "vulngym_agent/agents/real_t2_producer.py").read_bytes()).hexdigest(),
+                  "results": rows}
+    except Exception:
+        # No report, local path, source code, exception detail or credential echo.
+        print('{"status":"invalid","error_code":"offline_probe_input_or_execution_error","network_calls":0}')
+        return 2
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

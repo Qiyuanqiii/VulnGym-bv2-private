@@ -368,6 +368,9 @@ class DeepSeekProductionIntegrationTests(unittest.TestCase):
         self.assertEqual(outcome.status, "manual_review")
         self.assertEqual(outcome.entry["verify"], 0)
         self.assertEqual(outcome.report.verdict, "uncertain")
+        self.assertEqual(staged[0]["payload"]["contract_version"], 2)
+        self.assertIn("planning_evidence", staged[0]["payload"])
+        self.assertIn("diffs", staged[0]["payload"]["planning_evidence"])
         context = staged[-1]["payload"]["review_context"]
         self.assertEqual(context["candidate"], fixture._plain(outcome.entry))
         self.assertIn("advisory_snippet", context)

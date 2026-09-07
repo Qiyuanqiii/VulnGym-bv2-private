@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-07",
+  "scope": "offline_engineering_verification_not_semantic_quality",
+  "code_base_commit": "4579620e90a7fa286c420bb9884e5597c343e4f0",
+  "implementation_commit_locator": "the_git_commit_introducing_this_receipt_and_the_pinned_code_files",
+  "runtime": {"python": "3.13.12", "platform": "Windows", "temporary_drive": "D"},
+  "targeted_regression": {
+    "command": "python -B -m unittest tests.test_t2_evidence_first_planning tests.test_deepseek_backend tests.test_t2_production_cli tests.test_closed_loop_batch tests.test_real_t2_producer tests.test_model_runtime tests.test_t2_execution tests.test_t2_inputs tests.test_t2_toolbox tests.test_producer_contracts tests.test_producer_context tests.test_closed_loop_replay tests.test_submission_prediction tests.test_critical_resolver tests.test_patch_analyzer -q",
+    "tests_run": 249,
+    "passed": 248,
+    "skipped": 1,
+    "failed": 0,
+    "exit_code": 0,
+    "elapsed_seconds": 131.544,
+    "new_evidence_first_tests": 15,
+    "skip_reason": "existing_Windows_symlink_privilege_test"
+  },
+  "legacy_comparison": {
+    "base_commit": "4579620e90a7fa286c420bb9884e5597c343e4f0",
+    "fixture": "same_local_synthetic_git_fixture_and_scripted_backend",
+    "draft_equal": true,
+    "canonical_request_bytes_equal": true,
+    "controller_projection_equal": true,
+    "formal_70_replay_rerun": false
+  },
+  "probe_inputs": {
+    "origin": "existing_cleared_public_inputs_of_deepseek_smoke_20260907_v2",
+    "tasks_sha256": "f7b4b6bbef533972a3bc88b639d97b2a364de3b2ae8a44285c55c168b745970a",
+    "repo_map_sha256": "492e369017c0d5da64ec2f2b4cc3c0edf9fc8af0c4447b08dc2948cf24daf29e",
+    "unseen_evaluation": false,
+    "model": "offline-script-not-a-model"
+  },
+  "prior_live_run_preservation": {
+    "file_manifest": "evidence/deepseek-smoke-20260907/runtime_files.json",
+    "files_checked": 15,
+    "all_bytes_and_hashes_match": true,
+    "historical_complete_entries": 0,
+    "historical_t1_calls": 0
+  },
+  "new_external_model_calls": 0,
+  "new_real_input_complete_entries": 0,
+  "new_real_input_t1_calls": 0,
+  "semantic_quality_evaluated": false,
+  "prompt_version": "t2-json-v2",
+  "issues_to_keep_open": [12, 90, 94],
+  "code_file_fingerprints": [
+    {"path":"vulngym_agent/agents/real_t2_producer.py","sha256":"4ab896bf8ca448ddae5217d1fb3773dc22117d1be62b918043902289a0c3780b"},
+    {"path":"vulngym_agent/agents/deepseek_backend.py","sha256":"5b736954f6e91e1aa64ad604d62bfdb54f464a59ff227342f604afc27a76a4fd"},
+    {"path":"vulngym_agent/t2_production_cli.py","sha256":"97a59076a47cc37e7b9a186befb05a648d06b55e5c74191611273e3d7c4a52a5"},
+    {"path":"scripts/probe_t2_routing_offline.py","sha256":"44b3f60389af3b93c06322711763275be62d73f06c496302f0f156d6375f289a"},
+    {"path":"tests/test_t2_evidence_first_planning.py","sha256":"16c92398658e80b60d4155413ad6a99b7b25232e8525a61a53fc372488dffc28"},
+    {"path":"tests/test_deepseek_backend.py","sha256":"9ff0275d8455a3b9da0c513471116a27a7c9d42c2d0dc562aab98d831c8f3710"}
+  ]
+}

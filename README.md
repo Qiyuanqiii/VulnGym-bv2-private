@@ -269,6 +269,10 @@ per-task answer fixtures. The selected [DeepSeek V4 Pro adapter](docs/deepseek_t
 is now included. A [two-report live smoke run](docs/deepseek_t2_smoke_receipt.md)
 confirmed API connectivity, but both tasks deferred before semantic generation:
 zero complete entries and zero T1 calls. New-report quality evaluation is pending.
+A subsequent [evidence-first routing fix](docs/t2_evidence_first_planning.md)
+passed offline regressions; a non-model diagnostic reaches semantic review on
+both public inputs and deliberately defers. The revised prompt has not yet been
+tested against the live model and adds no complete entries or quality results.
 Current integration tests use synthetic test doubles, not real-model quality data.
 The existing exact-replay CLI and its mandatory replay closure remain unchanged.
 

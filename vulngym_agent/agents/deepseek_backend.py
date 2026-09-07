@@ -28,7 +28,7 @@ from vulngym_agent.agents.model_runtime import ModelBlocked, ModelRequest, struc
 MODEL_ID = "deepseek-v4-pro"
 API_HOST = "api.deepseek.com"
 API_PATH = "/chat/completions"
-PROMPT_VERSION = "t2-json-v1"
+PROMPT_VERSION = "t2-json-v2"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -44,11 +44,16 @@ network resources, benchmark answers or prior tasks. Do not output reasoning.
 """
 
 _STAGE_PROMPTS = {
-    "plan": """This is routing before evidence collection, not a correctness
-verdict. Select only a mode in payload.allowed_critical_modes. A fixed supplied
-mode is a routing constraint. Output {"action":"analyze","critical_mode":"sink"}
-or the permitted guard mode. If routing is unsupported or inconsistent, output
-{"action":"defer","critical_mode":null}. Do not invent evidence at this stage.""",
+    "plan": """Route using payload.planning_evidence: the advisory excerpt,
+verified versions, bounded diff excerpts, and mode inventory were collected
+before this request. Select only a mode in payload.allowed_critical_modes;
+unavailable modes and an explicit input-mode constraint cannot be overridden.
+Candidate availability proves location facts, not semantic correctness. It must
+not force a guard interpretation of a sink report or vice versa. If the context
+is missing, contradictory or insufficient, output
+{"action":"defer","critical_mode":null}. Otherwise output
+{"action":"analyze","critical_mode":"guard"} or the permitted sink mode. This
+is routing for later semantic review, not a correctness or human-review verdict.""",
     "semantic_judge": """Evaluate the supplied advisory and issued code candidates.
 Select an entry point and critical operation only when their semantic roles and
 relationship are supported by this evidence. Entry clues or changed lines alone

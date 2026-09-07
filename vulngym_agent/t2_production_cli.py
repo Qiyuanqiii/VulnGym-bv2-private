@@ -107,7 +107,9 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
     def __init__(self, *, backend: StructuredModelBackend, **configuration: Any) -> None:
         backend = _validate_backend(backend)
         super().__init__(backend=backend, **configuration)
-        self._producer = LocalStructuredT2Producer(include_reflection_context=True)
+        self._producer = LocalStructuredT2Producer(
+            include_reflection_context=True, evidence_first_planning=True,
+        )
         self._identity = (backend.backend_id, backend.model_id)
         self._closed = False
 
