@@ -1,225 +1,102 @@
-# VulnGym B-v2 验收报告模板
+# T2 主交验状态与验收报告
 
-> 当前判定：**NOT READY - 尚未完成最终验收。**
->
-> 本模板更新于 2026-09-03。只把可回读事实标为完成；框架测试、source sealing 和
-> evaluator Finding 均不得冒充完整 Entry 质量验收。
+> 2026-09-07：**部分完成，尚不能声明 T2 高质量交验已完成。**
+> 以 [当前任务参考](../current_task_reference.md) 的 A1-A9 为准：已登记 T2，T1 辅助。
+> 本次是需求和证据口径校准，不是重新跑批，也没有把不确定结果改成正确。
 
-## 1. 提交包身份与必需交付物
+## 1. 当前结论
 
-| 项目 | 当前记录 |
-| --- | --- |
-| 最终提交 commit / tag / release | TODO |
-| 受审查分支 | `codex/b-v2-source-discovery`（最终版改为冻结 commit） |
-| Python / OS / OCI 版本 | TODO |
-| README / 一键复现命令 | 现有 `README.md`、`README_zh.md`；最终 quickstart TODO |
-| 1-3 页设计文档 PDF | 源稿 `docs/submission/design.md`；PDF 导出与视觉验收 TODO |
-| 公开测试完整 Entry JSONL | TODO：`entries.jsonl`，逐行符合 `SCHEMA.md`，`verify=0` |
-| T1 报告 JSONL | TODO：与上述 Entry 同批的 `validation.jsonl` |
-| evaluator Finding 输出 | TODO：Lane B `findings.jsonl` / `task_results.jsonl` / manifest |
-| 自评 | `docs/submission/self_assessment.md` 草稿；真实评分 TODO |
-| 5 分钟演示 | `docs/submission/demo_script.md` 草稿；视频链接 TODO |
-| Issue/PR/commit/AI coding 使用记录 | 私有追踪已有；最终可访问的净化索引 TODO |
+已有完整 Entry 生产、T1 辅助检查、回放和导出基础，40 个真实闭环候选/报告对可读回。
+但新报告的自主生产能力、语义质量评价、最终易用入口和演示还未完整举证。
+这才是当前主要缺口；不是必须先跑完原生 Linux formal-70 才能交 T2。
 
-## 2. 两条执行链与验收状态
+有理由的 `manual_review` 可以是合法交付状态。仍需证明：
+系统能生成有价值的数据，能说明何处缺证据，不把真错、未实现检查和运行错误混为不确定。
 
-| 链路/阶段 | 验收项 | 当前状态 | 证据或待办 |
+## 2. 主验收逐项状态
+
+| ID | 当前事实 | 待完成条件 | Issue |
 | --- | --- | --- | --- |
-| 公共输入 | 固定 50 train + 20 test、schema、来源与 hash | 已有实现；最终 release 祖先与文件集仍需回读 | TODO |
-| Source | 22 repositories、70 task source sealing | **完成** | 私有 Issues #60/#11；净化可披露 evidence commit `c52f48b770736d403b2ce090b10a70e5498804e0` |
-| Lane A | 完整 Entry 的 `closed_loop_cli` T2→真实 T1 | **部分完成**：40 条 strict+fallback 真实闭环已跑通，0 input failure，40/40 均有完整候选/报告；仍未达到全量 20+50 finalized | `docs/lane_a_hybrid_readiness_receipt.md`、`docs/submission/lane_a_manual_review_evidence.md`；仍需最终全量 `entries.jsonl` + `validation.jsonl` + manifest |
-| Lane B | 70/70 source-only D2/D3 replay、D4/D0 | **未完成** | Issue #90 当前 0/70；TODO |
-| Runtime | 最终 OCI 与 native Linux preflight | **未完成** | Issues #91/#92；TODO |
-| Gate | test-first 20/20 | **未完成** | Issue #94；TODO |
-| Gate | train 50/50 与独立 readback | **未完成** | Issue #95；TODO |
-| Eval | blind-test 外部评分与 train aggregate | **未完成** | Issue #97；TODO |
-| Submit | 文档、自评、演示 | 草稿 | Issue #99；真实结果、PDF、视频 TODO |
-| Release | 全局审计、tag/release、Epic closure | **未完成** | Issue #102；TODO |
+| A1 新输入生产 | 当前批次主入口依赖 exact replay | 支持声明范围内的新资料实跑，无逐题预编写答案依赖；披露资料准备和人工介入 | #12 |
+| A2 完整输出 | 合并包有40 Entry/40报告；verify=0为40/40 | 正式提交集逐项状态可对账；完整与缺失结果分流；最终版本 schema/跨文件验证 | #12 |
+| A3 语义证据 | 代码/资料检查已有；独立语义质量未完成评价 | 评价版本、EP/CO角色、分类和trace；允许合理替代，不用±5行窗口判语义正确 | #12/#97 |
+| A4 不确定处理 | 有manual_review/defer；21条Lane B待复核摘要已有 | 拆分真缺证据、歧义、未支持检查、运行失败；可读复核包，不假称人工已审 | #12 |
+| A5 代表性质量评价 | 既有40条是开发/回归证据；不是准确率 | 冻结样本与准则；新输入/多场景实测及有分母的评价 | #97 |
+| A6 迭代 | 已有开发提交和历史回归资料 | 整理真实问题→取舍→修改→同口径复测，验证当前版本适用性 | #12/#97 |
+| A7 T1辅助 | 40条真实调用T1，35 uncertain、5 incorrect | 核查5个incorrect；说明其余不确定来源；不强制全finalized | #12 |
+| A8 产品与材料 | CLI、README、设计/自评/演示源稿存在 | 固定版本干净环境演练、完整结果、真实AI过程记录、演示成品 | #99 |
+| A9 最终核对 | 私有仓库和提交追踪存在 | 同一版本文件集、声明、权限和Issue图核对，无伪关闭 | #102 |
 
-Lane A 和 Lane B 不能合并表述。Lane A 候选包含完整 VulnGym Entry，并真正调用
-`T1DeterministicValidator`；Lane B final gate 执行 source-only D2/D3/D4/D0，随后发布
-评测 Finding，**不调用 T1**。当前 Finding 只有 task/finding ID、repo/commit、
-Entry/Critical 的 file/line 和可选 trace，不含完整 Entry 的公告、标题、分类、code、
-`verify` 等字段。除非评测方书面确认替代契约，否则它不是考题要求的公开测试 JSONL。
+上表不是导师逐条规定的评分表，而是根据目标设定的项目完成检查。
+核心能力或质量证据缺失时，不能靠撤掉工程扩展门槛改成“已通过”。
 
-## 3. 已完成 source-sealing 证据与来源边界
+## 3. 证据基线
 
-13 文件净化可披露证据包位于
-`evidence/issue-60-source-sealing-fb1c74b-recovery-a2/`：evidence index 记录 11 个
-受索引文件，另有 `evidence-index.json` 和 `closure-comment.md` 两个自描述/收口文件。
-该目录可直接回读的事实包括：
+代码：`65a33840b371c1ed4b7c40ead5083604ef8fea96`，2026-09-07只读核查。
 
-- implementation commit：`fb1c74be16ed36dc5dba11c8ae30230a2e6368c6`；
-- sanitized evidence commit：`c52f48b770736d403b2ce090b10a70e5498804e0`
-  （当前仓库为私有仓库，尚不表示已公开发布）；
-- 22 repositories / 70 tasks（20 test、50 train），blocked=0；
-- evidence index SHA-256：
-  `06de018ed3de2483adcfc0ab000b42e937e238a459908d19c023187388349c69`；
-- closure receipt semantic/wire SHA-256：
-  `e7e2e263ad05e785bb28fa252eb8f953c46dd046d4f8c00d5a1b99e57d6cbca1` /
-  `2d2767f57712042d885a2512062a87b2e281f65aa5ef6f444cd584e0d6d95bac`；
-- test/train task closure：
-  `d42a2d3cd4fc497d99175314d9ae1fc6086340c091962f14087a42eddcf16642` /
-  `9ed1d4dd31b323789fedbdbe0b3809c4507ab4835e67ce40dd872937e4990ed2`。
+### Lane A：T2完整Entry与真实T1辅助检查
 
-下列事实来自私有 Issue #60 的收口记录，而不是上述 13 文件单独、直接证明：固定
-finalizer tests 29/29；两次 `--readback-only` 均 exit 0、stderr 为空且 stdout
-逐字节一致；readback stdout SHA-256 为
-`15d5e50b281bc98dab4150368fda5e6a181fae205d61061f54192ffdb5077d7e`。
-最终提交若引用这些事实，必须附评审者可访问的净化记录或把对应 receipt 纳入提交包。
+- 自建集合中的 test 12 + train 28，共40个完整候选/报告对。
+- `manual_review=40`；T1 `uncertain=35`、`incorrect=5`。
+- 合并导出有40行 `entries.jsonl`、40行 `validation.jsonl`，全部 `verify=0`。
+- Entry SHA-256：`bf2ecb1b844ad5ce86842e727802fd4c1a1525f8308895f82c7fe3bc7ccf3878`。
+- validation SHA-256：`3038c5333f698f933155022e557a3beec6295f07fbd7dedb1b048ce510c07629`。
+- submission digest：`0ff24779c984e82f4f83773d3f9b1694a8a4a4bb2c0134c5c6eeaa89b1430508`。
+- 详见 [历史批次记录](../lane_a_hybrid_readiness_receipt.md) 和
+  [复核证据](lane_a_manual_review_evidence.md)。历史记录中的全量计划不再是主验收门槛。
+- 上述哈希证明所引用的字节，**不证明40条语义正确或人工审核完成**。
 
-控制用 publication plan、源码、密钥、原始 source mapping、宿主路径与未净化日志不属于
-公开提交物。发布前对最终文件集重新做路径/凭据/隐藏答案扫描，不能把本模板的声明当扫描证据。
+### Lane B：回放制备，不是完整T2交付
 
-## 4. 必须记录的正式命令与结果
+本地汇总记为70/70 authoring（49 finalized形态、21 d2_deferred）。
+其中48条有finalized摘要，1条缺独立摘要、仅可作形态推断；
+69个匹配摘要的配置身份/哈希核对无不一致。#90仍开放。
 
-### 4.1 回归与版本冻结
+Lane B不调用T1，也不生成完整Entry。现有回放生成辅助逻辑可按role refs存在性填
+supported，故不能由此得出49条独立语义正确。21条defer不应被强制编成finalized。
 
-```bash
-python -m pip install -r requirements-dev.txt
-python -m unittest discover -s tests -v
-python -m compileall -q examples scripts tests vulngym_agent
-```
+### Source：已完成的独立工程阶段
 
-- 当前绿色基线：commit `58740947b16880901b49cd76ea24372d06891069` 的
-  [CI run 33591385570](https://github.com/Qiyuanqiii/VulnGym-bv2-private/actions/runs/33591385570)
-  已通过 Ubuntu/Windows 的 Python 3.10/3.13 及 native Linux OCI 单题门禁。
-- TODO：最终 SHA 变更后重跑同一 matrix；只有最终 SHA 全绿后才能冻结正式 OCI。
+22个仓库、70个任务source sealing已完成；#60/#11的关闭仍有效。
+实现 `fb1c74be16ed36dc5dba11c8ae30230a2e6368c6`；
+净化证据提交 `c52f48b770736d403b2ce090b10a70e5498804e0`；
+[13文件证据目录](../../evidence/issue-60-source-sealing-fb1c74b-recovery-a2/)。
+Source完成不代表T2质量完成，不需要因本次重新规划而重跑。
 
-### 4.2 Lane A：完整 Entry 的 T2→T1
+## 4. 最终交付文件清单
 
-```bash
-python -B -m vulngym_agent.closed_loop_cli \
-  --tasks <approved-public-test-tasks.jsonl> \
-  --replay-responses <exact-replay.json> \
-  --repo-map <trusted-repo-map.json> \
-  --package-root <local-cache-root> \
-  --output-dir <new-output-dir> \
-  --require-all-finalized
-```
+| 交付 | 当前状态/要填的实际内容 |
+| --- | --- |
+| 固定版本源代码+README | 填最终commit、依赖、支持范围、真实可运行命令及干净环境结果 |
+| T2完整数据JSONL | 选定提交批次的Entry、schema检查、版本与来源；自动数据verify=0 |
+| 逐任务状态/字段证据 | complete/deferred/failed可对账，missing原因与人工动作；机器和人工修正分开 |
+| T1辅助报告 | 与相应Entry同批，明确检查覆盖及限制；不作为T2质量唯一依据 |
+| 设计说明 | [design.md](design.md)：架构、工具、prompt、失败处理与取舍；短PDF为工作目标 |
+| 自评 | [self_assessment.md](self_assessment.md)：真实样本、准则、分母、质量与失败案例 |
+| AI coding过程 | 脱敏真实prompt/调试片段、用户决定、验证及commit索引，不能只给Issue清单 |
+| 简短演示 | [demo_script.md](demo_script.md)：T2真实生产和待复核案例，T1为辅助段落 |
+| 可选工程附录 | Lane B/OCI/receipt哪些已跑、哪些未跑；无则明确未运行，不冒充主验收阻断 |
 
-- 已完成扩展 hybrid 批次：test 12/20、train 28/50，共 40/70。当前
-  consolidated 视图为 `test11-v3-authz-scope` + `train24-v5-unsafe-option` +
-  `identifier-subset-v2/test1` + `identifier-subset-v2/train4`；
-  `closed_loop_cli` 均 exit 0，`input_failures=0`，全部进入
-  `manual_review`。其中 40/40 有完整候选/报告对，0/40 为
-  producer-deferred 或 incomplete，0/40 finalized。
-- reviewer evidence 已记录：test11-v3-authz-scope digest
-  `68305bc9de4e857761831f302c9ef8116b16f6a119755ae7ef80ebc2d62c553c`；
-  train24-v5-unsafe-option digest
-  `22445fb9b6f306ad1b5e683e61f96e1d09006fd5c6c2a4316ad0a262ddfbf800`；
-  identifier-subset-v2/test1 digest
-  `4988b1e6d5c490fc8878b377679fa128dc73e1ce4595796f1a2723b25eb5f652`；
-  identifier-subset-v2/train4 digest
-  `ba9d2403d1c4f28a9a738b16c8825539e01d93f515079f262bbd6382874764b0`。
-- 当前 T1 增强加入同文件 review anchor、`.svelte` 入口识别、removed unsafe
-  option guard anchor、access-scope propagation anchor 和 removed permissive
-  authorization decision anchor；train24 最新 probe 已从 20/24 complete
-  提升到 24/24 complete，test11 最新 probe 已从 8/11 complete 提升到
-  11/11 complete，entry/report digest 均可回读。
-- TODO：继续增强 T1 或整理人工复核证据，使最终公开测试能形成评审认可的
-  `entries.jsonl`、`validation.jsonl` 和 manifest。
-- Windows-native `submission_prediction_cli review` 已回读上述固定 replay，
-  task/complete/incomplete/input-failure/review digest 均与
-  `docs/submission/lane_a_manual_review_evidence.md` 一致。
-- Windows-native `submission_prediction_cli export` 已解除平台硬拒绝；导出仍会拒绝
-  含缺失候选/报告对的 replay。当前 `test11-v3-authz-scope` 和
-  `train24-v5-unsafe-option` 均已生成完整 `entries.jsonl`、
-  `validation.jsonl` 和 `submission_manifest.json`，并通过双 pin `verify`：
-  test11-v3 source replay dataset
-  `8a314a8d9b5dd4c29e4e576e52e24a6e507ae973949a41743273dac3fe415c2a`，
-  submission
-  `f06618b509afb7843ddcbfa94e6585cff76c22b56fe79e06d2ec0fbc1e3c557e`；
-  train24-v5 source replay dataset
-  `04ec0206095c0b6038190403efc56d531a1eca6184b2503928dd6df36c4bfec2`，
-  submission
-  `48aebd686a749d8b25c95facb8445206910c4056d13ea366d54420f02a5cbcb8`。
-- Windows-native `export` + 双 pin `verify` 已实测通过两个 complete 子批次：
-  `identifier-subset-v2/test1` 的 `submission_sha256`
-  `d6aa6c769a09c1dc70e4a25de1030a868dc546e28cdde3130140a76cf4729694`，
-  `identifier-subset-v2/train4` 的 `submission_sha256`
-  `a4d9eb33443053da3000e94f5d5a2cf514981a718adf3e4401b46d68f6015534`。
-- 新增 `submission_prediction_cli combine`，可把上述 4 个已 pin 的
-  complete 子批次合并成当前 40 条 covered-set 包，并重新编号
-  `entry_id`/`input_line`。合并包 readback 已通过：combined source-set
-  `7ae810b9b157c071b77f494d69dacbbad9b062297cfb75af6c2c4f80d870ab48`，
-  submission
-  `0ff24779c984e82f4f83773d3f9b1694a8a4a4bb2c0134c5c6eeaa89b1430508`，
-  `status_counts={"manual_review":40}`，
-  `verdict_counts={"incorrect":5,"uncertain":35}`。
-- TODO：按 `docs/submission/submission_prediction_posix_export_runbook.md`
-  对当前 covered set 的剩余 complete=tasks replay 执行 `export` 和双 pin
-  `verify`；继续扩大到全量 20 test + 50 train，或将无法机械证明的字段作为
-  人工复核证据而非 finalized Entry。
+最终package/tag/release、评审可访问方式、评价者与演示文件仍待填写。
+不得把本次文档版本当最终产品版本。
 
-### 4.3 Native Linux preflight
+## 5. 验证记录规范
 
-按 `docs/native_linux_final_gate_runbook.md` 使用固定主机、Unix socket、OCI image、
-plan 和两组 replay/source pin 执行。
+每次有效验证记录：日期、完整代码SHA、命令、输入来源及哈希、实际退出码、结果位置、
+计数/质量口径、执行者和限制。新输入生产与旧replay复现分别记账。
 
-- readiness semantic SHA-256：TODO
-- readiness wire SHA-256：TODO
-- operator assertion wire SHA-256：TODO
-- preflight exit/status：TODO（必须为 0/`ready`）
+- 本次需求修订只做文档/关系一致性验证，不重跑长时任务，不引用旧CI冒充新运行。
+- 开发修改后先跑相关单测和小样本；最终冻结时对适用测试做回归。
+- 单测通过、退出0、schema合法、receipt匹配都不能替代语义评价。
+- 产物用新目录保留旧证据，避免覆盖；仅交付批准披露的文件，不含凭据/隐藏答案/原始映射。
+- 不为提交机器数据把 `verify` 改成1，不为录视频添加“全部finalized”要求。
 
-### 4.4 Lane B：test-first final gate
+## 6. 可选工程的条件验收
 
-```bash
-python -B -m vulngym_agent.final_gate_cli run \
-  --benchmark-root <trusted-public-benchmark-root> \
-  --output-root <new-final-gate-output> \
-  --docker-executable /usr/bin/docker \
-  --docker-host unix:///run/vulngym/docker.sock \
-  --runtime-image-id <fixed-image-id> \
-  --readiness-file <readiness-report> \
-  --expected-readiness-sha256 <sha256> \
-  --expected-readiness-wire-sha256 <sha256> \
-  --plan-file <final-gate-plan> \
-  --expected-plan-sha256 <sha256> \
-  --expected-plan-wire-sha256 <sha256> \
-  --test-sealed-batch-root <test-sealed> \
-  --test-replay-config-root <test-replay> \
-  --train-sealed-batch-root <train-sealed> \
-  --train-replay-config-root <train-replay> \
-  --test-key-file <test-key> \
-  --train-key-file <train-key>
-```
+#13/#90/#91/#92/#94/#95是保留的工程分支，不再阻塞#12或#97。
+选择运行时仍须遵守其原始身份绑定、test-first、readback、fail-stop协议；
+本次未修改任何运行契约，不能用49条receipt假称70条签收。
 
-- Test：TODO/20；只有 test receipt 关闭后才允许启动 train。
-- Train：TODO/50；final receipt semantic/wire SHA-256：TODO。
-- 输出：TODO `findings.jsonl` / `task_results.jsonl` / manifest / train aggregate digest。
-- 残留 container/execution image：TODO（必须为 0）。
-
-### 4.5 独立读回
-
-```bash
-python -B -m vulngym_agent.final_gate_cli verify-output \
-  --output-root <final-gate-output> \
-  --benchmark-root <trusted-public-benchmark-root> \
-  --expected-receipt-sha256 <sha256> \
-  --expected-wire-sha256 <sha256>
-```
-
-- Reviewer：TODO；exit/status：TODO；结果 digest：TODO。
-- 该命令读回 Lane B publication，不验证 Lane A 完整 Entry 语义。
-
-## 5. 外部评分与发布前清单
-
-- T1：字段级准确率、找错召回、证据可追溯人工抽样、异常输入鲁棒性：TODO。
-- T2：字段级 F1、Hallucination 率、Schema 合规率、代码字段准确率：TODO。
-- Lane B：blind output 路径/行数/digest、train aggregate 独立复算：TODO。
-- 评分工具版本、评分者、输入/输出 digest 对账：TODO。
-
-- [ ] 70/70 replay 非空、有意义、exact closure，并具备作者/批评者/Reviewer 证据；
-- [ ] CI 全绿，最终 image 从同一已审查 commit 构建；
-- [ ] 20/20 test 在 50/50 train 之前完成；
-- [ ] `verify-output` 独立通过，receipt semantic/wire pin 均保留；
-- [ ] 完整公开测试 `entries.jsonl` 与 `validation.jsonl` 已提交并通过 `SCHEMA.md`；
-- [ ] Finding 输出没有被误称为 Entry 或 T1 结果；
-- [ ] 外部评分完成，T1/T2 指标分开报告，训练 aggregate 可独立复算；
-- [ ] README quickstart、1-3 页设计 PDF、自评、视频和 AI coding 记录齐全；
-- [ ] release 不含密钥、gold、源码快照、原始 source mapping、宿主路径或敏感日志；
-- [ ] Issue/commit/PR/reviewer/receipt 关系无孤儿、倒置或伪关闭；
-- [ ] 最终 tag 指向实际通过门禁的 commit。
-
-只有全部项目完成，标题处的 `NOT READY` 才能改为最终结论。
+严格工程旧报告可在
+[需求校准前的历史版本](https://github.com/Qiyuanqiii/VulnGym-bv2-private/blob/65a33840b371c1ed4b7c40ead5083604ef8fea96/docs/submission/acceptance_report.md)
+查阅。其正式命令和证据历史保留，但旧的“所有门禁才可交题”结论已由当前参考替代。

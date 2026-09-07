@@ -1,143 +1,110 @@
-# Issue and commit traceability
+# Issue、commit 与 AI 协作过程追踪
 
-This document records the private collaboration workflow for the VulnGym B-v2
-T2-to-T1 automation project. It implements the submission requirement for an
-auditable modification history without treating commit count as evidence that
-the final 20+50 gate has run.
+> 2026-09-07按导师澄清及用户登记T2重新校准。
+> [当前任务参考](current_task_reference.md) 是主目标与A1-A9验收基线。
+> 双题保留，T2主交验，T1辅助；可选工程不再绑架主线。
 
-## Repository boundary
+## 私有协作边界
 
-- Issue tracker and collaboration repository:
-  `Qiyuanqiii/VulnGym-bv2-private`.
-- Public `origin` and `upstream` are read-only inputs for this project. They are
-  not authorized push destinations.
-- Test gold, evaluator keys, target repositories, sealed source trees, host
-  absolute paths, and sensitive runtime logs must not be committed.
-- Runtime work records only safe manifests, receipts, counts, and digests.
+- 协作仓库：`Qiyuanqiii/VulnGym-bv2-private`。
+- 只推获准private远端；origin/upstream不是推送目的地。
+- 不提交凭据、隐藏答案、原始source mapping、整份目标仓库/封存快照、敏感日志或个人信息。
+- 可交付有授权且脱敏的公开来源片段、工具结果与AI交互摘录；不把“禁交敏感日志”误写成“禁止提交prompt”。
+- 主工作区保持只读；修改在获准producer分支。运行临时文件置于D盘，避免频繁大输出。
 
-## Native Issue hierarchy
+## 原生Issue层级
 
-GitHub parent/sub-issue relationships are authoritative. Markdown checklists
-may summarize progress, but they do not replace the native relationship graph.
+保持现有聚合Issue，不重新创建几十个开放叶子。未完成事项不能因重新归类而关闭。
 
-| Level | Issue | Scope |
-| --- | --- | --- |
-| Epic | [#7](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/7) | Complete the reproducible 50+20 T2-to-T1 acceptance loop |
-| Phase | [#8](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/8) | Governance and traceability |
-| Phase | [#9](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/9) | Stabilize and review the current control-plane diff |
-| Phase | [#10](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/10) | Fixed public benchmark and T2 data plane |
-| Phase | [#11](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/11) | Seal 70 source snapshots |
-| Phase | [#12](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/12) | Produce and review 70 D2/D3 replay pairs |
-| Phase | [#13](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/13) | Run the fixed OCI and native Linux gates |
-| Phase | [#14](https://github.com/Qiyuanqiii/VulnGym-bv2-private/issues/14) | External validation and final submission |
-
-Historical number ranges remain stable for audit purposes:
-
-- historical completed capabilities: #15-#28;
-- current engineering stabilization: #29-#36;
-- reproducible public 50/20 dataset: #37;
-- per-repository source sealing and aggregate verification: #38-#60;
-- fixed replay batches and aggregate closure: #61-#90;
-- native Linux runtime gates: #91-#96;
-- external validation and submission: #97-#102;
-- governance: #103-#106.
-
-The active tracker was consolidated after the initial exhaustive breakdown.
-There are now 12 open Issues; the repository- and batch-level records remain
-closed, archived sub-issues under their aggregate owner:
-
-| Active layer | Issues |
+| Issue | 当前职责 |
 | --- | --- |
-| Epic | #7 |
-| Open phases | #12, #13, #14 |
-| Replay aggregate | #90 |
-| Native runtime and gates | #91, #92, #94, #95 |
-| Evaluation and release | #97, #99, #102 |
+| #7 | T2高质量交验总目标，保留T1辅助 |
+| #8/#9 | 已完成的治理/基础工程窄范围 |
+| #10/#37 | 已交付的自建50/20回归数据与受控生产基础，不是官方固定门槛 |
+| #11/#60 | 已完成source工程，22repo/70task；不等于T2质量 |
+| #12 | 主线：真实报告到完整Entry、自主生产、证据和不确定处理、T1辅助 |
+| #14 | 主线：评价、交付和最终核对 |
+| #97 | T2语义质量、代表性新输入和真实迭代评价 |
+| #99 | 可用CLI/README、数据、设计、自评、真实AI过程、演示 |
+| #102 | 同一版本的主线交验审计和冻结 |
+| #13 | 可选source-only replay/OCI/native Linux工程汇总 |
+| #90 | 可选70组replay制备与签收，归#13；保持开放 |
+| #91/#92 | 可选原生主机及固定镜像 |
+| #94/#95 | 可选test-first20+50与readback；#94保持开放 |
 
-Governance #8, engineering #9, benchmark/T2 #10, source phase #11, and source
-aggregate #60 are complete. Source details #38-#59 are archived under #60,
-replay details #61-#89 under #90, and the superseded engineering leaves are
-closed or archived under their completed phase. This keeps the main view
-human-readable while retaining the fixed task IDs and earlier acceptance
-criteria for audit.
+既有历史细项保持编号与commit证据。#38-#59、#61-#89等归档的
+`CLOSED / NOT_PLANNED` 表示合并跟踪，不表示每项已经实现。
+`COMPLETED` 只表示该Issue的窄范围完成。
 
-## Dependency direction
+## 阻塞关系
 
-For GitHub's native dependency API, `issueId` is the blocked issue and
-`blockingIssueId` is its prerequisite. The project uses this direction:
+GitHub原生blocked-by方向为：`issueId` 是被阻塞项，`blockingIssueId` 是前置项。
+
+主链：
 
 ```text
-leaf prerequisite -> blocked leaf -> phase -> epic
+#12 T2真实生产与质量基础 → #97评价 → #99交付 → #102核对 → #14 → #7
 ```
 
-Important chains include:
+可选工程链：
 
 ```text
-snapshot/source/replay/runtime hardening
-  -> full normal and python -O regression
-  -> independent diff review
-  -> final OCI rebuild
-
-source 70/70 + replay 70/70 + native host + final image
-  -> preflight
-  -> test 20/20
-  -> train 50/50
-  -> independent readback
-  -> external scoring and final release
+#60源 + #90回放 + #91主机 + #92镜像 → #94测试 → #95训练/读回 → #13
 ```
 
-The test gate must close before the train gate can start. Source acquisition and
-replay authoring may be parallelized where their native blockers allow it.
+移除#90阻塞#12、#95阻塞#97、#13阻塞#7；保留可选链内部的真实技术前置。
+#13可以保留为#7子项而不作为blocker；Epic关闭时明确列出开放扩展，
+不再要求所有可选子项关闭。仍不可绕过主线A1-A9。
+文档、评价方案可并行准备；依赖控制最终关闭顺序，不禁止提前起草。
 
-## Commit policy
+## Commit与关闭
 
-1. Create or select the leaf Issue before changing files.
-2. Keep commits narrow. Use `Refs #N` for intermediate commits and `Fixes #N`
-   only when the Issue acceptance criteria are genuinely complete.
-3. Do not compress snapshot-v2, source acquisition, replay authoring, runtime
-   preflight, regression, and documentation into one giant commit.
-4. A historical capability may be closed only when every cited full SHA is
-   reachable in the private repository and the Issue title states its narrow
-   scope. Branch-local or uncommitted work is not closure evidence.
-5. A closure comment must include:
-   - the complete commit SHA or SHAs;
-   - exact verification commands and a result summary;
-   - required artifact or receipt digests;
-   - the reviewer identity or review Issue;
-   - any residual limitation.
-6. Framework completion never implies that source sealing, replay production,
-   native Linux execution, or external scoring has completed.
+1. 先确认对应现有Issue和范围；采用小范围提交。
+2. 中间工作用 `Refs #N`；只有实际完成验收才用 `Fixes #N`。
+3. 关闭时给完整SHA、真实验证命令/结果、相关文件/必要digest、评价者身份及剩余限制。
+   文档变更不强制重跑长时工程门禁，也不能冒用旧CI当本次测试。
+4. 未审查就不能写“独立审查通过”；自己评价就标明自评。
+5. 代码、数据、运行、语义质量和交付各记各的完成，不能跨层推导。
+6. 范围改变保留旧正文或可访问历史，并说明变更理由、日期及替代基线；不抹除失败记录。
+7. 关闭依据不得是“要交了”“批量生成了”或“哈希匹配”。未运行、未评价、未复核分别直说。
 
-The completed historical Issue set #15-#28 contains the full commit lists and
-explicit scope boundaries. Dataset Issue #37 is backed by commit
-`e4d38e3c73e5323b6409c111183cc997856f55df` on the private branch
-`codex/issue-37-benchmark-50-20-v1`.
+历史数据集#37对应
+`e4d38e3c73e5323b6409c111183cc997856f55df`；
+source#60证据提交为
+`c52f48b770736d403b2ce090b10a70e5498804e0`。
+本次修订保留这些有效成果，不重新执行已经闭合的阶段。
 
-## AI-assisted work record
+## 真实AI coding记录
 
-Issue bodies define the task and acceptance criteria. Commits identify the
-implementation. A critic comments on failure paths and adversarial cases, and
-an independent reviewer records the reviewed SHA and verification commands.
-This Issue-to-commit-to-review chain is the durable AI coding usage record; raw
-prompts, credentials, private gold, and sensitive runtime transcripts are not
-repository artifacts.
+Issue→commit→review只是索引，不能取代导师关心的具体使用过程。
+准备脱敏的精选记录，每段包含：
 
-## Install and verify the push guard
+- 当时用户目标和实际prompt/指令；
+- 工具或Agent的实际结果/问题；
+- 为什么保留、否决或修正某个建议，用户做了什么决定；
+- 修改内容与对应commit；
+- 当时真实执行的验证、失败/限制和后续结果。
 
-Install the tracked hook for this clone or worktree:
+历史摘录应能回到原记录；不能为展示推理补写不存在的对话。
+不需要公开完整对话库或敏感运行日志，避免个人信息、凭据、隐藏答案进入材料。
+本次用户确认“已登记T2、以T2为主”及本次需求校准应作为真实设计取舍记录，
+而非改写成项目一开始就这样规划。
+
+## Push guard
+
+原有hook按既定流程使用：
 
 ```powershell
 git config core.hooksPath .githooks
 git config --get core.hooksPath
 ```
 
-The hook permits only `Qiyuanqiii/VulnGym-bv2-private` and rejects public or
-unknown destinations. Test both paths without pushing objects:
+本地非推送验证：
 
 ```powershell
 sh .githooks/pre-push private git@github.com:Qiyuanqiii/VulnGym-bv2-private.git
 sh .githooks/pre-push origin git@github.com:Qiyuanqiii/VulnGym.git
 ```
 
-The first command must return zero. The second must return nonzero with a clear
-rejection message.
+前者应成功、后者应拒绝。不要将此示例误当本次已经执行或授权公共推送。
+最终图及正文变更应重新读回，核对编号、父子关系、方向、循环和状态未被误改。

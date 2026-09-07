@@ -1,129 +1,66 @@
-# VulnGym B-v2 五分钟演示脚本
+# T2 主交验简短演示脚本
 
-> 状态：录制前模板。正式 20+50 门禁、完整 Entry 输出与外部评分完成前只能说
-> “待验收”。35 小时是固定串行最坏预算，不在视频中重跑；正式运行可预录，现场必须
-> 对同一输出执行快速 readback。目标成片 4:40-4:50，留 10-20 秒切屏余量。
+> 2026-09-07，录制前工作稿。T2为主、T1为辅；目标约5分钟，不等待可选formal-70。
+> 以 [当前任务参考](../current_task_reference.md) 和 [验收状态](acceptance_report.md) 为准。
+> 尚未录制，不能把本稿列为成片。所有展示均须来自真实运行。
 
-## 录制前硬准备
+## 录制前
 
-- 冻结并展示同一个 commit/tag、CI、OCI image ID 与输入 pin，填完所有 `TODO`；
-- 准备一条允许披露、确实发生过“首次候选 → T1 反馈 → 受限修正 → 复验”的 Lane A
-  样例；若没有真实样例，删除修正演示，不能编造；
-- 为下方命令准备相对路径的 `demo/approved/` 本地缓存、repo map、task 和 exact replay，
-  并先在干净 checkout 完整试录；
-- 准备 Lane A 的完整 `entries.jsonl` / `validation.jsonl`，以及 Lane B 的
-  `findings.jsonl` / `task_results.jsonl` / receipt；二者必须分屏标注，不能混称；
-- 设计稿先导出 1-3 页 PDF 并逐页检查，视频只展示最终 PDF；
-- 关闭通知、命令历史补全和凭据窗口。禁止展示 gold、密钥、原始 source mapping、目标
-  源码快照、宿主绝对路径、未净化日志或 Git 凭据。可以展示净化后的 prompt 阶段契约、
-  tool 名称、状态、计数和 digest，以证明规划/工具/反思，而不泄露原始敏感内容。
+- 冻结代码、配置/模型/prompt版本及可披露输入，按最终README在干净环境演练。
+- 准备一份资料较充分的新报告、一份需保留人工复核的真实报告；展示完整Entry与复核说明。
+- 新报告不得逐题手写EP/CO、偷偷提供答案或只用已制备response伪装自主运行。
+- 若当时只有exact replay入口，明确“这是既有过程复现，自主入口仍未完成”，不能假装已经补齐。
+- 显示输入需要哪些缓存和仓库准备，披露人工操作；不要把尚未实现的URL抓取演成现有功能。
+- 结果写新目录，保留失败；不以 `--require-all-finalized` 作为录制前提。
+- 仅展示批准披露的有限证据片段；隐藏密钥、隐藏答案、原始映射、个人信息和敏感日志。
+- 演示来源资料/源码片段需按许可和授权确认，不公开完整目标仓库或封存快照。
 
-## 0:00-0:20　问题、版本与诚实结论
+## 0:00-0:30 产品目标和真实边界
 
-画面：标题、最终 commit/tag 和一句话结论。
+“我登记的是T2。工具把真实公告和资料转成VulnGym数据，并把缺证据的内容交给人工复核。
+T1是辅助质量检查。今天展示的是代码版本___、支持的输入___，尚未支持___。”
 
-讲稿模板：
+画面：CLI用法、输入资料清单；不是Source sealing或receipt仪式。
 
-> VulnGym B-v2 用受限 Agent 从本地公告、patch 和源码生成候选，再让确定性验证或独立
-> Reviewer 拦截幻觉。今天展示的是 commit `TODO`：完整 Entry 的 T1/T2 指标为
-> `TODO`，source-only 20+50 门禁为 `TODO`。任何未完成项都明确标为待验收。
+## 0:30-2:15 一份报告到完整Entry
 
-## 0:20-0:50　先讲清两条 Lane
+展示真实生产命令，按实际发生的过程解释：
 
-画面：最终设计 PDF 的双 Lane 架构图。
+1. 从报告提取项目/版本线索，哪些资料可用，如何补充和校验。
+2. 工具如何读取指定版本源码，判断EP/CO的角色；trace只填有证据的部分。
+3. 结构自检和语义自检分别解决什么问题；如果有反思/修正，展示真实前后记录。
+4. 输出完整 `entries.jsonl` 行、`verify=0` 和逐字段依据。
+5. 原始模型/规则输出、人工准备、人工修订有无发生，都明确标识。
 
-- Lane A：完整 Entry，`closed_loop_cli` 执行 Planner → 本地工具 → Semantic Judge →
-  schema/self-check/Reflection → 真实 T1 → 获批 repair → 复验，发布 `entries.jsonl` 和
-  `validation.jsonl`。
-- Lane B：formal-70 的 source-only D2/D3/D4/D0 在 E3 OCI 内执行，E4 先 test 后
-  train，发布 evaluator `findings.jsonl` 与 receipt；**这条 Lane 不调用 T1，也不是完整
-  Entry 输出**。
+生产命令必须由完成#12后的实际入口和README核对，不在此虚构尚不存在的CLI flag。
+当前 `closed_loop_cli --tasks ... --replay-responses ...` 仅适合作为已记录Lane A的回放演示；
+若使用它，须显式标注回放，不能算作新报告自主生产的展示。
 
-## 0:50-2:15　真实 Lane A：一次反馈修正闭环
+## 2:15-3:10 拿不准时怎么帮助用户
 
-画面：先用半屏展示获准披露 task 的本地公告/patch 标识与模型阶段 schema，随后运行：
+展示一个真实不完整报告或语义歧义案例：
 
-```bash
-python -B -m vulngym_agent.closed_loop_cli \
-  --tasks demo/approved/tasks.jsonl \
-  --replay-responses demo/approved/exact-replay.json \
-  --repo-map demo/approved/repo-map.json \
-  --package-root demo/approved/packages \
-  --output-dir demo/output/run-001 \
-  --require-all-finalized
-```
+- 已经查到哪些事实、还缺什么、为什么不能猜；
+- 这是资料不足、不同合理定位，还是检查器未实现/运行错误；
+- 保留的部分证据与任务终态，人工接下来该看哪里；
+- 不为生成合法JSON而填写无依据位置，不把defer冒充完整Entry。
 
-录制前保证 `demo/output/` 已存在而 `run-001/` 不存在。若复录，使用新目录名，不覆盖旧证据。
+## 3:10-3:40 T1辅助验证
 
-讲稿要点：
+展示同一数据喂给真实T1后的结果，说明它能检查什么、不能检查什么。
+若确实存在“T1指出真错→修正数据→复验”的案例，就演示；没有则如实展示manual_review。
+不要求为了视频修复目标代码，也不以“最终全部correct”结束每个案例。
 
-1. Planner 只能 analyze/defer；所有公告、patch、Git parents/diff/ancestry、源码候选和
-   schema 事实都来自本地工具，生产数据面不联网。
-2. Semantic Judge 只能选择 controller 签发的候选 ID，不能编路径、行号、commit 或
-   code；Reflection 只能 emit/defer。
-3. 展示 attempt sidecar `validations.jsonl` 中首次 T1 对具体字段的
-   `incorrect/uncertain` 及证据，再展示 `repair_history.jsonl`：只应用 T1
-   `suggested_fix` 所批准的字段，locked 字段未改；`validation.jsonl` 只作为正式报告流。
-4. 最后展示复验后的 `entries.jsonl` 单行：完整必填字段、location `code`、`verify=0`，
-   并报真实 exit code 和 digest。若最终仍 uncertain，应展示 defer，而不是伪装成功。
+## 3:40-4:25 测试、自评和迭代
 
-## 2:15-3:15　真实 Lane B：20→50 与独立 readback
+显示#97实际完成的代表性样本表，包含新输入/开发回归的区分。
+报告输出覆盖、已评价子集质量、合理弃答、运行失败和人工介入，给出分母。
+说明一个真实系统问题、采用的改进及复测变化，不能把文档建议当成已验证修复。
 
-前提：#90/#91/#92/#94/#95 均真实完成。正式运行画面可加速播放；随后现场执行：
+## 4:25-5:00 交付与限制
 
-```bash
-python -B -m vulngym_agent.final_gate_cli verify-output \
-  --output-root <final-gate-output> \
-  --benchmark-root <trusted-public-benchmark-root> \
-  --expected-receipt-sha256 <receipt-semantic-sha256> \
-  --expected-wire-sha256 <receipt-wire-sha256>
-```
+显示源代码/README、结果JSONL、可读证据、自评、设计稿、真实AI交互与commit索引。
+解释T2主线当前能做和还缺什么；Lane B/OCI/native Linux仅简短说明为可选工程，未跑即未跑。
 
-讲稿模板：
-
-> 在固定 native Linux 主机和 OCI image 上，preflight 为 `TODO`。E4 先串行完成
-> `TODO/20` test，只有 test receipt 闭合后才执行 `TODO/50` train；现场 readback
-> 返回 `TODO`，残留 container/execution image 为 `TODO`。输出的 Finding 是评测投影，
-> 不含 gold，也不冒充 Lane A 的完整 Entry 或 T1 结果。
-
-画面角落用 10 秒显示 #60 的 22 repo/70 task source-sealing 摘要与净化 evidence commit；
-不要口播长 digest，也不要打开私有 Issue 评论或原始 mapping。
-
-## 3:15-4:10　外部评分、自评与失败案例
-
-画面：自评中的两张指标表和各一个允许披露的高质量/不确定案例。
-
-讲稿模板：
-
-> T1 按字段级准确率、找错召回、证据可追溯和鲁棒性报告；T2 按字段级 F1、
-> Hallucination 率、Schema 合规率和代码字段准确率报告。blind test 结果为 `TODO`，
-> train 独立复算为 `TODO`。最常见错误是 `TODO`；系统保留 uncertain/defer，并计划用
-> `TODO` 修正。单元测试、D3 accept 与 digest 都不是语义分数。
-
-不要把测试条目与逐题得分对应公开；案例优先选 train，测试案例须经评分方允许披露。
-
-## 4:10-4:40　可复现性与安全边界
-
-画面：CI、release、receipt/readback 和提交文件清单。
-
-讲稿：
-
-> 机械状态由固定 commit/image/input pin、canonical digest、test-first receipt 和独立
-> readback 复现；质量结论只来自隔离评分。worker 断网、非 root、只读 rootfs，并限制
-> capabilities 与资源。公开包不含 key、gold、源码快照、原始 mapping 或宿主路径。
-
-## 4:40-5:00　限制与交付
-
-讲稿模板：
-
-> 交付包括源代码与 README、可追溯历史和 AI coding 记录、1-3 页设计 PDF、公开测试
-> 完整 Entry JSONL、T1 报告、自评和演示；Lane B Finding/receipt 是额外工程证据。已知
-> 限制是没有正式在线模型 backend，且全字段语义 verifier、AST/调用图/数据流仍有限。
-> release 为 `TODO`，最终结论为 `TODO`。
-
-## 未通过时的替代结尾
-
-若任一正式门禁、完整 Entry 输出或评分未完成，结尾必须改为：
-
-> 当前完成了 `实际完成项`，但 `未完成项` 尚未满足考题验收；这里展示失败状态、保全
-> 证据和下一步，不把 smoke、Finding 投影或部分运行表述为完整 T1/T2 通过。
+禁止口播“70组replay意味着70条准确T2数据”，也不展示长时间轮询作为产品能力。
+最终是否完成按A1-A9和实际证据判断，不能承诺导师分数或以可选工程问题遮蔽核心缺口。

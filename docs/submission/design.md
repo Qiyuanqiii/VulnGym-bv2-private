@@ -1,97 +1,98 @@
-# VulnGym T1 × T2 自动化闭环设计说明（提交源稿）
+# T2 报告到数据的系统设计（T1 辅助）
 
-> 文档状态：草稿，更新于 2026-09-02。最终版须导出为 1-3 页 PDF，并完成逐页
-> 渲染检查；当前尚未生成可验收 PDF。正式 replay、原生 Linux 全量门禁、完整
-> Entry 提交输出与外部评分仍为 TODO，不构成通过验收的声明。
+> 2026-09-07设计源稿，目标是简短可读的交验说明；尚非最终PDF/演示。
+> 用户登记T2，双题保留但主次明确。适用目标、验收和限制见
+> [当前任务参考](../current_task_reference.md)。
 
-## 1. 两条已实现但不可混称的执行链
+## 1. 主用户流程
 
-当前代码包含两个用途不同的入口，二者共享安全与证据原则，但输出契约不同。
+用户需要把真实报告变成可使用的VulnGym记录，而非手工准备答案后只做回放验签。
+主产品形态是CLI/批处理，先复用现有Lane A：
 
 ```text
-Lane A：完整 Entry 的 T2 → T1 闭环
-本地公告/patch + 受信 repo + exact replay
-  → Planner → 本地工具 → Semantic Judge → schema → Reflection
-  → T1DeterministicValidator → [受限 repair → schema → Reflection → 新 T1]
-  → entries.jsonl + validation.jsonl + sidecars
-
-Lane B：formal-70 的 source-only 发现与隔离门禁
-无答案 task + sealed source + ordered D2/D3 replay
-  → E4 串行调度 E3 OCI [D2 多候选 → D3 独立复核 → D4/D0]
-  → findings.jsonl + task_results.jsonl (+ train aggregate) + receipt/readback
+公告/资料 + 固定版本源码
+  → 资料与版本查证 → 候选字段/EP/CO/trace → 结构与语义自检
+  → 完整Entry（verify=0）或明确待复核/失败记录
+  → [辅助T1 → 有依据的有限修正 → 重新验证]
 ```
 
-Lane A 由 `python -m vulngym_agent.closed_loop_cli` 驱动，候选是完整 VulnGym
-Entry，只有真实 T1 报告闭合的结果才进入 `entries.jsonl`。Lane B 由
-`python -m vulngym_agent.final_gate_cli run|verify-output` 驱动；其 D0 Finding
-只包含评测所需的 task/finding 身份、repo/commit、Entry/Critical 位置及可选 trace，
-**没有调用 `T1DeterministicValidator`，也不是完整 `entries.jsonl`**。因此 Lane B 的
-20+50 `findings.jsonl` 不能替代考题要求的公开测试 Entry JSONL；最终提交前必须另行
-产出并校验完整 Entry（含 `code` 与 `verify=0`），或由评测方书面确认 Finding 契约可替代。
+这是交付目标；**当前Lane A CLI依赖exact replay，新报告自主生产入口和质量证据仍是#12/#97缺口**。
+现有40个完整候选/报告对不等于40条已确认为正确的数据。缺失字段应保留证据和原因，
+不能为凑schema编造值；完整记录与partial/deferred记录须分流。
 
-补充入口：`python -m vulngym_agent` 是独立 T1 批量校验器；
-`replay_authoring_cli` 逐题制备 D2/D3 replay；`benchmark_cli` 校验固定 50/20
-profile 并执行投影；`native_linux_final_gate_preflight` 只做正式主机只读预检。
-仓库当前没有 wheel/console-script 安装包，从固定 commit 的只读 checkout 运行，要求
-Python 3.10 或更高。
+## 2. 已有Lane A：结构化T2与真实T1
 
-新制备的 Lane A task 使用 `T2TaskInputV2`：公开 task 的 `repo_url + commit` 作为
-独立 snapshot pin，既要等于公告 fix 推导出的唯一脆弱父提交，也由 T1 再次核对。
-task-bundle 构建器只接受另行审核的公告包 assignment，并以两份输入的外部
-semantic/wire digest 与物理顺序闭合，禁止 assignment 覆盖公开 source identity。
-终态 replay 通过 `submission_prediction_cli` 投影；verify 必须携带外部 replay 与
-submission digest 重读源 replay 并逐题比较，不能让输出 manifest 自证。
+`LocalStructuredT2Producer`、`ClosedLoopOrchestrator` 和
+`python -m vulngym_agent.closed_loop_cli` 已有受控生产/复现基础。
 
-## 2. Planner、工具、prompt 与反幻觉约束
+- plan选择analyze/defer及critical mode。
+- 控制器读取本地公告、引用/patch和Git对象，提取字段、定位有界代码候选、检查schema。
+- semantic_judge选择控制器签发的候选ID，可补充有界标题/分类等文本；
+  候选身份约束可以防止任意编路径，但本身不保证语义正确。
+- reflection选择emit/defer；T1对候选进行真实检查，可靠suggested_fix可触发有限字段修正，
+  然后重新schema/self-check和新T1检查，保留修改轨迹。
+- 任务、工具/模型记录、预算、replay及sidecar用于追踪过程；发布为新目录，保留不确定现场。
+- `T2TaskInputV2` 固定公开repo/commit identity；当前要求与唯一脆弱父提交推导一致。
+  这是当前支持范围，并非所有报告都有唯一fix-parent。多父/回移/无patch需另行裁决或明确defer。
+- `submission_prediction_cli` 能投影完整候选与报告对，并通过外部digest重读源replay。
+  投影不重新执行T1，也不增加语义正确性的证据。
 
-Lane A 的模型协议不是一次性 prompt。`plan` 先选择 analyze/defer 与 critical mode；
-控制器随后调用本地 `read_local_advisory`、`extract_advisory_fields`、
-`read_local_patch`、Git parents/show/diff/ancestry、critical candidate search、route
-recognition 和 `validate_schema`。`semantic_judge` 只能选择控制器签发的不透明候选 ID，
-只能补充有界的 project/title/category 文本；模型不能自行提交 commit、路径、行号或
-代码。初始候选通过 schema 后由 `reflection` 选择 emit/defer；T1 若提出可验证的
-`suggested_fix`，repair 只能改获批字段，并再次通过 schema、Reflection 与新建 T1。
-信息不足、契约错误、工具失败或检查能力缺失均 defer。
+`python -m vulngym_agent` 是独立T1入口。当前部分语义检查仍保守返回uncertain；
+代码位置存在性/容忍窗口也不能代替EP/CO角色判断。缺失能力要明说，不能全归因于输入资料。
 
-Lane B 的 D2 prompt 采用 SCOUT/SELECT 两阶段，只允许 inventory、literal search、
-span read、lexical structure、mechanical link、source validate 六类 source-only 工具；
-选择结果必须引用 runtime 签发的 opaque refs。D3 使用重新获取的 tree、budget 与
-context，不读取 D2 推理，对 entry role、critical role、trace continuity 和
-counter-evidence 分别给出 supported/contradicted/insufficient。D4 只有在 D3 严格
-accept 时才投影 Finding。作者/批评者是 replay 制备与 QA 角色，不是运行时第三个
-Reviewer；运行时独立 Reviewer 专指 D3。
+## 3. Lane B：保留的工程扩展
 
-生产数据面只读取出题方提供的本地缓存、patch 和源码，不联网爬取，也不调用“已知答案
-API”。test gold 必须物理隔离，不能进入 task、replay、日志或调试输入。
+```text
+source-only task + sealed source + D2/D3 replay
+  → D2候选 → D3审核接口 → D4/D0 Finding
+  → [E3/E4 OCI、native Linux、receipt/readback]
+```
 
-## 3. 信任边界、可复现性与当前证据
+`final_gate_cli` 的 `findings.jsonl` 不是完整 `entries.jsonl`，
+不含全部公告/分类/code/verify等字段，且不调用T1。
+因此70组Lane B authoring不能代替T2报告到完整Entry的主交付。
 
-代码、固定策略、受信输入 pin 和 evaluator 属于信任基；task、源码内容、模型输出、
-replay response 与候选结论均不可信。正式 worker 目标配置为断网、非 root、只读
-rootfs、drop-all capabilities、`no-new-privileges`，并限制 CPU、内存、进程和超时。
-测试必须闭合后才能进入训练。canonical JSON、哈希链和 receipt 证明字节绑定与机械
-闭合，不是数字签名，也不证明漏洞语义正确；质量结论只能引用隔离评分。
+D3控制面使用独立context/tree/budget，不等于每一份生成的review都做了独立语义审查。
+当前 `scripts/author_replay_batch_offline.py::_build_d3_response` 可按role refs存在性
+填supported；该辅助策略不能作为真实语义评价。须明确标识并补证据或另做评价。
 
-22 个仓库、70 个 task 的 source sealing 已完成。实现 commit 为
-`fb1c74be16ed36dc5dba11c8ae30230a2e6368c6`，净化可披露证据 commit 为
-`c52f48b770736d403b2ce090b10a70e5498804e0`；evidence index 为
-`06de018ed3de2483adcfc0ab000b42e937e238a459908d19c023187388349c69`，closure
-receipt semantic/wire pin 为
-`e7e2e263ad05e785bb28fa252eb8f953c46dd046d4f8c00d5a1b99e57d6cbca1` /
-`2d2767f57712042d885a2512062a87b2e281f65aa5ef6f444cd584e0d6d95bac`。
-这些值来自 #60 收口记录及其 13 文件净化证据包；它们只证明 source-sealing 阶段，
-当前仓库为私有仓库，“可披露”不等于已经公开发布。
+此工程分支仍保留固定test-first、身份pin和fail-stop协议；选择执行时不能跳过。
+但它不再阻塞T2主验收，不因改范围而宣布已运行或已通过。
 
-工程踩坑主要是：不能把 fix commit 当漏洞 commit；浅历史、packed object/MIDX、gitlink、
-Windows 长路径与重命名目录都需按对象/字节身份处理；发布必须 staging + no-replace，
-不能用名称回滚掩盖不确定状态；高频轮询会放大日志与磁盘压力。
+## 4. 质量与不确定性
 
-## 4. 提交前阻断项
+先检查来源/版本/代码位置事实，再评价角色/链路语义；允许有证据的合理替代定位。
+PDF已划掉的±5行和缺return模板不作正确性标准。
+机器数据保持verify=0；T1 correct、D3 accept和哈希都不能伪装成人工验证。
 
-- 完成 70/70 有意义的 Lane B D2/D3 replay、native Linux preflight、20 test-first +
-  50 train、独立 readback 和外部评分；
-- 为考题交付生成 Lane A 完整公开测试 `entries.jsonl` 与 `validation.jsonl`，逐行通过
-  `SCHEMA.md`，并明确它与 Lane B `findings.jsonl` 的关系；
-- 填入真实指标、版本、receipt、CI URL、已知限制与视频链接；
-- 导出 1-3 页 PDF；若新增 prompt/工具表导致超页，优先移走 digest 细节而不是删掉题目
-  明确要求的 prompt、工具和踩坑说明。
+不确定、资料冲突、未支持检查、预算/工具失败分别记账。
+复核包给候选、依据、缺口、人工下一步；只有实际完成复核才记录人审决定。
+标准schema不容许缺失时，保留单独任务结果而不是非法或编造Entry。
+
+评价采取预先声明的代表性报告集，区分开发样例、冻结后新输入与构造异常。
+结构合规、覆盖率、语义质量、弃答和人工负担分开报；评价者是否独立据实填写。
+
+## 5. 来源和运行边界
+
+会议撤回一概禁止联网，不意味着当前项目自动获得新的联网/工具权限。
+本次仍按本地获准资料与普通git/gh工作；不读取隐藏答案，不启用受保护扫描或浏览器。
+将来若扩展资料入口/模型后端，须明确授权、成本、资料许可和运行边界，不能把权限绕过当实现。
+
+固定代码、输入pin和本地配置构成声明的运行基础；源文本、模型输出和候选结论仍需核验。
+已有工程worker配置和限制按对应runbook保留，不能把开发环境声称为正式原生Linux。
+
+canonical JSON、哈希链和receipt证明字节绑定与机械闭合，不证明语义正确。
+22repo/70task封存完成的净化证据提交为
+`c52f48b770736d403b2ce090b10a70e5498804e0`，其含义限定为source阶段。
+
+## 6. 当前取舍与下一步
+
+优先#12的新报告自主生产、5条incorrect核查、uncertain分类和高收益T2质量改进；
+#97记录真实评估和迭代；#99整理可运行入口、结果、过程记录及短演示。
+T1全面覆盖所有类型、全70扩展和原生Linux长跑放后，不让辅助工程取代主题。
+
+工程经验可在短稿中精选：fix/vulnerable版本混淆、回放与真实推理的差别、语义评价不能
+用引用存在性代替、失败保全与日志/磁盘成本。只写实际遇到并可追溯的案例，
+细节留在历史记录与专用runbook，不让摘要淹没产品能力。
+
+本文与最终README必须在#12实现变化后同步；当前文档不会把计划写成已完成能力。

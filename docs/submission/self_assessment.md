@@ -1,106 +1,99 @@
-# VulnGym B-v2 自评报告模板
+# T2 主线自评与质量评价方案
 
-> 状态：未评分草稿。所有 `TODO` 必须由正式输出与隔离评分替换；不得用单元测试、
-> smoke run、source-sealing receipt、训练结果或 Lane B Finding 冒充 Lane A 完整 Entry
-> 的 blind-test 成绩。
+> 2026-09-07。当前是有事实基线的评价方案，**尚未完成语义质量评分**。
+> 主次与完成标准见 [当前任务参考](../current_task_reference.md)。
+> T2为主，T1辅助；不以全finalized为目标，也不允许以全uncertain代替可用性证据。
 
-## 1. 版本与评测身份
+## 1. 评价对象及样本身份
 
-| 项目 | 值 |
+评价主对象是“报告资料输入→完整VulnGym Entry或有理由的待复核结果”。
+Lane B Finding/authoring、Source sealing、单元测试另列，不混入T2质量分。
+
+正式评价前填写：
+
+| 项目 | 要记录的事实 |
 | --- | --- |
-| 最终 Git commit / tag | TODO |
-| Python / OS / OCI image ID / inspect digest | TODO |
-| 50/20 profile manifest digest | TODO（从正式可信输入记录） |
-| Lane A task/replay、`entries.jsonl`、`validation.jsonl` digest | TODO |
-| Lane B test replay manifest semantic/wire digest | TODO |
-| Lane B train replay manifest semantic/wire digest | TODO |
-| final-gate receipt semantic/wire digest | TODO |
-| 独立 reviewer / 外部评分者 | TODO |
-| 评测日期与评分工具版本 | TODO |
+| 系统版本 | 代码SHA、prompt/规则、工具和模型版本；本地或远程、人工介入程度 |
+| 输入与输出 | 报告/任务/Entry分别编号，版本/资料来源和结果哈希 |
+| 资料条件 | 是否有patch、版本线索、完整源码；缺失项不由隐藏答案补齐 |
+| 样本分组 | 开发/回归、冻结后新输入、构造的异常输入；互相不冒充 |
+| 评价者 | 实际人员或工具身份；是否看过生成过程，是否独立；自评就写自评 |
+| 准则与冻结点 | 先写准则和样本清单，再跑；评价后改规则需保留前后版本 |
+| 输入合法性 | 只用获准公开/本地资料，脱敏并遵守当前项目访问边界 |
 
-## 2. T1 数据自动化验证指标
+工作目标是至少12份真实报告、至少4个仓库，覆盖多种资料与语义场景；
+其中至少2份在规则/prompt冻结后选定，未逐题手写response。
+这是内部样本设计而非导师硬指标，详情和允许的变更规则见当前任务参考。
 
-以下指标对应考题 T1；Test 只能填隔离评分结果，Train 可填独立复算但必须标明数据面。
+## 2. 正确性准则：先事实，再语义
 
-| 指标 | Test 20 | Train 50 | 分母、口径与证据 |
-| --- | ---: | ---: | --- |
-| 完成报告数 | TODO/20 | TODO/50 | `validation.jsonl` 行数与 task closure |
-| 字段级准确率 | TODO | TODO | 字段判定与金标一致数 / 可评分字段数 |
-| 找错召回率 | TODO | TODO | 被判错字段数 / 金标错误字段数 |
-| `uncertain` 数与比例 | TODO | TODO | 按字段及按条目分别统计 |
-| 证据可追溯 | TODO | TODO | 人工抽样 N=TODO；合理数/N |
-| 鲁棒性 | TODO | TODO | 缺字段、坏 commit、404/缺缓存等用例；应不崩且输出 uncertain |
+| 维度 | 怎么检查 | 不能怎样代替 |
+| --- | --- | --- |
+| schema/字段 | 完整Entry满足所声明schema；缺失另记状态；verify=0 | JSON能解析就算完整 |
+| 来源/标识/版本 | 公告与项目/标识一致，受影响commit有依据，和fix区分 | 只因是fix的父提交就断言一定正确 |
+| 代码位置事实 | 指定commit下file存在，所报line与code相符 | 命中±5窗口就认定语义正确 |
+| EP角色 | 外部可达入口及上下文有依据 | 选任意中间节点或只按名字猜测 |
+| CO角色 | 与该问题有关的关键操作/决策点有依据 | 套固定sink或缺少return模板 |
+| trace | 每一步事实存在，顺序/衔接有证据；无法证实允许缺省并说明 | 两端有引用就推断中间连续 |
+| 标题/分类 | 和报告、源码事实一致，保留不确定类别 | 为通过schema而填写无依据类别 |
+| 合理替代 | 不同EP/CO或位置可有多个成立答案，记录论证与复核决定 | 未被单一参考收录就判幻觉 |
 
-T1 结论：**TODO；外部评分前不得写“达到 0.85/0.90 阈值”或“通过”。**
+每个已评价字段可记为：有充分证据支持、与事实矛盾、合理替代、证据不足待定。
+参考标注只能辅助；发现争议先查证，不用字符串相等替代语义审查。
+置信度若未校准只作辅助信号，不当作正确概率。
 
-## 3. T2 完整 Entry 生产指标
+## 3. 指标与分母
 
-以下指标对应考题 T2，必须针对 Lane A 的完整 `entries.jsonl` 计算。Lane B
-`findings.jsonl` 缺少完整 Entry 字段与 location `code`，不能填入本表。
+所有数值都附样本数、字段集合、资料条件、评价身份；未评价项不记0分也不记满分。
 
-| 指标 | Test 20 | Train 50 | 分母、口径与证据 |
-| --- | ---: | ---: | --- |
-| 完整执行 task 数 | TODO/20 | TODO/50 | Lane A run manifest |
-| 输出 Entry 数 | TODO | TODO | `entries.jsonl` 实际行数 |
-| 字段级 F1 | TODO | TODO | 外部 scorer；注明字段集合与 micro/macro 口径 |
-| Hallucination 率 | TODO | TODO | 金标不存在或仓库不存在的值 / 被评分值 |
-| Schema 合规率 | TODO | TODO | 严格通过 `SCHEMA.md` 的 Entry 数 / 输出 Entry 数 |
-| 代码字段准确率 | TODO | TODO | 路径完全一致且行号在官方 ±5 容忍内 |
-| `verify=0` 合规率 | TODO | TODO | 应为 100%；填真实分子/分母 |
-| trace / 业务逻辑专项 | TODO | TODO | 分开报告样本量、口径与 scorer 版本 |
+| 指标 | 定义/必要拆分 | 当前 |
+| --- | --- | --- |
+| 执行覆盖 | 有任务终态的输入数/全部输入；失败不得静默丢弃 | 正式评价待做 |
+| 完整产出率 | 至少有一个完整Entry的报告数/报告数；另报Entry总数 | 现有Lane A40个候选对，非新输入质量成绩 |
+| schema合规 | 通过schema的已声明完整Entry/该类全部Entry；部分证据另列 | 最终版本待验证 |
+| 位置可追溯 | commit/file/line/code可核实的字段/已检查位置字段 | 待评价 |
+| 语义可靠性 | 有充分证据支持或经裁决合理替代的字段/已作实质裁决字段 | 待评价，单列未裁决数量 |
+| 已证实错误 | 与事实矛盾的值或错误角色/被裁决值；错例单列 | T1提出5条incorrect，待实质核查 |
+| 合理弃答/待复核 | 按资料缺失、冲突、歧义、未支持检查分组，均给分母 | 现有Lane A35 uncertain不是准确率 |
+| 运行失败 | 读取/格式/预算/后端等失败/输入任务数 | 待汇总，不能包装为合理语义弃答 |
+| 用户成本 | 每报告耗时、资源、人工准备/修订次数、复核负担 | 待测量 |
+| T1辅助收益 | 拦截了哪些真实错误，误报/未检查哪些项，修正后是否变好 | 已有40份报告，效果待评价 |
 
-T2 结论：**TODO；不得把 exact replay、schema 单测或 D3 accept 当作语义正确。**
+可补充F1等指标，但须有适用的参考集合和匹配规则，说明micro/macro口径及歧义处理。
+不沿用PDF示例阈值作为硬门槛，不把“金标未列出”直接计入Hallucination。
+对支持的已裁决子集报质量，同时报告覆盖和弃答，防止少量挑选成功例导致虚高。
 
-## 4. Lane B formal-70 工程闭合指标
+## 4. 高质量与待复核案例
 
-本表证明 source-only D2/D3/D4/D0 与原生 Linux 门禁，不等价于 T1/T2 质量分。
+每例填写真实记录，不用模板文字冒充已完成复核：
 
-| 指标 | Test 20 | Train 50 | 证据 |
-| --- | ---: | ---: | --- |
-| exact replay 闭合 task | TODO/20 | TODO/50 | replay manifest / receipt |
-| finalized / D2 defer / D3 defer | TODO | TODO | `task_results.jsonl` |
-| accepted Finding 数 | TODO | TODO | `findings.jsonl` |
-| clean failure / poison / identity drift | TODO | TODO | final-gate receipt；目标均为 0 |
-| 残留 container / execution image | TODO | TODO | 主机收口检查；目标均为 0 |
-| train aggregate 独立复算 | 不适用 | TODO | 独立 evaluator |
+| 项目 | 高质量案例要回答 | 待复核/失败案例要回答 |
+| --- | --- | --- |
+| 输入 | 报告是什么、最初提供了哪些资料 | 哪个关键资料缺失/冲突 |
+| 生产 | 规划、真实工具结果、候选选择依据 | 在哪一步停下，属于信息不足还是能力缺失 |
+| 输出 | EP/CO/分类/trace为什么成立 | 哪些字段有依据、哪些不能保证 |
+| 辅助检查 | T1/自检验证了什么、没验证什么 | 有无错误/反证，为什么不能直接改成correct |
+| 人工与迭代 | 哪些是自动生成，哪些人工改过 | 人应补什么证据，当前是待办还是已实际复核 |
+| 可追溯 | 输入/输出/代码SHA及脱敏运行片段 | 失败码、局限、再验证的触发条件 |
 
-## 5. 高质量条目复盘
+至少展示一类实际发生且影响效果的问题、一次有验证的改进，以及仍然拿不准的案例。
+不得用改写后的最终解释冒充当时的prompt或调试记录。
 
-只选训练集或经隔离评分确认且允许披露的测试条目，不复制隐藏答案或逐题测试真值。
+## 5. 已有数据的正确使用
 
-| Task/Entry ID | 为什么质量高 | Planner→工具→Judge→Reflection | T1 反馈与修正 | 可披露评分依据 |
-| --- | --- | --- | --- | --- |
-| TODO | TODO：入口可达性、关键操作、trace 连续性等 | TODO | TODO | TODO |
-| TODO | TODO | TODO | TODO | TODO |
-| TODO | TODO | TODO | TODO | TODO |
+- Lane A40条：T1 verdict为35 uncertain+5 incorrect，全部manual_review；
+  5条先核查，不删除分母；其余按不确定原因和检查能力分类。
+- Lane B70组：48个finalized摘要+1个仅形态推断+21个defer；
+  不是70条完整T2数据，也不是49条语义通过。
+- `_build_d3_response` 依赖引用存在性作supported的辅助策略不能充当独立评价。
+- 21条defer简报是待复核清单，不是已由人确认的准确答案。
+- 49/70、40/70、测试通过数不作总体正确率或整题完成百分比。
 
-复盘至少回答：哪些本地公告/patch/源码事实使结论可复现；模型最初选择了什么；T1 或 D3
-否掉了什么；修正是否只改获批字段；最终仍有哪些语义只能由人工或外部 scorer 判断。
+## 6. 最终自评结论的写法
 
-## 6. 拿不准、失败与系统性错误
+明确“能稳定完成什么”“哪些需要人工”“哪些未实现”，分别给事实和样本量。
+主T2完成情况、T1辅助收益、工程扩展各写一段。
+若新输入自主产出/语义评价/演示证据仍缺失，就保留“部分完成”；
+若只是可选native Linux门禁未运行，列为扩展未验证，不据此否认已经证实的T2成果。
 
-| Task/Entry ID | 结果 | 不确定来源 | 当前处理 | 更好方案 |
-| --- | --- | --- | --- | --- |
-| TODO | uncertain / defer / FP / FN / field error | TODO | TODO | TODO |
-| TODO | TODO | TODO | TODO | TODO |
-
-| 错误模式 | 观测数/样本量 | 根因证据 | 影响指标 | 修正建议 | 是否需重跑 |
-| --- | ---: | --- | --- | --- | --- |
-| Entry Point 可达性证据不足 | TODO | TODO | 代码字段准确率/召回 | 调用图/框架路由解析 | TODO |
-| Critical Operation 误定位 | TODO | TODO | 代码字段准确率/Hallucination | 数据流/污点摘要 | TODO |
-| Trace 不连续 | TODO | TODO | 字段级 F1 | 跨文件 symbol resolution | TODO |
-| 漏洞/fix commit 混淆 | TODO | TODO | F1/Hallucination | parent/merge/backport 裁决 | TODO |
-| 标题/分类语义过拟合 | TODO | TODO | 字段级 F1 | 本地公告证据与反例校准 | TODO |
-| Reviewer 过宽或过严 | TODO | TODO | precision/recall | 固定准则与反例集 | TODO |
-
-## 7. 工程、安全与诚实声明
-
-- 已实现优势：严格 schema、固定 task identity、有界工具与预算、ordered exact replay、
-  原子发布、双 digest、独立 readback、test-first 和 OCI 隔离控制面。
-- 已知限制：Lane A 没有正式在线模型 backend；Lane B 不调用 T1 且输出不是完整 Entry；
-  全字段 `required_check` verifier、AST/调用图/数据流语义与复杂版本裁决仍不完整。
-- TODO：填写跨平台 CI、native Linux 资源/残留、70-task 时长和失败恢复事实。
-
-本报告只引用可披露摘要和 digest。gold、密钥、原始 source mapping、目标源码快照、宿主
-路径及未净化日志不进入公开包。若任一 TODO 未完成，最终结论必须保留“未完成”或
-“未验证”；机械闭合、D3 accept 和 digest 均不能替代数据质量评分。
+不承诺评审认可、得分或总体零错误；把评价方法和真实结果交给评审判断。

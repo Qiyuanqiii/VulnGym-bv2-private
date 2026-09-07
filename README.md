@@ -252,7 +252,16 @@ ds = load_dataset("json", data_files={
 })
 ```
 
-### Experimental B-v2 deterministic T1 gate and controlled T2 producer
+### Experimental B-v2 T2 producer with auxiliary T1 validation
+
+> **Current submission scope (2026-09-07): T2 primary, T1 auxiliary.**
+> Start with [the current task reference](docs/current_task_reference.md) and
+> [acceptance status](docs/submission/acceptance_report.md). The main deliverable
+> is real advisory-to-Entry production with evidence and honest uncertainty.
+> The self-selected 50/20 benchmark and source-only Lane B / native Linux gates
+> are retained engineering extensions, not prerequisites imposed by the mentor.
+> Existing exact replays do not demonstrate autonomous extraction on new inputs;
+> that capability and semantic quality evidence remain active work in Issue #12.
 
 The B-v2 tools require Python 3.10 or newer. For a reproducible test
 environment, install `requirements-dev.txt` and run the standard-library test
@@ -267,9 +276,14 @@ The repository includes an executable deterministic T1 slice of the T1 × T2
 automation design. It validates JSONL rows independently, safely reads bounded
 local advisory/reference/patch packages, reads immutable Git objects without
 checkout, checks GHSA/CVE IDs, parent/ancestry facts, exact paths, and code
-within the ±5-line tolerance, parses bounded unified diffs, derives conservative
+within a legacy ±5-line lookup window, parses bounded unified diffs, derives conservative
 Sink/Guard review candidates, and searches an explicit source-file allow-list
 for route/RPC/CLI/handler/export entry clues.
+
+The lookup window is an implementation detail, **not a current acceptance rule**.
+The revised task and mentor clarification reject treating a nearby line or a
+single reference annotation as sufficient proof of semantic correctness.
+Entry/critical roles and plausible alternative locations require evidence.
 
 The controlled production slice is available as Python APIs under
 `vulngym_agent.agents` and `vulngym_agent.orchestrator`. `T2TaskInputV1` is a
