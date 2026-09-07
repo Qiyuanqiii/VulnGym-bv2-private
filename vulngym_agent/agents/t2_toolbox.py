@@ -55,6 +55,7 @@ from vulngym_agent.tools.git import (
 )
 
 from .t2_inputs import T2TaskInput, parse_t2_task_input
+from .t2_review_candidates import REVIEW_POOL_POLICY, ReviewPoolLimitError, old_side_review_pool
 
 
 # Keep single strings below ToolArtifact's per-string bound and leave ample
@@ -181,6 +182,7 @@ class LocalT2Toolbox:
         "_repo_path",
         "_schema_adapter",
         "_whole_line_entry_snippets",
+        "_review_candidate_pool",
         "task",
         "task_input",
     )
@@ -191,11 +193,14 @@ class LocalT2Toolbox:
         task_input: T2TaskInput,
         package_root: str | Path,
         repo_path: str | Path,
-        *, whole_line_entry_snippets: bool = False,
+        *, whole_line_entry_snippets: bool = False, review_candidate_pool: bool = False,
     ) -> None:
         if type(whole_line_entry_snippets) is not bool:
             raise ValueError("whole_line_entry_snippets must be boolean")
         self._whole_line_entry_snippets = whole_line_entry_snippets
+        if type(review_candidate_pool) is not bool:
+            raise ValueError("review_candidate_pool must be boolean")
+        self._review_candidate_pool = review_candidate_pool
         if not isinstance(task, RunTask):
             raise ValueError("task must be a RunTask")
         if parse_t2_task_input(task) != task_input:
@@ -229,11 +234,19 @@ class LocalT2Toolbox:
         safe = SAFE_REPAIR_TOOL_REGISTRY[REPAIR_TOOL_POLICY_VERSION]
         if set(handlers) - safe:
             raise RuntimeError("Local T2 registry contains a non-policy tool")
+        identities = dict(LOCAL_T2_TOOL_CONTRACT_IDS)
+        if review_candidate_pool:
+            identities.update(
+                dataflow_candidate_search="vulngym.local-t2.dataflow_candidate_search@3-old-side-review",
+                route_recognition=("vulngym.local-t2.route_recognition@2-callables-no-anchors"
+                                   if whole_line_entry_snippets else
+                                   "vulngym.local-t2.route_recognition@2-callables-partial"),
+            )
         self._registry = MappingProxyType(
             {
                 name: ToolDefinition(
                     name=name,
-                    contract_id=LOCAL_T2_TOOL_CONTRACT_IDS[name],
+                    contract_id=identities[name],
                     handler=handlers[name],
                 )
                 for name in LOCAL_T2_TOOL_NAMES
@@ -725,19 +738,31 @@ class LocalT2Toolbox:
             )
         except PatchAnalysisError as error:
             raise ToolBlocked("patch_analysis_failed") from error
+        nominated = analysis
+        if self._review_candidate_pool:
+            try:
+                nominated = old_side_review_pool(analysis, mode, max_candidates=MAX_CRITICAL_CANDIDATES)
+            except ReviewPoolLimitError as error:
+                raise ToolBlocked("review_pool_limit_exceeded") from error
+            except ValueError as error:
+                raise ToolBlocked("review_pool_invalid") from error
         resolution = CriticalOperationResolver(
-            repository, max_candidates=MAX_CRITICAL_CANDIDATES
+            repository, max_candidates=MAX_CRITICAL_CANDIDATES,
+            line_tolerance=0 if self._review_candidate_pool else 5,
         ).resolve(
             trusted.diff.before_commit,
             trusted.diff.after_commit,
             mode=mode,
-            candidates=analysis,
+            candidates=nominated,
         )
         payload = {
             "source_diff_artifact_id": diff_binding.artifact.artifact_id,
             "patch_analysis": asdict(analysis),
             "critical_resolution": resolution.to_dict(),
         }
+        if self._review_candidate_pool:
+            payload["candidate_policy"] = REVIEW_POOL_POLICY
+            payload["mode_is_unverified_hypothesis"] = True
         return self._emit(
             envelope,
             tag="critical_candidates",
@@ -807,6 +832,7 @@ class LocalT2Toolbox:
             max_files=len(self.task_input.hints.source_paths),
             max_bytes=MAX_ROUTE_BYTES,
             whole_line_snippets=self._whole_line_entry_snippets,
+            review_callables=self._review_candidate_pool,
         ).search(
             commit,
             paths=self.task_input.hints.source_paths,

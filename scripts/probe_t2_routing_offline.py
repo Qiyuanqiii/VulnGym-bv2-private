@@ -51,6 +51,8 @@ def main(argv=None):
     parser.add_argument("--repo-map", required=True, type=Path)
     parser.add_argument("--package-root", required=True, type=Path)
     parser.add_argument("--max-records", type=int, default=2)
+    parser.add_argument("--candidate-index", action="store_true",
+                        help="Include issued locations, code digests and context coverage, never source text.")
     args = parser.parse_args(argv)
     try:
         if not 1 <= args.max_records <= 100:
@@ -73,7 +75,7 @@ def main(argv=None):
             deferred = outcome.deferred_outcome
             if outcome.production_outcomes or outcome.validation_outcomes or deferred is None:
                 raise ValueError("diagnostic_must_stop_before_production")
-            rows.append({
+            row = {
                 "task_id": record.task.task_id, "stage": deferred.stage, "reason_code": deferred.reason_code,
                 "offered_modes": list(plan.payload["allowed_critical_modes"]) if plan else [],
                 "candidate_counts": {item["mode"]: item["candidate_count"] for item in
@@ -92,7 +94,30 @@ def main(argv=None):
                     "specific_defer_contract": True,
                 } if semantic and "semantic_context" in semantic.payload else None),
                 "complete_entries": 0, "t1_calls": 0,
-            })
+            }
+            if args.candidate_index:
+                context = semantic.payload.get("semantic_context", {}) if semantic else {}
+                coverage = {item["candidate_id"]: item["status"] for item in context.get("candidate_context_coverage", ())}
+                indexed = []
+                if semantic:
+                    for role, key in (("critical", "critical_candidates"), ("entry", "entry_candidates")):
+                        for candidate in semantic.payload[key]:
+                            location = candidate["location"]
+                            item = {"role": role, "candidate_id": candidate["candidate_id"],
+                                    "file": location["file"], "line": location["line"],
+                                    "code_sha256": sha256(location["code"].encode("utf-8")).hexdigest(),
+                                    "context_status": coverage.get(candidate["candidate_id"], "not_provided"),
+                                    "semantic_role_verified": False}
+                            if role == "entry":
+                                item.update(kind=candidate["kind"], symbol=candidate["symbol"],
+                                            explicit_external_binding=candidate["explicit_external_binding"])
+                            else:
+                                item.update(mode=candidate["mode"], source_candidate_id=candidate["source_candidate_id"])
+                            indexed.append(item)
+                row["candidate_index"] = indexed
+                row["candidate_policy"] = plan.payload["planning_evidence"].get("candidate_policy") if plan else None
+                row["mode_is_unverified_hypothesis"] = bool(plan and plan.payload["planning_evidence"].get("mode_is_unverified_hypothesis"))
+            rows.append(row)
             backend.requests.clear()
         runner.finalize_batch()
         result = {"schema_version": 1, "status": "diagnostic_complete", "network_calls": 0,

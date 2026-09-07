@@ -922,6 +922,7 @@ class _LocalTaskExecution:
         t1_max_package_bytes: int = DEFAULT_MAX_PACKAGE_BYTES,
         t1_max_package_files: int = DEFAULT_MAX_PACKAGE_FILES,
         whole_line_entry_snippets: bool = False,
+        review_candidate_pool: bool = False,
     ) -> None:
         if not isinstance(backend, StructuredModelBackend):
             raise ValueError("backend must implement StructuredModelBackend")
@@ -936,6 +937,7 @@ class _LocalTaskExecution:
         self._producer = LocalStructuredT2Producer()
         self._t2_factory = LocalT2ContextFactory(
             package_root, repo_map, backend, whole_line_entry_snippets=whole_line_entry_snippets,
+            review_candidate_pool=review_candidate_pool,
         )
         self._t1_factory = LocalT1ValidatorFactory(
             package_root,

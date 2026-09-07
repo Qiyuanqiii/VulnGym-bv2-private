@@ -60,6 +60,11 @@ class EvidenceFirstPlanningTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 LocalStructuredT2Producer(evidence_first_planning=value)
 
+    def test_production_cannot_silently_disable_review_profile(self):
+        for value in (False, 1, "true", None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                LocalProductionTaskRunner(backend=fixture._ScriptedBackend(), review_candidate_pool=value)
+
     def test_plan_sees_advisory_pins_and_actual_diff_before_model_call(self):
         backend = fixture._ScriptedBackend()
         outcome = self.runner(backend).run(self.fixture._task(critical_mode="auto"))
@@ -82,16 +87,20 @@ class EvidenceFirstPlanningTests(unittest.TestCase):
         self.assertEqual(production.candidate["verify"], 0)
         self.assertEqual(len(outcome.validation_outcomes), 1)
 
-    def test_auto_guard_only_inventory_reaches_semantic_review(self):
+    def test_removed_guard_line_is_reviewable_under_both_unverified_hypotheses(self):
         task = self.guard_task()
         backend = fixture._ScriptedBackend(critical_mode="guard")
         outcome = self.runner(backend).run(task)
         plan = backend.requests[0]
-        self.assertEqual(tuple(plan.payload["allowed_critical_modes"]), ("guard",))
+        self.assertEqual(tuple(plan.payload["allowed_critical_modes"]), ("sink", "guard"))
         counts = {item["mode"]: item["candidate_count"]
                   for item in plan.payload["planning_evidence"]["mode_inventory"]}
-        self.assertEqual(counts["sink"], 0)
+        self.assertGreater(counts["sink"], 0)
         self.assertGreater(counts["guard"], 0)
+        self.assertIs(plan.payload["planning_evidence"]["mode_is_unverified_hypothesis"], True)
+        semantic = next(r for r in backend.requests if r.stage == "semantic_judge")
+        self.assertIs(semantic.payload["mode_is_unverified_hypothesis"], True)
+        self.assertTrue(all(c["mode"] == "guard" for c in semantic.payload["critical_candidates"]))
         self.assertIn("semantic_judge", [r.stage for r in backend.requests])
         self.assertIsNotNone(outcome.entry)
         self.assertEqual(outcome.entry["verify"], 0)
@@ -100,15 +109,25 @@ class EvidenceFirstPlanningTests(unittest.TestCase):
         task = self.guard_task(mode="sink")
         backend = fixture._ScriptedBackend(critical_mode="guard")
         outcome = self.runner(backend).run(task)
-        self.assertEqual(backend.requests, [])
+        self.assertEqual([r.stage for r in backend.requests], ["plan"])
+        self.assertEqual(tuple(backend.requests[0].payload["allowed_critical_modes"]), ("sink",))
         self.assertIsNone(outcome.entry)
         self.assertIsNone(outcome.report)
-        self.assertEqual(outcome.deferred_outcome.reason_code, "critical_mode_unsupported_by_candidates")
+        self.assertEqual(outcome.deferred_outcome.reason_code, "invalid_model_output")
 
     def test_model_cannot_select_a_mode_with_zero_admissible_candidates(self):
         task = self.guard_task()
         backend = fixture._ScriptedBackend(critical_mode="sink")
-        outcome = self.runner(backend).run(task)
+        original = LocalStructuredT2Producer._collect_critical_choices
+        def guard_only(producer, run, result, **kwargs):
+            diagnostic = original(producer, run, result, **kwargs)
+            if diagnostic["mode"] == "sink":
+                kwargs["critical_choices"][:] = [c for c in kwargs["critical_choices"] if c.mode != "sink"]
+                diagnostic["accepted_count"] = 0
+            return diagnostic
+        with patch.object(LocalStructuredT2Producer, "_collect_critical_choices", guard_only):
+            outcome = self.runner(backend).run(task)
+        self.assertEqual(tuple(backend.requests[0].payload["allowed_critical_modes"]), ("guard",))
         self.assertEqual([r.stage for r in backend.requests], ["plan"])
         self.assertEqual(outcome.deferred_outcome.reason_code, "invalid_model_output")
         self.assertIsNone(outcome.entry)
@@ -133,6 +152,16 @@ class EvidenceFirstPlanningTests(unittest.TestCase):
         self.assertEqual(outcome.deferred_outcome.reason_code, "model_deferred")
         self.assertIsNone(outcome.entry)
         self.assertIsNone(outcome.report)
+
+    def test_missing_entry_construct_defers_instead_of_using_file_start(self):
+        self.rewrite_pair("value = source\n", "value = normalized\n")
+        backend = fixture._ScriptedBackend()
+        outcome = self.runner(backend).run(self.fixture._task(critical_mode="auto"))
+        self.assertEqual([r.stage for r in backend.requests], ["plan"])
+        self.assertEqual(outcome.deferred_outcome.stage, "resolve_entry")
+        self.assertEqual(outcome.deferred_outcome.reason_code, "no_entry_candidate")
+        self.assertIsNone(outcome.entry)
+        self.assertFalse(outcome.validation_outcomes)
 
     def test_no_lexical_candidates_defer_without_model_cost(self):
         self.fixture._replace_fix_with_benign_change()
@@ -230,6 +259,22 @@ class EvidenceFirstPlanningTests(unittest.TestCase):
         row = summary["results"][0]
         self.assertTrue(row["semantic_stage_reached"])
         self.assertEqual((row["complete_entries"], row["t1_calls"]), (0, 0))
+        self.assertNotIn(str(self.fixture.root), stdout.getvalue())
+
+    def test_probe_candidate_index_has_exact_metadata_not_source_or_quality_claims(self):
+        from scripts.probe_t2_routing_offline import main
+        stdout = io.StringIO()
+        with patch("vulngym_agent.agents.deepseek_backend._post_official") as post, redirect_stdout(stdout):
+            code = main(self.probe_arguments(self.guard_task()) + ["--candidate-index"])
+        self.assertEqual(code, 0)
+        post.assert_not_called()
+        row = json.loads(stdout.getvalue())["results"][0]
+        self.assertTrue(row["mode_is_unverified_hypothesis"])
+        self.assertEqual(row["candidate_policy"], "old-side-review-pool-v1")
+        self.assertTrue(row["candidate_index"])
+        self.assertTrue(all(len(item["code_sha256"]) == 64 for item in row["candidate_index"]))
+        self.assertTrue(all(not item["semantic_role_verified"] for item in row["candidate_index"]))
+        self.assertNotIn("if request.enabled", stdout.getvalue())
         self.assertNotIn(str(self.fixture.root), stdout.getvalue())
 
     def test_offline_probe_rejects_invalid_input_before_task_execution(self):

@@ -109,6 +109,9 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
         if configuration.get("whole_line_entry_snippets", True) is not True:
             raise ValueError("production requires whole-line entry snippets")
         configuration["whole_line_entry_snippets"] = True
+        if configuration.get("review_candidate_pool", True) is not True:
+            raise ValueError("production requires the review candidate pool")
+        configuration["review_candidate_pool"] = True
         super().__init__(backend=backend, **configuration)
         self._producer = LocalStructuredT2Producer(
             include_reflection_context=True, evidence_first_planning=True,

@@ -549,7 +549,9 @@ class LocalStructuredT2Producer:
                     ),
                     mode=str(resolution.get("mode")),
                     change_kind=str(assessment.get("change_kind")),
-                    evidence=str(assessment.get("evidence") or "fact-checked diff location"),
+                    evidence=(str(assessment.get("evidence") or "fact-checked diff location") +
+                              (" Review pool mode is only a hypothesis; a changed line is not a verified role."
+                               if resolution_artifact.get("mode_is_unverified_hypothesis") is True else "")),
                     tool_call_id=resolution_result.tool_call_id,
                 )
             )
@@ -562,7 +564,7 @@ class LocalStructuredT2Producer:
                 reason = "unclassified"
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
         accepted = len(critical_choices) - before_count
-        return {
+        diagnostic = {
             "kind": "critical_candidate_inventory_v1",
             "mode": resolution.get("mode"), "assessed_count": len(candidates),
             "provisional_count": len(provisional_ids), "accepted_count": accepted,
@@ -570,12 +572,17 @@ class LocalStructuredT2Producer:
             "resolver_reason_counts": reason_counts,
             "semantic_role_verified": False,
         }
+        if resolution_artifact.get("mode_is_unverified_hypothesis") is True:
+            diagnostic["candidate_policy"] = resolution_artifact["candidate_policy"]
+            diagnostic["mode_is_unverified_hypothesis"] = True
+        return diagnostic
 
     @staticmethod
     def _planning_evidence(
         *, snippet: str, vulnerable_commit: str, fix_commit: str,
         changed_paths: Sequence[str], diff_context: Sequence[Mapping[str, Any]],
         allowed_modes: Sequence[str], critical_choices: Sequence[_CriticalChoice],
+        candidate_policy: str | None = None,
     ) -> dict[str, Any]:
         inventory = []
         for mode in allowed_modes:
@@ -589,7 +596,7 @@ class LocalStructuredT2Producer:
                 value["evidence"] = value["evidence"][:500]
                 samples.append(value)
             inventory.append({"mode": mode, "candidate_count": len(choices), "samples": samples})
-        return {
+        result = {
             "contract_version": 1, "basis": "declared_diff_candidates_v1",
             "advisory_snippet": snippet[:2000], "advisory_snippet_truncated": len(snippet) > 2000,
             "vulnerable_commit": vulnerable_commit, "fix_commit": fix_commit,
@@ -599,6 +606,13 @@ class LocalStructuredT2Producer:
             "scope": "declared_paths_and_bounded_lexical_candidates_only",
             "semantic_role_verified": False,
         }
+        if candidate_policy is not None:
+            result.update(
+                candidate_policy=candidate_policy,
+                mode_is_unverified_hypothesis=True,
+                scope="declared_paths_and_bounded_old_side_review_candidates_only",
+            )
+        return result
 
     def _semantic_context(
         self, run: _Attempt, *, repo_ref: str, vulnerable_commit: str, fix_commit: str,
@@ -899,6 +913,8 @@ class LocalStructuredT2Producer:
                 "analyze_patch", "no_declared_source_change",
                 ("none of the declared source paths changed in the unique fix",),
             )
+        review_policy = next((item["candidate_policy"] for item in diagnostics
+                              if item.get("mode_is_unverified_hypothesis") is True), None)
         if self._evidence_first_planning:
             available_modes = tuple(mode for mode in allowed_modes if any(
                 choice.mode == mode for choice in critical_choices
@@ -920,6 +936,7 @@ class LocalStructuredT2Producer:
                 snippet=snippet, vulnerable_commit=vulnerable_commit, fix_commit=fix_commit,
                 changed_paths=changed_paths, diff_context=diff_context,
                 allowed_modes=allowed_modes, critical_choices=critical_choices,
+                candidate_policy=review_policy,
             )
             critical_mode = self._select_mode(run, plan_payload, available_modes)
             critical_choices = [choice for choice in critical_choices if choice.mode == critical_mode]
@@ -1067,6 +1084,9 @@ class LocalStructuredT2Producer:
                 },
             }
         context_evidence_ids: list[str] = []
+        if review_policy is not None:
+            semantic_payload.update(candidate_policy=review_policy,
+                                    mode_is_unverified_hypothesis=True)
         if semantic_context is not None:
             context_evidence_ids = [semantic_context["advisory"]["evidence_id"],
                                     *(item["evidence_id"] for item in semantic_context["diffs"]),

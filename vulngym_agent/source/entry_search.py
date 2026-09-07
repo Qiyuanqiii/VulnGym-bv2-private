@@ -27,7 +27,7 @@ from vulngym_agent.tools.git import (
 
 
 ValidationStatus = Literal["correct", "incorrect", "uncertain"]
-EntryPointKind = Literal["route", "rpc", "cli", "handler", "export"]
+EntryPointKind = Literal["route", "rpc", "cli", "handler", "export", "callable"]
 
 DEFAULT_MAX_FILES: Final[int] = 64
 DEFAULT_MAX_BYTES: Final[int] = 4 * 1024 * 1024
@@ -201,6 +201,12 @@ _JS_FUNCTION_RE = re.compile(
 _JS_CONST_FUNCTION_RE = re.compile(
     r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*="
 )
+# One-line named arrow declarations only. A callable is not an external entry
+# binding; the model must still establish its role from the supplied evidence.
+_JS_ARROW_DECL_RE = re.compile(
+    r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+    r"(?:async\s+)?(?:\([^;\n]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=;\n]+)?=>\s*\{"
+)
 _JAVA_ANNOTATION_RE = re.compile(
     r"^\s*@(?:GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping|"
     r"Path|GET|POST|PUT|DELETE|PATCH|Command|RpcMethod|GrpcService)\b", re.IGNORECASE
@@ -232,7 +238,7 @@ _PHP_FUNCTION_RE = re.compile(
 )
 
 
-def _markers(language: str, lines: Sequence[str]) -> list[_Marker]:
+def _markers(language: str, lines: Sequence[str], *, review_callables: bool = False) -> list[_Marker]:
     markers: list[_Marker] = []
     declared: set[int] = set()
     if language == "python":
@@ -269,9 +275,13 @@ def _markers(language: str, lines: Sequence[str]) -> list[_Marker]:
             elif _JS_CLI_RE.match(line):
                 markers.append(_Marker(index, index, "cli", None, True, "brace"))
         for index, line in enumerate(lines):
-            function = _JS_FUNCTION_RE.match(line) or _JS_CONST_FUNCTION_RE.match(line)
+            function = _JS_FUNCTION_RE.match(line) or (
+                _JS_ARROW_DECL_RE.match(line) if review_callables else _JS_CONST_FUNCTION_RE.match(line)
+            )
             if function and index not in declared and _HANDLER_NAME_RE.search(function.group(1)):
                 markers.append(_Marker(index, index, "handler", function.group(1), False, "brace"))
+            elif review_callables and function and index not in declared:
+                markers.append(_Marker(index, index, "callable", function.group(1), False, "brace"))
     elif language == "java":
         for index, line in enumerate(lines):
             if _JAVA_ANNOTATION_RE.match(line):
@@ -493,10 +503,14 @@ class EntryPointSearcher:
         max_bytes: int = DEFAULT_MAX_BYTES,
         max_candidates: int = DEFAULT_MAX_CANDIDATES,
         whole_line_snippets: bool = False,
+        review_callables: bool = False,
     ) -> None:
         if type(whole_line_snippets) is not bool:
             raise ValueError("whole_line_snippets must be boolean")
         self.whole_line_snippets = whole_line_snippets
+        if type(review_callables) is not bool:
+            raise ValueError("review_callables must be boolean")
+        self.review_callables = review_callables
         self.max_files = _positive_limit("max_files", max_files, HARD_MAX_FILES)
         self.max_bytes = _positive_limit("max_bytes", max_bytes, HARD_MAX_BYTES)
         self.max_candidates = _positive_limit("max_candidates", max_candidates, HARD_MAX_CANDIDATES)
@@ -593,7 +607,7 @@ class EntryPointSearcher:
                 issues.append(EntryPointSearchIssue("uncertain", "non_utf8_source", path, "Immutable source blob is not valid UTF-8 text.")); continue
             searched.append(path); lines = text.splitlines()
             path_candidate_start = len(candidates)
-            for marker in _markers(language, lines):
+            for marker in _markers(language, lines, review_callables=self.review_callables):
                 end, scope_text = _scope(lines, marker)
                 related, direct, matched = _relation(path, scope_text, text, critical_path_values, symbol_values)
                 if not related or matched is None: continue
@@ -602,7 +616,9 @@ class EntryPointSearcher:
                 # Even a same-scope explicit binding is only a lexical/structural
                 # fact.  It must not establish runtime reachability by itself.
                 status: ValidationStatus = "uncertain"
-                construct = "explicit entry/export construct" if marker.explicit else "handler/helper naming heuristic"
+                construct = ("explicit entry/export construct" if marker.explicit else
+                             "named callable review candidate (not an external binding)" if marker.kind == "callable" else
+                             "handler/helper naming heuristic")
                 relation = "same bounded construct directly references" if direct else "selected file, outside that construct, references"
                 caveat = (
                     "Runtime reachability and vulnerability semantics remain unproved."
@@ -631,6 +647,12 @@ class EntryPointSearcher:
             if truncated:
                 issues.append(EntryPointSearchIssue("uncertain", "max_candidates_exceeded", path, f"Candidate output was truncated at {self.max_candidates}.")); break
             if len(candidates) == path_candidate_start and len(candidates) < self.max_candidates:
+                if self.review_callables:
+                    issues.append(EntryPointSearchIssue(
+                        "uncertain", "no_entry_construct_in_declared_path", path,
+                        "No related entry/export/named callable construct was found in this declared path; no file-start placeholder was issued. Provide cleared caller/route paths or explicit supported evidence.",
+                    ))
+                    continue
                 anchor = _same_file_review_anchor(path, lines, critical_path_values,
                                                   whole_line_snippets=self.whole_line_snippets)
                 if anchor is not None:
