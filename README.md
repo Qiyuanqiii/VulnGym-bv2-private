@@ -278,7 +278,11 @@ mixed-batch handoff. Its 324 regressions passed with one existing conditional
 skip. A subsequent [prompt-v4 new-input run](docs/t2_new_input_live_receipt.md)
 made four real requests but produced zero complete candidates and two defers.
 The [context allocation fix](docs/t2_context_allocation_receipt.md) was made after
-that run; its real-model diagnostic retest still requires a fresh authorized key.
+that run. Its [authorized diagnostic retest](docs/t2_context_retest_receipt.md)
+has now run: the plan request succeeded, the semantic request timed out after
+120 seconds, and the second task was stopped locally without an HTTP send.
+No new semantic result was obtained; this is inconclusive, not two semantic
+abstentions or evidence that the fix worked. Credential use has ended, with no retry.
 Integration test doubles are not
 real-model quality data; independent semantic evaluation is still pending.
 The existing exact-replay CLI and its mandatory replay closure remain unchanged.

@@ -69,8 +69,8 @@ Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
 
 本地已有交接预览可以无 key 校验：解压 `t2-review-preview-20260908-v2.zip` 后运行 `python -I -B verify_bundle.py`。该包分开保留旧开发组的 1 候选/T1 + 1 defer，以及新输入组的 0 候选 + 2 defer。只核验包内一致性，不能证明语义正确。
 
-## 5. 当前唯一付费接续
+## 5. 最近一次受限诊断已经结束
 
 已修正版本的两份同输入诊断复测：`scripts/run_t2_context_retest_v1.py`。它只适用于当前开发机的已固定输入，复用原有六请求限制和独占运行标记，不是通用安装入口。`check` 不收费；`run` 还要求新 key、平台上限确认和脚本已提交。
 
-本轮获准上限 20 元、最多 6 请求、每题 3 次、零自动重试/repair。旧 key 均不再使用。是否有真实新结果，以独立运行回执为准；同两份输入不可再次标成初次未见样本。最终还需真实产出质量复核和演示成片。
+本轮获准上限20元、最多6请求、每题3次、零自动重试/repair。用户确认新key平台限额后已实际执行：plan成功、semantic_judge请求超时，第二题在本地被阻止，实际发送2次。无新的完整候选或语义判断，详见[诊断回执](docs/t2_context_retest_receipt.md)。key使用已结束，不要再次运行同一目录或复用该key；最新失败不改写已有成功/弃答分组。最终还需真实产出质量复核和演示成片。
