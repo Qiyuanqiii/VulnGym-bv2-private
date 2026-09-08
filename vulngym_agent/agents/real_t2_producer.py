@@ -672,7 +672,15 @@ class LocalStructuredT2Producer:
         blocks: list[dict[str, Any]] = []
         coverage = []
         used_chars = 0
-        for choice in choices:
+        # Scheduling windows does not change the issued catalog or select an
+        # answer. Late declarations must not lose all context to file ordering.
+        context_order = semantic_context_tools.prioritize_context_candidates(
+            [choice.model_value() for choice in choices if isinstance(choice, _CriticalChoice)],
+            [choice.model_value() for choice in choices if isinstance(choice, _EntryChoice)],
+        )
+        choices_by_id = {choice.issued_id: choice for choice in choices}
+        for candidate_id in context_order:
+            choice = choices_by_id[candidate_id]
             path, line = str(choice.location["file"]), int(choice.location["line"])
             covered = next((block for block in blocks if block["file"] == path
                             and block["line_start"] <= line <= block["line_end"]
@@ -719,6 +727,7 @@ class LocalStructuredT2Producer:
                          "source": "loaded_advisory_text", "tool_call_id": advisory_call_id},
             "diffs": diffs, "omitted_diff_count": changed_path_count - len(diffs),
             "source_contexts": blocks, "candidate_context_coverage": coverage,
+            "context_selection_policy": "role_and_path_balanced_near_anchor_v1",
             "coverage_basis": "candidate_anchor_line_not_entire_candidate_span",
             "source_chars": used_chars, "source_files_read": len(blobs),
             "scope": "declared_paths_pinned_version_bounded_context_not_a_complete_call_graph",

@@ -22,6 +22,51 @@ DEFER_REASONS = (
 MISSING_FIELDS = ("entry_point", "critical_operation", "relationship", "version", "classification", "title")
 
 
+def prioritize_context_candidates(
+    critical: Sequence[Mapping[str, Any]], entries: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Schedule bounded windows fairly; never choose an answer or prove a role.
+
+    Round-robin declared paths and both candidate roles, instead of exhausting
+    the budget on all criticals followed by entries in source-file order.
+    Within each path, existing binding clues and proximity to issued critical
+    anchors are retrieval hints only. All candidate IDs are retained exactly.
+    """
+    paths: list[str] = []
+    by_path: dict[str, tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]] = {}
+    seen: set[str] = set()
+    for role, pool in enumerate((critical, entries)):
+        for candidate in pool:
+            location = candidate.get("location")
+            identifier = candidate.get("candidate_id")
+            if (not isinstance(location, Mapping) or not isinstance(identifier, str)
+                    or not identifier or identifier in seen
+                    or not isinstance(location.get("file"), str) or not location["file"]
+                    or type(location.get("line")) is not int or location["line"] < 1):
+                raise ValueError("invalid_context_candidate_identity_or_location")
+            seen.add(identifier)
+            path = location["file"]
+            if path not in by_path:
+                paths.append(path)
+                by_path[path] = ([], [])
+            by_path[path][role].append(candidate)
+    for criticals, entry_list in by_path.values():
+        anchors = [c["location"]["line"] for c in criticals]
+        entry_list.sort(key=lambda c: (
+            c.get("explicit_external_binding") is not True,
+            c.get("direct_critical_reference") is not True,
+            min((abs(c["location"]["line"] - line) for line in anchors), default=0),
+        ))
+    order = []
+    depth = max((len(pool) for pair in by_path.values() for pool in pair), default=0)
+    for index in range(depth):
+        for path in paths:
+            for pool in by_path[path]:
+                if index < len(pool):
+                    order.append(pool[index]["candidate_id"])
+    return order
+
+
 def source_window(text: str, path: str, line: int, *, max_chars: int = MAX_BLOCK_CHARS) -> dict[str, Any]:
     """Select a complete small Python function or a clearly labelled line window.
 

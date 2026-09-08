@@ -20,3 +20,7 @@
 - 本条授权记录期间未读取key、未调用模型、未产生新的模型费用。
 
 项目目标与验收以[current_task_reference.md](current_task_reference.md)为准。
+
+## 本次授权的实际结束记录
+
+2026-09-08，用户提供本轮新临时key后，按冻结批次实际调用4次，未用满6次上限，零自动重试。两份报告均semantic_judge defer，无完整Entry或T1报告。provider记录54,546 tokens，不据此推算人民币费用。进程正常结束、已通知用户撤销key；后续上下文诊断、修正、回归和交接全部离线。不得把本条预算继续挪作新代码或新增批次的自动调用授权。详见[t2_new_input_live_receipt.md](t2_new_input_live_receipt.md)。
