@@ -1,0 +1,111 @@
+{
+  "agent_visual_review_all_8_decoded_scenes": true,
+  "artifacts": {
+    "T2-existing-results-demo.mp4": {
+      "bytes": 14634309,
+      "sha256": "9cc577297bc790438e2f3bdd206aaf70a80aae3aa7e6cec21e3787e723858261"
+    },
+    "capture/cli-help.stdout.txt": {
+      "bytes": 2737,
+      "sha256": "707e9faa3a751a4fb8790cd0ef16f8383a233c76783f4b471183acdf5c3002fe"
+    },
+    "capture/metadata.json": {
+      "bytes": 988,
+      "sha256": "45adbf707ec086a7a1efa3a96dddf5ce4001d57ba13f13c6a35c5ff638ab4ed3"
+    },
+    "capture/verify.stdout.txt": {
+      "bytes": 178,
+      "sha256": "83221fc454b604efd72f9d5b9b2ad5a9ce33f416c1d3b8b0c7cf84ee7a89725a"
+    },
+    "capture/walkthrough.stdout.txt": {
+      "bytes": 1479,
+      "sha256": "cf2075e5ee96cb7acdbd88954007c5b8135d7de3ad8a78753c87fe1c820da527"
+    },
+    "narration.srt": {
+      "bytes": 3095,
+      "sha256": "dec48c716bf27dde12a3ac7d785746f527d6774f0e7cc017494b4cef68c7becf"
+    },
+    "storyboard.json": {
+      "bytes": 3898,
+      "sha256": "95b7909d21bd5f67514cff0e9f98eb99cca508bfbbfcdad466839d8002d01eb3"
+    },
+    "timeline.json": {
+      "bytes": 5153,
+      "sha256": "275096f86205c001b0f6eabed4c3572b6bbb1fccdb08a2d2095d4ec5b5beb366"
+    }
+  },
+  "complete_T2_quality_acceptance": false,
+  "date": "2026-09-09",
+  "decoded_scene_checks": [
+    {
+      "mean_absolute_rgb_difference": 1.6149,
+      "scene": 1
+    },
+    {
+      "mean_absolute_rgb_difference": 1.8438,
+      "scene": 2
+    },
+    {
+      "mean_absolute_rgb_difference": 1.6097,
+      "scene": 3
+    },
+    {
+      "mean_absolute_rgb_difference": 1.5638,
+      "scene": 4
+    },
+    {
+      "mean_absolute_rgb_difference": 1.4522,
+      "scene": 5
+    },
+    {
+      "mean_absolute_rgb_difference": 1.6353,
+      "scene": 6
+    },
+    {
+      "mean_absolute_rgb_difference": 1.7736,
+      "scene": 7
+    },
+    {
+      "mean_absolute_rgb_difference": 1.9075,
+      "scene": 8
+    }
+  ],
+  "duration_seconds": 201.4080208,
+  "generated_script_tests": {
+    "count": 5,
+    "exit_code": 0,
+    "seconds": 0.043
+  },
+  "height": 720,
+  "independent_human_review": false,
+  "narration": "offline_synthetic_zh_CN",
+  "narration_human_listening_review": false,
+  "narration_human_recording": false,
+  "new_provider_calls": 0,
+  "old_package_and_production_files_modified": false,
+  "pdf": {
+    "all_pages_rendered_and_visually_inspected": true,
+    "bytes": 230416,
+    "pages": 3,
+    "sha256": "bd8a97b534c284a94ab2e102409c1c8bcfbbaf17cf42531cf84d456f50ce8d72",
+    "source_markdown_sha256": "1fae0f4dd4946fe2889d2c1fe2abd53e77c2790726f9cb97e627277af840b2e5"
+  },
+  "schema": "t2.existing-results-video.v1",
+  "screen_recording": false,
+  "source_package_commit": "1f48e5ed937596dc5ad1995a30eaf50f8f58f7ac",
+  "source_package_sha256": "441acf1a0237401c4da953e3440c908b15f40f59ec7e7b0026a51beb4b43dcf4",
+  "timeline_seconds": 201.39999999999998,
+  "tracks": [
+    {
+      "codec": "avc1",
+      "handler": "vide"
+    },
+    {
+      "codec": "mp4a",
+      "handler": "soun"
+    }
+  ],
+  "video_bytes": 14634309,
+  "video_sha256": "9cc577297bc790438e2f3bdd206aaf70a80aae3aa7e6cec21e3787e723858261",
+  "width": 1280
+}
