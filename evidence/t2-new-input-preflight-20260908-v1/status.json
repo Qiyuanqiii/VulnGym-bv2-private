@@ -1,0 +1,1 @@
+{"status":"superseded_invalid_cli_configuration","eligible_for_paid_run":false,"provider_calls":0,"reason":"Initial in-memory plan probe passed, but the serialized repository map failed the actual CLI loader. Original evidence is preserved; use the v2 public preflight receipt for corrected inputs.","superseded_by":"evidence/t2-new-input-preflight-20260908-v2"}
