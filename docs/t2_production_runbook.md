@@ -1,5 +1,7 @@
 # T2 新报告生产入口：配置、输出与当前边界
 
+**当前入口（2026-09-09）**：先看 [可执行 quickstart](../START_HERE_T2.md)。prompt-v4 已有两份新输入实跑：4请求、0完整候选、2defer；后续上下文排序修正的真实诊断复测仍待新 key。核心 CLI 已通过全新无第三方包 venv 的启动、29项构造测试和两次既有 handoff 回读；这不替代模型质量。下面各日期段落保留历史阶段含义。
+
 **最新代码状态（2026-09-08）**：[自检理由与混合批次交接](t2_handoff_reflection_receipt.md)已离线完成。新生产reflection v2在defer时要求结构化短说明和当前证据引用，提示词t2-json-v4；旧默认/回放保留。handoff可交接完整候选加弃答的混合批次，不改变严格export。最新真实模型记录仍为[同两条开发输入产出1份候选/T1](deepseek_t2_candidate_retest_receipt.md)，不是新输入质量验收。下面早期阶段记录不代表当前最新计数。
 
 状态：2026-09-07，Issue #12 的**入口与适配器增量**。用户已选择 DeepSeek V4 Pro，通用接口和官方 API 适配器已实现并离线测试；[真实两条试跑](deepseek_t2_smoke_receipt.md)已确认接口连通，但完整 Entry=0、T1 调用=0，两条在候选提取阶段 deferred。新报告生产质量实测尚未完成，不能据此宣称 T2 总体验收完成。

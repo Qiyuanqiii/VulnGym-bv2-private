@@ -254,8 +254,8 @@ ds = load_dataset("json", data_files={
 
 ### Experimental B-v2 T2 producer with auxiliary T1 validation
 
-> **Current submission scope (2026-09-08): T2 primary, T1 auxiliary.**
-> Start with [the current task reference](docs/current_task_reference.md) and
+> **Current submission scope (2026-09-09): T2 primary, T1 auxiliary.**
+> Start with [the runnable T2 quickstart](START_HERE_T2.md), [the current task reference](docs/current_task_reference.md) and
 > [acceptance status](docs/submission/acceptance_report.md). The main deliverable
 > is real advisory-to-Entry production with evidence and honest uncertainty.
 > The self-selected 50/20 benchmark and source-only Lane B / native Linux gates
@@ -266,7 +266,7 @@ ds = load_dataset("json", data_files={
 A separate [T2 production entry point](docs/t2_production_runbook.md) now accepts
 an explicitly configured `StructuredModelBackend` via `--backend-factory`, without
 per-task answer fixtures. The selected [DeepSeek V4 Pro adapter](docs/deepseek_t2_setup.md)
-is now included. The latest [real two-input development retest](docs/deepseek_t2_candidate_retest_receipt.md)
+is now included. The historical [real two-input development retest](docs/deepseek_t2_candidate_retest_receipt.md)
 used prompt v3 and produced one complete candidate with an uncertain T1 report;
 the other task deferred at reflection. Both remain manual_review. This is
 one-of-two complete production on already-used development inputs, not an
@@ -275,7 +275,11 @@ accuracy claim or unseen-input evaluation.
 The subsequent [offline product increment](docs/t2_handoff_reflection_receipt.md)
 adds evidence-referenced reflection defer reasons (prompt v4) and a read-only
 mixed-batch handoff. Its 324 regressions passed with one existing conditional
-skip. Prompt v4 has not been live-tested. Integration test doubles are not
+skip. A subsequent [prompt-v4 new-input run](docs/t2_new_input_live_receipt.md)
+made four real requests but produced zero complete candidates and two defers.
+The [context allocation fix](docs/t2_context_allocation_receipt.md) was made after
+that run; its real-model diagnostic retest still requires a fresh authorized key.
+Integration test doubles are not
 real-model quality data; independent semantic evaluation is still pending.
 The existing exact-replay CLI and its mandatory replay closure remain unchanged.
 
@@ -287,8 +291,11 @@ and 30 uncertain. These are assistant self-assessments on historical,
 error-enriched data, not independent accuracy scores. The latest actual-model
 candidate is reviewed separately (six supported, one reasonable alternative,
 two uncertain). Original entries and T1 verdicts are preserved. See the
-[offline demonstration](docs/submission/offline_demo.md); new-input validation
-and the final recorded demonstration remain unfinished.
+[offline demonstration](docs/submission/offline_demo.md). New-input production
+quality and the final recorded demonstration remain unfinished. A [fresh venv
+check](docs/t2_clean_runtime_receipt.md) has now exercised core CLI entry points,
+29 synthetic tests and two existing-result handoff readbacks without installing
+third-party packages; it is not a new real-model or clean-OS evaluation.
 
 The B-v2 tools require Python 3.10 or newer. For a reproducible test
 environment, install `requirements-dev.txt` and run the standard-library test
