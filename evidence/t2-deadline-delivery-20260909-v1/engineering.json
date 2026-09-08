@@ -1,0 +1,24 @@
+{
+  "schema": "t2.deadline-engineering.v1",
+  "date": "2026-09-09",
+  "provider_calls": 0,
+  "historical_runs_modified": false,
+  "tests": {
+    "modules": ["tests.test_deepseek_backend", "tests.test_t2_production_cli", "tests.test_t2_new_input_run", "tests.test_t2_context_retest_receipt", "tests.test_submission_handoff", "tests.test_closed_loop_batch"],
+    "count": 104,
+    "seconds": 56.176,
+    "exit_code": 0,
+    "earlier_wrong_module_invocation_counted_as_pass": false,
+    "real_model_quality_test": false
+  },
+  "pdf": {
+    "file_name": "T2-design.pdf",
+    "pages": 3,
+    "bytes": 226580,
+    "sha256": "8857fe66bf188e81c65a8ee660274df88d6d7baa514239439a0fd234b62fc883",
+    "source_markdown_sha256": "6451c0ebbb7b2271a911b213540f2d4236f29a69121236c331cd3defb5ef9b57",
+    "all_pages_rendered_and_visually_inspected": true,
+    "recorded_video": false
+  },
+  "complete_T2_quality_acceptance": false
+}

@@ -175,6 +175,16 @@ def _http_error(status: int) -> str:
                 else "deepseek_server_error" if status >= 500 else "deepseek_http_error")
 
 
+class _TransportBlocked(ModelBlocked):
+    """Local transport metadata only; the model runtime still stores just code."""
+
+    __slots__ = ("diagnostic",)
+
+    def __init__(self, code: str, diagnostic: dict[str, Any]) -> None:
+        super().__init__(code)
+        self.diagnostic = diagnostic
+
+
 def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
     """One HTTPS POST, bounded body and socket deadline; never follow redirects.
 
@@ -187,7 +197,21 @@ def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
     connection = http.client.HTTPSConnection(API_HOST, timeout=timeout)
     expired = Event()
     active_socket = None
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    phase = "connect"
+    request_started = False
+    received_bytes = 0
+    http_status = None
+
+    def blocked(code: str) -> _TransportBlocked:
+        return _TransportBlocked(code, {
+            "phase": phase, "error_code": code,
+            "elapsed_seconds": round(max(0, time.monotonic() - started), 3),
+            "timeout_seconds": timeout, "request_started": request_started,
+            "response_bytes_received": received_bytes, "http_status": http_status,
+            "usage_and_billing_known": False,
+        })
 
     def cancel() -> None:
         expired.set()
@@ -212,13 +236,18 @@ def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
         connection.connect()
         active_socket = connection.sock
         active_socket.settimeout(remaining())
+        phase = "send"
+        request_started = True  # Some bytes may be sent even if request() raises.
         connection.request("POST", API_PATH, body=body, headers={
             "Authorization": "Bearer " + api_key, "Content-Type": "application/json",
             "Accept": "application/json", "Accept-Encoding": "identity",
         })
         active_socket.settimeout(remaining())
+        phase = "wait_headers"
         response = connection.getresponse()
+        http_status = response.status
         remaining()
+        phase = "response_checks"
         if response.status != 200:
             raise ModelBlocked(_http_error(response.status))
         if response.getheader("Content-Encoding", "identity").lower() != "identity":
@@ -230,9 +259,11 @@ def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
             if len(length) > 10 or int(length) > MAX_RESPONSE_BYTES:
                 raise ModelBlocked("deepseek_response_too_large")
         raw = bytearray()
+        phase = "read_body"
         while not response.isclosed():
             active_socket.settimeout(remaining())
             chunk = response.read1(min(64 * 1024, MAX_RESPONSE_BYTES + 1 - len(raw)))
+            received_bytes += len(chunk)
             remaining()
             if not chunk:
                 break
@@ -242,13 +273,13 @@ def _post_official(body: bytes, api_key: str, timeout: float) -> bytes:
         if length is not None and len(raw) != int(length):
             raise ModelBlocked("deepseek_response_incomplete")
         return bytes(raw)
-    except ModelBlocked:
-        raise
+    except ModelBlocked as error:
+        raise blocked(error.error_code) from None
     except TimeoutError:
-        raise ModelBlocked("deepseek_timeout") from None
+        raise blocked("deepseek_timeout") from None
     except (OSError, http.client.HTTPException):
-        raise ModelBlocked("deepseek_timeout" if expired.is_set() or time.monotonic() >= deadline
-                           else "deepseek_transport_error") from None
+        raise blocked("deepseek_timeout" if expired.is_set() or time.monotonic() >= deadline
+                      else "deepseek_transport_error") from None
     finally:
         timer.cancel()
         if response is not None:
@@ -315,7 +346,7 @@ def parse_chat_response(raw: bytes) -> Mapping[str, Any]:
 
 
 class DeepSeekV4ProBackend:
-    __slots__ = ("_api_key", "_settings", "_backend_id", "_halt_code")
+    __slots__ = ("_api_key", "_settings", "_backend_id", "_halt_code", "_last_transport_failure")
 
     def __init__(self, *, api_key: str, settings: DeepSeekSettings | None = None) -> None:
         if (not isinstance(api_key, str) or not 1 <= len(api_key) <= 4096
@@ -328,6 +359,7 @@ class DeepSeekV4ProBackend:
         digest = sha256(_json_bytes(self._settings.profile())).hexdigest()
         self._backend_id = f"deepseek:{PROMPT_VERSION}:{digest[:24]}"
         self._halt_code: str | None = None
+        self._last_transport_failure: dict[str, Any] | None = None
 
     @property
     def backend_id(self) -> str:
@@ -340,6 +372,10 @@ class DeepSeekV4ProBackend:
     def configuration(self) -> dict[str, Any]:
         return {"backend_id": self.backend_id, **self._settings.profile()}
 
+    def last_transport_failure(self) -> dict[str, Any] | None:
+        """A copy of bounded local timing/phase metadata, never request content."""
+        return None if self._last_transport_failure is None else dict(self._last_transport_failure)
+
     def invoke(self, request: ModelRequest) -> Mapping[str, Any]:
         if type(request) is not ModelRequest or (request.backend_id, request.model_id) != (
                 self.backend_id, self.model_id):
@@ -350,6 +386,8 @@ class DeepSeekV4ProBackend:
         try:
             return parse_chat_response(_post_official(body, self._api_key, self._settings.timeout_seconds))
         except ModelBlocked as error:
+            if isinstance(error, _TransportBlocked):
+                self._last_transport_failure = dict(error.diagnostic)
             if error.error_code in {"deepseek_authentication_failed", "deepseek_balance_insufficient",
                                     "deepseek_access_denied", "deepseek_rate_limited"}:
                 self._halt_code = error.error_code

@@ -311,9 +311,75 @@ class DeepSeekTransportTests(unittest.TestCase):
             with self.assertRaises(ModelBlocked) as blocked:
                 ds._post_official(b"{}", KEY, 20)
         self.assertEqual(blocked.exception.error_code, "deepseek_timeout")
+        self.assertEqual(blocked.exception.diagnostic["phase"], "connect")
+        self.assertFalse(blocked.exception.diagnostic["request_started"])
         constructor.assert_called_once()
         self.assertTrue(connection.closed)
         self.assertNotIn("private connection text", str(blocked.exception))
+
+    def test_header_and_body_timeouts_have_distinct_phase_metadata(self):
+        for phase in ("wait_headers", "read_body"):
+            connection = _Connection(_Response(b"data"))
+            def timeout(*args):
+                raise TimeoutError("must-not-be-logged")
+            if phase == "wait_headers":
+                connection.getresponse = timeout
+            else:
+                connection.response.read1 = timeout
+            with self.subTest(phase=phase), patch.object(ds.http.client, "HTTPSConnection", return_value=connection):
+                with self.assertRaises(ModelBlocked) as stopped:
+                    ds._post_official(b"{}", KEY, 300)
+            detail = stopped.exception.diagnostic
+            self.assertEqual(detail["phase"], phase)
+            self.assertEqual(detail["timeout_seconds"], 300)
+            self.assertTrue(detail["request_started"])
+            self.assertFalse(detail["usage_and_billing_known"])
+            self.assertNotIn("must-not-be-logged", str(detail))
+            self.assertNotIn(KEY, str(detail))
+            self.assertEqual(len(connection.requests), 1)
+
+    def test_backend_retains_a_copy_of_failure_without_changing_error_code(self):
+        backend = ds.DeepSeekV4ProBackend(api_key=KEY)
+        connection = _Connection(_Response(b""))
+        def timeout():
+            raise TimeoutError("private")
+        connection.getresponse = timeout
+        with patch.object(ds.http.client, "HTTPSConnection", return_value=connection):
+            with self.assertRaises(ModelBlocked) as stopped:
+                backend.invoke(request(backend))
+        self.assertEqual(stopped.exception.error_code, "deepseek_timeout")
+        value = backend.last_transport_failure()
+        self.assertEqual(value["phase"], "wait_headers")
+        value["phase"] = "changed"
+        self.assertEqual(backend.last_transport_failure()["phase"], "wait_headers")
+
+    def test_explicit_longer_wait_changes_configuration_but_not_prompt(self):
+        default = ds.DeepSeekSettings()
+        longer = ds.DeepSeekSettings(timeout_seconds=300)
+        a = ds.DeepSeekV4ProBackend(api_key=KEY, settings=default)
+        b = ds.DeepSeekV4ProBackend(api_key=KEY, settings=longer)
+        self.assertNotEqual(a.backend_id, b.backend_id)
+        self.assertEqual(default.profile()["prompt_sha256"], longer.profile()["prompt_sha256"])
+        self.assertEqual(longer.profile()["automatic_retries"], 0)
+        self.assertEqual(json.loads(ds.build_chat_request(request(a), default))["max_tokens"], 8192)
+
+    def test_synthetic_150_second_headers_fit_only_explicit_300_second_deadline(self):
+        for limit in (120, 300):
+            clock = [0.0]
+            raw = wire(envelope())
+            connection = _Connection(_Response(raw))
+            def delayed_headers():
+                clock[0] = 150.0
+                return connection.response
+            connection.getresponse = delayed_headers
+            with self.subTest(limit=limit), patch.object(ds.time, "monotonic", side_effect=lambda: clock[0]), patch.object(ds.http.client, "HTTPSConnection", return_value=connection):
+                if limit == 120:
+                    with self.assertRaises(ModelBlocked) as stopped:
+                        ds._post_official(b"{}", KEY, limit)
+                    self.assertEqual(stopped.exception.diagnostic["phase"], "wait_headers")
+                else:
+                    self.assertEqual(ds._post_official(b"{}", KEY, limit), raw)
+            self.assertEqual(len(connection.requests), 1)
 
     def test_deadline_cancels_active_read_even_with_keepalive_bytes(self):
         response = _Response(b" ")

@@ -16,6 +16,7 @@ exit is not a semantic-accuracy certificate or proof of a real-model run.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from collections.abc import Sequence
 import importlib
 import re
@@ -30,6 +31,7 @@ from vulngym_agent.agents.model_runtime import (
 from vulngym_agent.agents.real_t2_producer import LocalStructuredT2Producer
 from vulngym_agent.closed_loop_cli import (
     EXIT_FATAL,
+    EXIT_INCOMPLETE,
     HARD_MAX_INPUT_LINE_BYTES,
     HARD_MAX_RECORDS,
     HARD_MAX_TASK_BYTES,
@@ -102,9 +104,10 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
     remains responsible for truthfully identifying custom adapters/test doubles.
     """
 
-    __slots__ = ("_closed", "_identity")
+    __slots__ = ("_closed", "_identity", "_execution_counts", "_model_errors", "_progress")
 
-    def __init__(self, *, backend: StructuredModelBackend, **configuration: Any) -> None:
+    def __init__(self, *, backend: StructuredModelBackend, progress: bool = False,
+                 **configuration: Any) -> None:
         backend = _validate_backend(backend)
         if configuration.get("whole_line_entry_snippets", True) is not True:
             raise ValueError("production requires whole-line entry snippets")
@@ -120,6 +123,19 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
         )
         self._identity = (backend.backend_id, backend.model_id)
         self._closed = False
+        self._execution_counts: Counter[str] = Counter()
+        self._model_errors: Counter[str] = Counter()
+        self._progress = progress
+
+    def execution_summary(self) -> dict[str, Any]:
+        """Count observed outcomes, independently of manual_review terminal state."""
+        return {
+            "execution_counts": {name: self._execution_counts[name] for name in (
+                "complete_candidate_tasks", "t1_report_tasks", "deferred_tasks",
+                "model_declared_defer_tasks", "model_problem_tasks", "non_success_model_calls")},
+            "model_error_counts": dict(sorted(self._model_errors.items())),
+            "model_call_counts_are_http_counts": False,
+        }
 
     @property
     def backend_id(self) -> str:
@@ -137,8 +153,31 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
         if self._closed:
             raise ClosedLoopBatchError("production batch is already closed")
         self._check_identity()
+        if self._progress:
+            _print_summary({"event": "task_started", "task_id": task.task_id}, stream=sys.stderr)
         outcome = super().run(task)
         self._check_identity()
+        self._execution_counts["complete_candidate_tasks"] += int(bool(outcome.production_outcomes))
+        self._execution_counts["t1_report_tasks"] += int(bool(outcome.validation_outcomes))
+        deferred = outcome.deferred_outcome
+        self._execution_counts["deferred_tasks"] += int(deferred is not None)
+        self._execution_counts["model_declared_defer_tasks"] += int(
+            deferred is not None and deferred.reason_code == "model_deferred")
+        sources = list(outcome.production_outcomes) + ([] if deferred is None else [deferred])
+        calls = {c.model_call_id: c for source in sources for c in source.model_calls}
+        problems = [c for c in calls.values() if c.status != "success"]
+        self._execution_counts["model_problem_tasks"] += int(bool(problems))
+        self._execution_counts["non_success_model_calls"] += len(problems)
+        for call in problems:
+            # Raw backend exception text is never available here. Still keep
+            # arbitrary custom error identifiers out of the public CLI summary.
+            code = call.error_code or "model_call_not_successful"
+            public_code = code if re.fullmatch(r"deepseek_[a-z_]{1,70}|backend_error|invalid_model_output|model_budget_exceeded", code) else "other_model_error"
+            self._model_errors[public_code] += 1
+        if self._progress:
+            _print_summary({"event": "task_finished", "task_id": task.task_id,
+                "workflow_status": outcome.status, "complete_candidate": bool(outcome.production_outcomes),
+                "model_problem": bool(problems)}, stream=sys.stderr)
         return outcome
 
     def finalize_batch(self) -> None:
@@ -156,6 +195,8 @@ def _parser() -> argparse.ArgumentParser:
         "--backend-factory", required=True,
         help="trusted installed Python module:factory returning StructuredModelBackend",
     )
+    parser.add_argument("--progress", action="store_true",
+                        help="write task start/end metadata to stderr; stdout remains one JSON result")
     return parser
 
 
@@ -187,6 +228,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             t1_max_file_bytes=args.t1_max_file_bytes,
             t1_max_package_bytes=args.t1_max_package_bytes,
             t1_max_package_files=args.t1_max_package_files,
+            progress=args.progress,
         )
         summary = _run_artifact_cli_batch(
             output_dir=args.output_dir,
@@ -210,8 +252,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     result.update(
         model_mode="configured_backend", backend_id=runner.backend_id, model_id=runner.model_id
     )
+    result.update(runner.execution_summary())
+    exit_code = summary.exit_code
+    if result["execution_counts"]["model_problem_tasks"]:
+        result["status"] = "incomplete"
+        result["execution_status"] = "model_execution_incomplete"
+        exit_code = EXIT_INCOMPLETE
+    else:
+        result["execution_status"] = "processed_not_quality_verified"
+    # Adapter metadata is bounded and provider-specific; do not call an
+    # arbitrary factory object's lookalike method or print its exception text.
+    from vulngym_agent.agents.deepseek_backend import DeepSeekV4ProBackend
+    if type(backend) is DeepSeekV4ProBackend:
+        result["last_transport_failure"] = backend.last_transport_failure()
+    result["exit_code"] = exit_code
     _print_summary(result, stream=sys.stdout)
-    return summary.exit_code
+    return exit_code
 
 
 if __name__ == "__main__":

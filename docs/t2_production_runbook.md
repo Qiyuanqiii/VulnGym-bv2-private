@@ -82,7 +82,8 @@ semantic_judge 的 select 只允许本次控制器签发的候选 ID；不得自
 - `entries_written` / 内部 `entries.jsonl` **仍只计 finalized**。`manual_review` 的完整候选保留在生产 sidecar，与真实 T1 报告关联；不会因为内部 Entry 文件为零行就删除这些候选。
 - 用 [submission_prediction runbook](submission_prediction_runbook.md) 的固定 digest 投影流程，导出完整候选/报告对供交验；投影不重跑 T1、不把候选改为正确、不授予人工验证标志。
 - 缺字段或模型 defer 不伪装成完整 Entry；保留 deferred 的 stage、reason_code、missing_information 和可用调用记录。模型/工具失败的原因也必须查阅，不能一律解释为“输入证据不足”。
-- 退出码 0 表示本次批处理按允许状态完成，不证明语义正确、人工已审或真实模型被使用；1 表示失败/输入错误，或显式 `--require-all-finalized` 下还有人工复核；2 表示配置、I/O、整批字节上限或发布前置失败。
+- 新生产CLI退出码0表示按允许状态处理且未记录非成功模型调用，不证明语义正确或人工已审；1包括模型调用问题、失败/输入错误，或显式`--require-all-finalized`下还有人工复核；2表示配置、I/O、整批字节上限或发布前置失败。`execution_counts`把完整候选、T1报告、正常defer和模型问题单独计数；本地模型记录数量不等于HTTP请求数。
+- `--progress`向stderr输出任务开始/结束事件，stdout保留单个JSON；DeepSeek直接传输的失败阶段与有界时间信息可在`last_transport_failure`中查看。旧的JSON/replay不补写字段，不改变原终态和摘要。
 
 ## 5. 本次验证与剩余验收
 

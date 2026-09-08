@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from tests import test_real_t2_producer as fixture
-from vulngym_agent.agents.model_runtime import ReplayStructuredModelBackend
+from vulngym_agent.agents.model_runtime import ModelBlocked, ReplayStructuredModelBackend
 from vulngym_agent.closed_loop_cli import (
     ClosedLoopBatchError,
     ExactReplayBackend,
@@ -224,6 +224,49 @@ class ProductionCompositionTests(unittest.TestCase):
                          "production_configuration_or_io_error")
         self.assertNotIn("secret-token", stdout.getvalue())
         self.assertFalse((self.fixture.root / "output").exists())
+
+    def test_cli_model_timeout_is_incomplete_even_with_preserved_manual_review(self):
+        def blocked(request):
+            raise ModelBlocked("deepseek_timeout")
+        self.backend.invoke = blocked
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(production, "load_backend_factory", return_value=self.backend), redirect_stdout(stdout), redirect_stderr(stderr):
+            code = production.main(self.cli_arguments() + ["--progress"])
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["status"], "incomplete")
+        self.assertEqual(summary["execution_status"], "model_execution_incomplete")
+        self.assertEqual(summary["manual_review"], 1)
+        self.assertEqual(summary["execution_counts"]["model_declared_defer_tasks"], 0)
+        self.assertEqual(summary["execution_counts"]["model_problem_tasks"], 1)
+        self.assertEqual(summary["execution_counts"]["complete_candidate_tasks"], 0)
+        self.assertEqual(summary["model_error_counts"], {"deepseek_timeout": 1})
+        self.assertFalse(summary["model_call_counts_are_http_counts"])
+        self.assertTrue((self.fixture.root / "output" / "deferred.jsonl").is_file())
+        self.assertEqual([json.loads(s)["event"] for s in stderr.getvalue().splitlines()],
+                         ["task_started", "task_finished"])
+        self.assertNotIn(str(self.fixture.root), stdout.getvalue() + stderr.getvalue())
+
+    def test_cli_valid_defer_is_not_a_transport_failure(self):
+        self.backend.invoke = lambda request: {"action": "defer", "critical_mode": None}
+        stdout = io.StringIO()
+        with patch.object(production, "load_backend_factory", return_value=self.backend), redirect_stdout(stdout):
+            code = production.main(self.cli_arguments())
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["execution_counts"]["model_declared_defer_tasks"], 1)
+        self.assertEqual(summary["execution_counts"]["model_problem_tasks"], 0)
+        self.assertEqual(summary["execution_status"], "processed_not_quality_verified")
+
+    def test_cli_complete_candidate_count_does_not_require_finalized(self):
+        stdout = io.StringIO()
+        with patch.object(production, "load_backend_factory", return_value=self.backend), redirect_stdout(stdout):
+            code = production.main(self.cli_arguments())
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(summary["execution_counts"]["complete_candidate_tasks"], 1)
+        self.assertEqual(summary["execution_counts"]["t1_report_tasks"], 1)
+        self.assertEqual(summary["finalized"], 0)
 
     def test_cli_manual_review_is_not_success_in_opt_in_strict_mode(self):
         stdout = io.StringIO()

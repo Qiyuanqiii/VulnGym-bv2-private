@@ -58,6 +58,12 @@ Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
 
 ## 4. 结果怎么看、怎么交
 
+2026-09-09工程更新：新生产CLI另外显示`execution_counts`，区分至少有一份完整候选的任务、已有T1报告、defer和模型调用问题。存在非成功模型调用时，`status=incomplete`、`execution_status=model_execution_incomplete`、退出1；正常语义defer仍可退出0，不强制finalized。旧replay和历史运行JSON保持不变。
+
+添加`--progress`可将任务开始/结束信息输出到stderr，stdout仍为一个JSON结果。DeepSeek直接调用失败时可附带连接/发送/等响应头/读响应体的`last_transport_failure`，不输出key、prompt或服务端原文；历史超时没有这些字段，不能事后猜补。
+
+默认单请求等待仍为120秒，可显式设置`$env:VULNGYM_DEEPSEEK_TIMEOUT_SECONDS='300'`，上限300秒，无自动重试。它改变配置身份，实际运行需重新固定清单及授权，不能直接使用旧的120秒限定批次启动器。这不是已通过真实复测的超时修复。
+
 | 结果 | 含义 |
 | --- | --- |
 | `manual_review`，有完整候选与 T1 报告 | 可交给评审复核；不等于字段已正确或人工已审核 |

@@ -1,6 +1,6 @@
 # T2 报告到数据的系统设计（T1 辅助）
 
-> 2026-09-07设计源稿，目标是简短可读的交验说明；尚非最终PDF/演示。
+> 2026-09-09设计源稿；另有[三页交付简报](T2_DELIVERY_BRIEF.md)及其PDF，明确工程/质量边界，演示录像仍未完成。
 > 用户登记T2，双题保留但主次明确。适用目标、验收和限制见
 > [当前任务参考](../current_task_reference.md)。
 
@@ -16,7 +16,7 @@
   → [辅助T1 → 有依据的有限修正 → 重新验证]
 ```
 
-这是交付目标；**历史Lane A CLI依赖exact replay；新通用入口和DeepSeek V4 Pro适配器已实现，但真实模型连通、新报告实跑和质量证据仍是#12/#97缺口**。
+历史Lane A CLI依赖exact replay；新通用入口和DeepSeek V4 Pro适配器已经真实调用。既有两条开发输入有1完整候选/T1、1defer；两条首次新输入均语义defer，最新同输入诊断因传输超时未取得语义结果。**新输入上的稳定完整产出与质量证据仍是#12/#97缺口**，不是接口从未连通。
 现有40个完整候选/报告对不等于40条已确认为正确的数据。缺失字段应保留证据和原因，
 不能为凑schema编造值；完整记录与partial/deferred记录须分流。
 
@@ -29,7 +29,7 @@
 `StructuredModelBackend`，不要求预编 response；共享本地执行层但采用独立的批次关闭策略。
 旧入口仍强制 ExactReplayBackend 完整消费。配置、输出计数及构造测试边界见
 [生产 runbook](../t2_production_runbook.md)；用户选择的具体适配器为
-[DeepSeek V4 Pro](../deepseek_t2_setup.md)，当前仅完成离线测试，未实际调用付费服务。
+[DeepSeek V4 Pro](../deepseek_t2_setup.md)，真实调用与版本分别见对应运行回执，不混为同一批结果。
 
 - plan选择analyze/defer及critical mode。
 - 控制器读取本地公告、引用/patch和Git对象，提取字段、定位有界代码候选、检查schema。
