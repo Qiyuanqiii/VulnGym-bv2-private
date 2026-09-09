@@ -111,6 +111,7 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
 
     def __init__(self, *, backend: StructuredModelBackend, progress: bool = False,
                  user_results: T2UserResults | None = None,
+                 context_followup: bool = False,
                  **configuration: Any) -> None:
         backend = _validate_backend(backend)
         if configuration.get("whole_line_entry_snippets", True) is not True:
@@ -124,6 +125,7 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
             include_reflection_context=True, evidence_first_planning=True,
             include_semantic_context=True,
             include_reflection_defer_details=True,
+            context_followup=context_followup,
         )
         self._identity = (backend.backend_id, backend.model_id)
         self._closed = False
@@ -210,6 +212,8 @@ def _parser() -> argparse.ArgumentParser:
                         help="write task start/end metadata to stderr; stdout remains one JSON result")
     parser.add_argument("--results-dir", type=Path,
                         help="new separate directory for all complete T2 candidates, actual T1 reports and deferrals")
+    parser.add_argument("--context-followup", action="store_true",
+                        help="allow one requested source supplement and one extra semantic call, within existing budgets")
     return parser
 
 
@@ -247,6 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             t1_max_package_files=args.t1_max_package_files,
             progress=args.progress,
             user_results=user_results,
+            context_followup=args.context_followup,
         )
         summary = _run_artifact_cli_batch(
             output_dir=args.output_dir,
@@ -276,7 +281,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_FATAL
     result = summary.to_dict()
     result.update(
-        model_mode="configured_backend", backend_id=runner.backend_id, model_id=runner.model_id
+        model_mode="configured_backend", backend_id=runner.backend_id, model_id=runner.model_id,
+        context_followup=args.context_followup,
     )
     result.update(runner.execution_summary())
     exit_code = summary.exit_code

@@ -57,6 +57,7 @@ _MODEL_STAGE_GRAMMAR = {
     "generate": ("plan", "semantic_judge", "reflection"),
     "repair": ("repair", "reflection"),
 }
+_CONTEXT_FOLLOWUP_STAGES = ("plan", "semantic_judge", "semantic_judge", "reflection")
 
 
 class ProducerContextError(RuntimeError):
@@ -270,6 +271,7 @@ class ProducerAttemptController:
 
     __slots__ = (
         "_budget",
+        "_context_followup_requested",
         "_finalization_error",
         "_initial_budget_events",
         "_lock",
@@ -333,6 +335,7 @@ class ProducerAttemptController:
         self.mode = mode
         self.policy_scope = tool_runtime.policy_scope
         self._budget = budget
+        self._context_followup_requested = False
         self._initial_budget_events = budget.events
         self._tool_runtime = tool_runtime
         self._model_runtime = model_runtime
@@ -380,7 +383,7 @@ class ProducerAttemptController:
 
         with self._lock:
             self._require_open()
-            grammar = _MODEL_STAGE_GRAMMAR[self.mode]
+            grammar = self._model_grammar()
             observed = tuple(record.stage for record in self._model_runtime.records)
             if observed != grammar[: len(observed)]:
                 raise ProducerContextError(
@@ -392,7 +395,22 @@ class ProducerAttemptController:
                     "model stage does not follow the context grammar; "
                     f"expected {expected!r}"
                 )
-            return self._model_runtime.call(model_call_id, stage, payload)
+            result = self._model_runtime.call(model_call_id, stage, payload)
+            contract = payload.get("context_request_contract")
+            if (self.mode == "generate" and observed == ("plan",) and stage == "semantic_judge"
+                    and isinstance(contract, Mapping)
+                    and type(contract.get("rounds_remaining")) is int
+                    and contract["rounds_remaining"] == 1
+                    and result.status == "success" and isinstance(result.response, Mapping)
+                    and result.response.get("action") == "request_context"):
+                # Only an advertised, explicitly requested supplement extends
+                # the ordinary three-stage flow. Never permit a third judgment.
+                self._context_followup_requested = True
+            return result
+
+    def _model_grammar(self) -> tuple[str, ...]:
+        return (_CONTEXT_FOLLOWUP_STAGES if self._context_followup_requested
+                else _MODEL_STAGE_GRAMMAR[self.mode])
 
     def _resolve_artifact(self, ref: ArtifactRef) -> ToolArtifact:
         """Resolve only an exact artifact capability issued by this context."""
@@ -428,7 +446,7 @@ class ProducerAttemptController:
         tool_calls = tuple(record.to_tool_call_record() for record in tool_transcript.records)
         model_calls = tuple(model_transcript.records)
         stages = tuple(record.stage for record in model_calls)
-        grammar = _MODEL_STAGE_GRAMMAR[self.mode]
+        grammar = self._model_grammar()
         if stages != grammar[: len(stages)]:
             raise ProducerContextLedgerMismatch(
                 "model calls do not form a valid context-stage prefix"

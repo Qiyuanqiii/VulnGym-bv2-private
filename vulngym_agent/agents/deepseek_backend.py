@@ -28,7 +28,7 @@ from vulngym_agent.agents.model_runtime import ModelBlocked, ModelRequest, struc
 MODEL_ID = "deepseek-v4-pro"
 API_HOST = "api.deepseek.com"
 API_PATH = "/chat/completions"
-PROMPT_VERSION = "t2-json-v5"
+PROMPT_VERSION = "t2-json-v6"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _T2_STAGE_TOKEN_LIMITS = (("plan", 2048), ("semantic_judge", 16384),
@@ -89,7 +89,26 @@ This is your unverified self-report, not a human review or a factual verdict.
 If deferring for a relationship, identify the absent connection, missing range,
 or conflict in the supplied code/advisory, rather than citing an unassessed flag
 as a finding. Never invent a connection or assume an omitted check is absent.
-On select, OMIT defer_details. Contract_version=1 retains the base defer shape.""",
+On select, OMIT defer_details. Contract_version=1 retains the base defer shape.
+Without payload.context_request_contract, select/defer are the only actions.
+Only when that contract is advertised and its rounds_remaining is greater than
+zero may you instead request bounded extra context. Ask only when extra code
+could resolve a specific missing fact; select/defer directly when the supplied
+evidence already supports that choice. The exact request shape is
+{"action":"request_context","requests":[{"candidate_id":"<issued ID>",
+"kind":"window","reason":"<specific missing fact, 1-200 characters>"}]}.
+Use 1-2 unique requests, following the advertised constraints. Each candidate_id
+must be an existing critical or entry candidate ID in the contract's candidate_ids.
+The only kinds are window and references. A window may target either role;
+references is allowed only when the chosen candidate supplies a usable symbol.
+Never invent a symbol. No other fields, paths, commands, code or selection
+metadata are allowed; reason is a brief plain-language gap, not hidden reasoning.
+Reference hits are identifier occurrences, not proven calls, dataflow or semantic
+relationships. On the follow-up request, use payload.semantic_context.followup:
+its requests, source_contexts, evidence and status describe what was retrieved,
+not exhaustive coverage. Read omissions, including omitted_path_count. When
+rounds_remaining is zero, you MUST select/defer using the supplied evidence;
+request_context and repeated context requests are forbidden.""",
     "reflection": """Self-check payload.review_context.candidate against the
 supplied review evidence. This is producer self-review, not independent or human
 verification. Check that the claimed version, selected roles and metadata are
@@ -181,6 +200,9 @@ def build_chat_request(request: ModelRequest, settings: DeepSeekSettings) -> byt
     if request.stage == "semantic_judge" and request.payload.get("contract_version") == 2:
         if not isinstance(request.payload.get("semantic_context"), Mapping) or not isinstance(request.payload.get("defer_contract"), Mapping):
             raise ModelBlocked("deepseek_semantic_context_missing")
+    if request.stage == "semantic_judge" and "context_request_contract" in request.payload:
+        if not isinstance(request.payload["context_request_contract"], Mapping):
+            raise ModelBlocked("deepseek_context_request_contract_invalid")
     if request.stage == "reflection":
         context = request.payload.get("review_context")
         if not isinstance(context, Mapping) or not isinstance(context.get("candidate"), Mapping):

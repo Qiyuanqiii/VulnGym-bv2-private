@@ -12,6 +12,7 @@ The model wire contracts are intentionally small and exact:
 * ``plan`` -> ``{"action": "analyze" | "defer", "critical_mode": ...}``
 * ``semantic_judge`` -> an action, two issued candidate IDs, and bounded
   ``project``/title/category strings
+  (opt-in: one ``request_context`` response before the final select/defer)
 * ``repair`` -> ``{"action": "apply" | "defer", "repair_fields": [...]}``
 * ``reflection`` -> ``{"action": "emit" | "defer"}``
 
@@ -53,6 +54,7 @@ from vulngym_agent.tools import ToolResult
 from .model_runtime import ModelResult
 from .t2_inputs import T2TaskInput, T2TaskInputV2, parse_t2_task_input
 from . import t2_semantic_context as semantic_context_tools
+from . import t2_context_followup as context_followup_tools
 
 
 _MAX_SEMANTIC_CANDIDATES = 64
@@ -294,13 +296,14 @@ class _Attempt:
 class LocalStructuredT2Producer:
     """Produce formal candidates through a controller-owned execution facade."""
 
-    __slots__ = ("_include_reflection_context", "_evidence_first_planning", "_include_semantic_context", "_include_reflection_defer_details")
+    __slots__ = ("_include_reflection_context", "_evidence_first_planning", "_include_semantic_context", "_include_reflection_defer_details", "_context_followup")
 
     def __init__(
         self, *, include_reflection_context: bool = False,
         evidence_first_planning: bool = False,
         include_semantic_context: bool = False,
         include_reflection_defer_details: bool = False,
+        context_followup: bool = False,
     ) -> None:
         if type(include_reflection_context) is not bool:
             raise ValueError("include_reflection_context must be boolean")
@@ -318,6 +321,9 @@ class LocalStructuredT2Producer:
         if include_reflection_defer_details and not (include_reflection_context and include_semantic_context):
             raise ValueError("reflection defer details require reflection and semantic context")
         self._include_reflection_defer_details = include_reflection_defer_details
+        if type(context_followup) is not bool or (context_followup and not include_semantic_context):
+            raise ValueError("context followup requires semantic context and a boolean option")
+        self._context_followup = context_followup
 
     def _reflection_decision(self, result: ModelResult, evidence_ids: Sequence[str], *, repaired: bool = False) -> None:
         keys = frozenset({"action"})
@@ -648,6 +654,7 @@ class LocalStructuredT2Producer:
         advisory_text: str, choices: Sequence[_CriticalChoice | _EntryChoice],
         diff_context: Sequence[Mapping[str, Any]], diff_call_ids: Mapping[str, str],
         changed_path_count: int, advisory_call_id: str,
+        blob_cache: dict[str, tuple[str, str, str]] | None = None,
     ) -> dict[str, Any]:
         """Read only pinned declared files; retain exactly the context sent to the model."""
         advisory_id = run.evidence_id("SEMANTIC-ADVISORY")
@@ -668,7 +675,7 @@ class LocalStructuredT2Producer:
                 commit=fix_commit, tool_call_id=diff_call_ids[str(diff["file"])],
             ))
             diffs.append(row)
-        blobs: dict[str, tuple[str, str, str]] = {}
+        blobs: dict[str, tuple[str, str, str]] = {} if blob_cache is None else blob_cache
         blocks: list[dict[str, Any]] = []
         coverage = []
         used_chars = 0
@@ -744,6 +751,66 @@ class LocalStructuredT2Producer:
                 "model_task": "assess_supplied_code_and_advisory_not_presence_of_prior_approval",
             },
         }
+
+    def _followup_context(
+        self, run: _Attempt, response: Mapping[str, Any], *,
+        choices: Mapping[str, Mapping[str, Any]], context: Mapping[str, Any],
+        repo_ref: str, vulnerable_commit: str, declared_paths: Sequence[str],
+        blob_cache: dict[str, tuple[str, str, str]],
+    ) -> dict[str, Any]:
+        """Satisfy one explicit context request using the existing pinned reader."""
+        try:
+            requests = context_followup_tools.validate_requests(response, choices)
+        except ValueError:
+            raise _Stop("semantic_judge", "invalid_context_request", (
+                "context requests must use issued candidates and the advertised limits",)) from None
+        paths = list(dict.fromkeys(str(choices[row["candidate_id"]]["location"]["file"])
+                                   for row in requests))
+        if any(row["kind"] == "references" for row in requests):
+            paths = list(dict.fromkeys((*paths, *declared_paths)))
+        if any(path not in declared_paths for path in paths):
+            raise _Stop("semantic_judge", "invalid_context_request", (
+                "context is limited to the task's declared source paths",))
+        selected_paths = paths[:context_followup_tools.MAX_FILES]
+        for path in selected_paths:
+            if path in blob_cache:
+                continue
+            result = run.tool_call("git_show", {"repo": repo_ref, "commit": vulnerable_commit,
+                                   "path": path}, stage="semantic_judge")
+            payload = run.artifact_payload(result, expected_kind="t2.git_blob")
+            text = payload.get("text")
+            if (payload.get("commit") != vulnerable_commit or payload.get("path") != path
+                    or not isinstance(text, str)
+                    or payload.get("text_sha256") != hashlib.sha256(text.encode("utf-8")).hexdigest()):
+                raise _Stop("semantic_judge", "invalid_context_evidence", (
+                    "supplementary context did not match its pinned blob",))
+            blob_cache[path] = (text, payload["text_sha256"], result.tool_call_id)
+        blocks = context_followup_tools.collect_blocks(
+            requests, choices, {path: blob_cache[path][0] for path in selected_paths},
+            context["source_contexts"],
+        )
+        if not blocks:
+            raise _Stop("semantic_judge", "context_followup_empty", (
+                "requested context yielded no new complete source lines within declared paths and limits",
+                "context_requests:" + _canonical_json(requests),))
+        for index, block in enumerate(blocks, 1):
+            _, digest, call_id = blob_cache[block["file"]]
+            block.update(evidence_id=run.evidence_id(f"FOLLOWUP-SOURCE-{index:03d}"),
+                         commit=vulnerable_commit, blob_sha256=digest, tool_call_id=call_id)
+            run.evidence.append(EvidenceItem(
+                evidence_id=block["evidence_id"], report_id=run.task.report_id, entry_id=run.task.entry_id,
+                source_type="source", snippet=_canonical_json(block), commit=vulnerable_commit,
+                file=block["file"], line_start=block["line_start"], line_end=block["line_end"],
+                tool_call_id=call_id,
+            ))
+        return {**context, "followup": {
+            "round": 1, "requests": requests, "source_contexts": blocks,
+            "source_chars": sum(len(block["text"]) for block in blocks),
+            "source_files_considered": len(selected_paths),
+            "omitted_path_count": len(paths) - len(selected_paths),
+            "status": "bounded_context_added_not_exhaustive",
+            "scope": "declared_paths_pinned_version_occurrences_not_proven_relationships",
+        }}
 
     def _generate(
         self, run: _Attempt, task_input: T2TaskInput
@@ -1084,6 +1151,7 @@ class LocalStructuredT2Producer:
             )
 
         semantic_context = None
+        context_blobs: dict[str, tuple[str, str, str]] = {}
         if self._include_semantic_context:
             # Reuse the already-loaded advisory, not the extracted 2,000-character
             # summary. Each backend call is stateless and needs its own context.
@@ -1095,6 +1163,7 @@ class LocalStructuredT2Producer:
                 run, repo_ref=repo_ref, vulnerable_commit=vulnerable_commit, fix_commit=fix_commit,
                 advisory_text=full_advisory_text, choices=(*critical_choices, *entry_choices), diff_context=diff_context,
                 diff_call_ids=diff_call_ids, changed_path_count=len(changed_paths), advisory_call_id=advisory.tool_call_id,
+                blob_cache=context_blobs if self._context_followup else None,
             )
         semantic_payload = {
                 "contract_version": 1,
@@ -1142,7 +1211,28 @@ class LocalStructuredT2Producer:
                                     *(item["evidence_id"] for item in semantic_context["source_contexts"])]
             semantic_payload.update(contract_version=2, semantic_context=semantic_context,
                                     defer_contract=semantic_context_tools.defer_contract(context_evidence_ids))
+        context_choices = {choice.issued_id: choice.model_value() for choice in (*critical_choices, *entry_choices)}
+        if self._context_followup:
+            semantic_payload["context_request_contract"] = context_followup_tools.request_contract(list(context_choices))
         semantic_result = run.model_call("semantic_judge", semantic_payload)
+        if (self._context_followup and isinstance(semantic_result.response, Mapping)
+                and semantic_result.response.get("action") == "request_context"):
+            semantic_context = self._followup_context(
+                run, semantic_result.response, choices=context_choices, context=semantic_context,
+                repo_ref=repo_ref, vulnerable_commit=vulnerable_commit,
+                declared_paths=task_input.hints.source_paths, blob_cache=context_blobs,
+            )
+            context_evidence_ids.extend(block["evidence_id"]
+                                        for block in semantic_context["followup"]["source_contexts"])
+            semantic_payload.update(
+                semantic_context=semantic_context,
+                context_request_contract=context_followup_tools.request_contract(list(context_choices), rounds_remaining=0),
+                defer_contract=semantic_context_tools.defer_contract(context_evidence_ids),
+            )
+            semantic_result = run.model_call("semantic_judge", semantic_payload)
+            if isinstance(semantic_result.response, Mapping) and semantic_result.response.get("action") == "request_context":
+                raise _Stop("semantic_judge", "context_followup_exhausted", (
+                    "one supplementary read round is complete; unresolved context requires review",))
         semantic_keys = frozenset({"action", "critical_candidate_id", "entry_candidate_id", "project",
                                    "vuln_title", "vuln_category_l1", "vuln_category_l2"})
         if (semantic_context is not None and isinstance(semantic_result.response, Mapping)

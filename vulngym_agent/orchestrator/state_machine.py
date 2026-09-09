@@ -301,7 +301,9 @@ def _formalize_producer_draft(
 
     if type(draft) is ProductionDraft:
         expected_stages = _COMPLETE_MODEL_STAGES[mode]
-        if projection.model_stages != expected_stages:
+        followup_complete = (mode == "generate" and projection.model_stages ==
+                             ("plan", "semantic_judge", "semantic_judge", "reflection"))
+        if projection.model_stages != expected_stages and not followup_complete:
             raise ValueError(
                 "completed producer draft requires the full model-stage grammar"
             )

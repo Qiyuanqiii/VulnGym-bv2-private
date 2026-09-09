@@ -196,7 +196,7 @@ class SemanticContextIntegrationTests(unittest.TestCase):
             self.assertIn("NOT ASSESSED by the collector, not disproved", prompt)
             self.assertIn("neither justify selection nor, by themselves, justify deferral", prompt)
             self.assertIn("not a verified relationship", prompt)
-        self.assertEqual(ds.PROMPT_VERSION, "t2-json-v5")
+        self.assertEqual(ds.PROMPT_VERSION, "t2-json-v6")
 
     def test_full_loaded_advisory_not_already_truncated_summary(self):
         path = self.fixture.package_root / "advisories/item.json"
