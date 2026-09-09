@@ -2,6 +2,35 @@
 
 2026-09-10。主T2、辅T1。当前是可运行的工程候选，不是“高质量全部验收通过”。本页取代旧包之间反复切换的启动建议；旧运行、旧ZIP和旧视频仍保留原始版本。
 
+## 当前源码：跑完直接拿到结果
+
+准备好获准的任务、公告资料包、仓库映射和模型配置后，当前源码支持在生产命令中加 `--results-dir`。示例路径需换成你的实际资料；凭证按[模型配置说明](docs/deepseek_t2_setup.md)配置，不写进命令或Git。
+
+```powershell
+python -B -m vulngym_agent.t2_production_cli `
+  --tasks D:\T2-input\tasks.jsonl `
+  --repo-map D:\T2-input\repos.json `
+  --package-root D:\T2-input\package `
+  --backend-factory vulngym_agent.agents.deepseek_backend:create_backend `
+  --output-dir D:\T2-output\run-001 `
+  --results-dir D:\T2-output\run-001-results `
+  --max-records 2 --max-llm-calls 3 --max-tool-calls 80 `
+  --max-repair-iterations 0 --progress
+```
+
+两个输出目录都选新路径；results目录须使用绝对路径、父目录已存在。模型调用预算按任务生效；实际费用仍由已授权的服务限额控制。运行时仍需有效凭证和资料发送授权。
+
+直接打开 `run-001-results`：
+
+- `entries.jsonl`：全部终态完整T2候选，保持 `verify=0`，不要求T1已finalized；T1报告缺失也不丢弃完整候选。
+- `validation.jsonl`：真实存在的T1报告；没有报告的任务不会补造报告。
+- `deferred.jsonl`：未形成完整候选等任务的已有弃答阶段、原因及待补字段。
+- `summary.json`：逐题状态、结果所在行及批次是否正常结束。异常留下的部分结果不能当作完整批次。
+
+内部 `run-001/entries.jsonl` 仍保留原“仅finalized”含义；面向用户的候选在独立results目录，无需另手填digest执行投影。这个参数是当前源码的增量，旧v3-r1 ZIP未包含，不重写旧包。它改善结果可见性，不提高或证明模型准确率。
+
+当前优先级及同类实现参考见[产品主线](docs/t2_product_focus.md)：T2产出、按需补读和实际模型比较优先，非必要全量测试及界面扩建后排。
+
 ## 1. 推荐交付形式
 
 v3-r1已通过实际导出验收：[包摘要与172通过/1可选跳过的回执](docs/t2_submission_v3_receipt.md)。唯一跳过项已在同一导出源码、有可选库的解释器中补测通过；不混计成额外独立测试。

@@ -8,8 +8,9 @@ credentials nor starts a service, and importing it performs no model calls.
 
 The output is the existing evidence-bound batch format. ``entries.jsonl``
 contains only T1-finalized entries, not every complete T2 candidate. Complete
-manual-review candidates and their actual T1 reports remain in batch artifacts
-and can be projected using ``submission_prediction_cli``. A successful batch
+manual-review candidates and their actual T1 reports remain in batch artifacts.
+``--results-dir`` also writes operator-facing T2 candidates, T1 reports and
+deferrals directly, without requiring a separate projection command. A successful batch
 exit is not a semantic-accuracy certificate or proof of a real-model run.
 """
 
@@ -19,6 +20,7 @@ import argparse
 from collections import Counter
 from collections.abc import Sequence
 import importlib
+from pathlib import Path
 import re
 import sys
 from typing import Any
@@ -49,6 +51,7 @@ from vulngym_agent.closed_loop_cli import (
     load_trusted_repo_map,
 )
 from vulngym_agent.orchestrator import ClosedLoopOutcome, Limits, RunTask
+from vulngym_agent.t2_user_results import T2UserResults
 
 
 _FACTORY_RE = re.compile(
@@ -104,9 +107,10 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
     remains responsible for truthfully identifying custom adapters/test doubles.
     """
 
-    __slots__ = ("_closed", "_identity", "_execution_counts", "_model_errors", "_progress")
+    __slots__ = ("_closed", "_identity", "_execution_counts", "_model_errors", "_progress", "_user_results")
 
     def __init__(self, *, backend: StructuredModelBackend, progress: bool = False,
+                 user_results: T2UserResults | None = None,
                  **configuration: Any) -> None:
         backend = _validate_backend(backend)
         if configuration.get("whole_line_entry_snippets", True) is not True:
@@ -126,6 +130,7 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
         self._execution_counts: Counter[str] = Counter()
         self._model_errors: Counter[str] = Counter()
         self._progress = progress
+        self._user_results = user_results
 
     def execution_summary(self) -> dict[str, Any]:
         """Count observed outcomes, independently of manual_review terminal state."""
@@ -152,11 +157,15 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
     def run(self, task: RunTask) -> ClosedLoopOutcome:
         if self._closed:
             raise ClosedLoopBatchError("production batch is already closed")
+        if self._user_results is not None:
+            self._user_results.check_writable()
         self._check_identity()
         if self._progress:
             _print_summary({"event": "task_started", "task_id": task.task_id}, stream=sys.stderr)
         outcome = super().run(task)
         self._check_identity()
+        if self._user_results is not None:
+            self._user_results.record(outcome)
         self._execution_counts["complete_candidate_tasks"] += int(bool(outcome.production_outcomes))
         self._execution_counts["t1_report_tasks"] += int(bool(outcome.validation_outcomes))
         deferred = outcome.deferred_outcome
@@ -182,6 +191,8 @@ class LocalProductionTaskRunner(_LocalTaskExecution):
 
     def finalize_batch(self) -> None:
         self._check_identity()
+        if self._user_results is not None:
+            self._user_results.check_writable()
         self._closed = True
 
 
@@ -197,11 +208,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--progress", action="store_true",
                         help="write task start/end metadata to stderr; stdout remains one JSON result")
+    parser.add_argument("--results-dir", type=Path,
+                        help="new separate directory for all complete T2 candidates, actual T1 reports and deferrals")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    user_results: T2UserResults | None = None
     try:
         max_input_line_bytes = _positive_bounded(
             "max_input_line_bytes", args.max_input_line_bytes, HARD_MAX_INPUT_LINE_BYTES
@@ -221,6 +235,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_tool_calls=args.max_tool_calls,
             max_repair_iterations=args.max_repair_iterations,
         )
+        if args.results_dir is not None:
+            user_results = T2UserResults(args.results_dir, protected_paths=(
+                args.output_dir, tasks_path, repo_map_path, package_root, *repo_map.values()))
         backend = load_backend_factory(args.backend_factory)
         runner = LocalProductionTaskRunner(
             package_root=package_root, repo_map=repo_map, backend=backend, limits=limits,
@@ -229,6 +246,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             t1_max_package_bytes=args.t1_max_package_bytes,
             t1_max_package_files=args.t1_max_package_files,
             progress=args.progress,
+            user_results=user_results,
         )
         summary = _run_artifact_cli_batch(
             output_dir=args.output_dir,
@@ -241,9 +259,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             require_all_finalized=args.require_all_finalized,
         )
     except TaskInputLimitExceeded:
+        if user_results is not None:
+            user_results.abort()
         _print_summary(_fatal_summary("task_input_limit_exceeded"), stream=sys.stdout)
         return EXIT_FATAL
+    except KeyboardInterrupt:
+        if user_results is not None:
+            user_results.abort()
+        raise
     except Exception:
+        if user_results is not None:
+            user_results.abort()
         # Provider exceptions and import errors can contain paths, prompt text,
         # endpoint addresses or credentials. They are not public output.
         _print_summary(_fatal_summary("production_configuration_or_io_error"), stream=sys.stdout)
@@ -269,6 +295,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         if completion_failure is not None:
             result["last_completion_failure"] = completion_failure
     result["exit_code"] = exit_code
+    if user_results is not None:
+        try:
+            user_results.finish(result)
+            result["user_results_written"] = True
+        except OSError:
+            user_results.abort()
+            result.update(user_results_written=False, error_code="user_results_write_failed",
+                          status="incomplete", exit_code=EXIT_FATAL)
+            exit_code = EXIT_FATAL
     _print_summary(result, stream=sys.stdout)
     return exit_code
 
