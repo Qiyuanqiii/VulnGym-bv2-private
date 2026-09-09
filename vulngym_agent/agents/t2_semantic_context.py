@@ -67,11 +67,16 @@ def prioritize_context_candidates(
     return order
 
 
-def source_window(text: str, path: str, line: int, *, max_chars: int = MAX_BLOCK_CHARS) -> dict[str, Any]:
+def source_window(
+    text: str, path: str, line: int, *, max_chars: int = MAX_BLOCK_CHARS,
+    companion_lines: Sequence[int] = (),
+) -> dict[str, Any]:
     """Select a complete small Python function or a clearly labelled line window.
 
-    Other languages, invalid Python and large functions use +/-24 source lines;
+    Other languages, invalid Python and large functions start with +/-24 lines;
     no regex-based claim of complete function or call-graph reconstruction.
+    A nearby opposite-role anchor may extend that window, if its entire interval
+    fits the same budget. Proximity is a retrieval hint, never a semantic edge.
     Whole-line trimming keeps the anchor visible, except an overlong anchor is
     explicitly character-truncated. All returned line numbers are exact.
     """
@@ -80,6 +85,10 @@ def source_window(text: str, path: str, line: int, *, max_chars: int = MAX_BLOCK
     lines = text.splitlines()
     if not 1 <= line <= len(lines):
         raise ValueError("source_anchor_out_of_range")
+    if (isinstance(companion_lines, (str, bytes, Mapping))
+            or not isinstance(companion_lines, Sequence)
+            or any(type(n) is not int or not 1 <= n <= len(lines) for n in companion_lines)):
+        raise ValueError("invalid_companion_anchors")
     start, end = max(1, line - 24), min(len(lines), line + 24)
     function = None
     if path.endswith(".py") and len(text) <= 256 * 1024:
@@ -99,16 +108,30 @@ def source_window(text: str, path: str, line: int, *, max_chars: int = MAX_BLOCK
                     start, end = first, last
         except (SyntaxError, ValueError, RecursionError):
             pass  # Source is data; unavailable parsing retains labelled windows.
+    companion = None
+    nearby = sorted(set(companion_lines) - {line}, key=lambda n: (abs(n - line), n))
+    # When a real parser gives us a function boundary, do not cross it merely
+    # to join two nearby anchors. Other languages retain explicit line windows.
+    nearby = [n for n in nearby if abs(n - line) < 120 and
+              (function is None or function["line_start"] <= n <= function["line_end"])]
+    if nearby:
+        low, high = sorted((line, nearby[0]))
+        if len("\n".join(lines[low - 1:high])) <= max_chars:
+            companion = nearby[0]
+            start, end = min(start, low), max(end, high)
+    required_start, required_end = sorted((line, companion if companion is not None else line))
     original_start, original_end = start, end
     # Include a candidate line even if decorators or unusual source put it at an edge.
     selected = "\n".join(lines[start - 1:end])
     while len(selected) > max_chars and start < end:
-        if end - line >= line - start and end > line:
+        if end - required_end >= required_start - start and end > required_end:
             end -= 1
-        elif start < line:
+        elif start < required_start:
             start += 1
-        else:
+        elif end > required_end:
             end -= 1
+        else:
+            break
         selected = "\n".join(lines[start - 1:end])
     anchor_complete = len(selected) <= max_chars
     selected = selected[:max_chars]
@@ -117,12 +140,49 @@ def source_window(text: str, path: str, line: int, *, max_chars: int = MAX_BLOCK
     return {
         "file": path, "line_start": start, "line_end": end, "text": selected,
         "anchor_line_complete": anchor_complete,
-        "selection": "python_function" if complete_function else "line_window",
+        "selection": "python_function" if complete_function else
+                     "paired_anchor_window" if companion is not None else "line_window",
+        "anchor_line": line, "companion_anchor_line": companion,
+        "companion_basis": "nearby_opposite_role_anchor_not_a_verified_edge" if companion is not None else None,
         "enclosing_python_function": function, "complete_function": complete_function,
         "source_lines": len(lines), "omitted_before": start > 1, "omitted_after": end < len(lines),
         "trimmed_to_char_budget": (start, end) != (original_start, original_end) or not anchor_complete,
         "call_relationship_verified": False,
+        "relationship_assessment": "not_assessed_by_context_collector",
     }
+
+
+def remove_covered_lines(block: Mapping[str, Any], existing: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Trim overlap with complete prior windows, without synthesizing source.
+
+    The caller already reuses an existing block when it contains the new anchor.
+    This function only trims window edges; the primary anchor cannot disappear.
+    An incomplete overlong line cannot serve as coverage for another window.
+    """
+    result = dict(block)
+    start, end, anchor = block["line_start"], block["line_end"], block["anchor_line"]
+    for prior in existing:
+        if prior["file"] != block["file"] or not prior["anchor_line_complete"]:
+            continue
+        first, last = prior["line_start"], prior["line_end"]
+        if first <= anchor <= last:
+            raise ValueError("source_anchor_already_covered")
+        if last < anchor:
+            start = max(start, last + 1)
+        elif first > anchor:
+            end = min(end, first - 1)
+    if (start, end) == (block["line_start"], block["line_end"]):
+        return result
+    lines = block["text"].split("\n")
+    result.update(line_start=start, line_end=end,
+        text="\n".join(lines[start - block["line_start"]:end - block["line_start"] + 1]),
+        selection="deduplicated_line_window", complete_function=False,
+        omitted_before=start > 1, omitted_after=end < block["source_lines"],
+        overlap_trimmed=True)
+    companion = result["companion_anchor_line"]
+    if companion is not None and not start <= companion <= end:
+        result.update(companion_anchor_line=None, companion_basis=None)
+    return result
 
 
 def defer_contract(evidence_ids: Sequence[str], *, stage: str = "semantic_judge") -> dict[str, Any]:

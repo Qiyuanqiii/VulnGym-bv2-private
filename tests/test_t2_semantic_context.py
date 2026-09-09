@@ -170,6 +170,9 @@ class SemanticContextIntegrationTests(unittest.TestCase):
         self.assertEqual(ctx["diffs"][0]["after_commit"], self.fixture.fix_commit)
         self.assertIn("@@", ctx["diffs"][0]["excerpt"])
         self.assertFalse(ctx["semantic_relationship_verified"])
+        self.assertEqual(ctx["contract_version"], 2)
+        self.assertEqual(ctx["collector_assessment"]["relationship"], "not_assessed")
+        self.assertIn("not_a_negative_verdict", ctx["collector_assessment"]["false_verification_flags_mean"])
         production = outcome.production_outcomes[0]
         evidence = {item.evidence_id: item for item in production.evidence}
         self.assertTrue(set(semantic["defer_contract"]["allowed_evidence_refs"]).issubset(evidence))
@@ -183,6 +186,17 @@ class SemanticContextIntegrationTests(unittest.TestCase):
         self.assertIn("return dangerous(request)", "\n".join(b["text"] for b in ctx["source_contexts"]))
         self.assertEqual(ctx["coverage_basis"], "candidate_anchor_line_not_entire_candidate_span")
         self.assertEqual(outcome.entry["verify"], 0)
+
+    def test_wire_in_both_judgment_stages_distinguishes_unassessed_from_disproved(self):
+        backend = fixture._ScriptedBackend()
+        self.runner(backend).run(self.fixture._task())
+        for current in backend.requests[1:]:
+            wire = json.loads(ds.build_chat_request(current, ds.DeepSeekSettings()))
+            prompt = wire["messages"][0]["content"]
+            self.assertIn("NOT ASSESSED by the collector, not disproved", prompt)
+            self.assertIn("neither justify selection nor, by themselves, justify deferral", prompt)
+            self.assertIn("not a verified relationship", prompt)
+        self.assertEqual(ds.PROMPT_VERSION, "t2-json-v5")
 
     def test_full_loaded_advisory_not_already_truncated_summary(self):
         path = self.fixture.package_root / "advisories/item.json"

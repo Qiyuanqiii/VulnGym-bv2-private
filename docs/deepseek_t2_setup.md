@@ -1,5 +1,7 @@
 # DeepSeek V4 Pro：T2 模型配置与实跑前检查
 
+**最新代码（2026-09-09）**：当前提示词为`t2-json-v5`，见[上下文投递修正与离线验证](t2_context_delivery_v2.md)。最近真实运行仍为v4：5请求全部返回、两题弃答、0完整候选。v5尚未付费实测；不能复用v4冻结配置或其已结束授权，旧记录保持原样。下文历史“当前/最新”仅指各段日期阶段。
+
 **当前状态（2026-09-09）**：prompt-v4首次[两份新输入实跑](t2_new_input_live_receipt.md)为4请求、0完整候选、2语义defer。随后修正上下文排序，[同输入诊断](t2_context_retest_receipt.md)在新key限额确认后已经执行：plan成功、语义请求120秒超时，第二题未发送；无新语义结果，不能判断修正效果。key已结束使用并通知撤销；不自动重跑。启动步骤见[quickstart](../START_HERE_T2.md)，以下旧状态保留历史含义。
 
 **当前代码（2026-09-08离线增量）**：[自检弃答与交接](t2_handoff_reflection_receipt.md)已实现，提示词身份为t2-json-v4。新生产reflection contract_version=2的defer须给有当前证据引用的短说明，emit仍只有action；旧默认保持原形状。324项回归323通过、1跳过，尚未调用真实服务验证v4；下面最新实跑仍是0190850/t2-json-v3的历史结果，不再使用那枚key。

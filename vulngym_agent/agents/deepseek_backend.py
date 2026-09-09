@@ -28,7 +28,7 @@ from vulngym_agent.agents.model_runtime import ModelBlocked, ModelRequest, struc
 MODEL_ID = "deepseek-v4-pro"
 API_HOST = "api.deepseek.com"
 API_PATH = "/chat/completions"
-PROMPT_VERSION = "t2-json-v4"
+PROMPT_VERSION = "t2-json-v5"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
@@ -41,6 +41,11 @@ or schema-valid object alone does not prove the semantic role is correct.
 Never fabricate locations, evidence, a successful review, or human verification.
 Use only the supplied task-scoped evidence; do not assume access to other files,
 network resources, benchmark answers or prior tasks. Do not output reasoning.
+Collector flags such as call_relationship_verified=false, semantic_relationship_verified=false,
+or unverified candidate roles mean NOT ASSESSED by the collector, not disproved.
+They neither justify selection nor, by themselves, justify deferral. Evaluate the
+actual supplied evidence; do not require another component to pre-approve your
+assessment. Paired anchors are retrieval proximity, not a verified relationship.
 """
 
 _STAGE_PROMPTS = {
@@ -79,6 +84,9 @@ not hidden reasoning or generic 'insufficient evidence'. For example the details
 shape is {"reason_code":"unsupported_relationship","missing_fields":["relationship"],
 "evidence_refs":["<current allowed ID>"],"explanation":"The supplied windows do not establish the candidate-to-candidate call relationship."}.
 This is your unverified self-report, not a human review or a factual verdict.
+If deferring for a relationship, identify the absent connection, missing range,
+or conflict in the supplied code/advisory, rather than citing an unassessed flag
+as a finding. Never invent a connection or assume an omitted check is absent.
 On select, OMIT defer_details. Contract_version=1 retains the base defer shape.""",
     "reflection": """Self-check payload.review_context.candidate against the
 supplied review evidence. This is producer self-review, not independent or human
@@ -95,6 +103,9 @@ Use payload.defer_contract: one permitted code, 1-6 unique missing fields and
 in 1-400 characters without newlines, not hidden reasoning. This is an
 unverified self-report, never an independent verdict. Initial review may cite
 review_context.semantic_context; repair may cite review_context.evidence.
+For initial review, reassess the source and advisory independently of the prior
+selection. An unverified candidate is not automatically wrong or automatically
+acceptable. Deferral must identify an actual unsupported claim or missing fact.
 On emit, OMIT defer_details. Contract_version=1 keeps {"action":"defer"}.""",
     "repair": """Choose only allowed repair_fields that have an evidenced
 T1 suggested_fix in the supplied repair plan. The controller applies the values;

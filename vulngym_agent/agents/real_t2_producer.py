@@ -705,7 +705,12 @@ class LocalStructuredT2Producer:
                 blobs[path] = (text, payload["text_sha256"], result.tool_call_id)
             text, digest, call_id = blobs[path]
             try:
-                block = semantic_context_tools.source_window(text, path, line, max_chars=min(semantic_context_tools.MAX_BLOCK_CHARS, remaining))
+                companions = [int(other.location["line"]) for other in choices
+                              if type(other) is not type(choice) and other.location["file"] == path]
+                block = semantic_context_tools.source_window(text, path, line,
+                    max_chars=min(semantic_context_tools.MAX_BLOCK_CHARS, remaining),
+                    companion_lines=companions)
+                block = semantic_context_tools.remove_covered_lines(block, blocks)
             except ValueError:
                 raise _Stop("semantic_judge", "invalid_context_anchor", ("a candidate anchor is outside the pinned source context",)) from None
             block.update(evidence_id=run.evidence_id(f"SEMANTIC-SOURCE-{len(blocks) + 1:03d}"),
@@ -722,16 +727,22 @@ class LocalStructuredT2Producer:
                 file=block["file"], line_start=block["line_start"], line_end=block["line_end"], tool_call_id=block["tool_call_id"],
             ))
         return {
-            "contract_version": 1,
+            "contract_version": 2,
             "advisory": {"evidence_id": advisory_id, "text": advisory_text, "truncated": advisory_truncated,
                          "source": "loaded_advisory_text", "tool_call_id": advisory_call_id},
             "diffs": diffs, "omitted_diff_count": changed_path_count - len(diffs),
             "source_contexts": blocks, "candidate_context_coverage": coverage,
-            "context_selection_policy": "role_and_path_balanced_near_anchor_v1",
+            "context_selection_policy": "role_path_paired_anchors_no_overlap_v2",
             "coverage_basis": "candidate_anchor_line_not_entire_candidate_span",
             "source_chars": used_chars, "source_files_read": len(blobs),
             "scope": "declared_paths_pinned_version_bounded_context_not_a_complete_call_graph",
             "semantic_relationship_verified": False,
+            "collector_assessment": {
+                "relationship": "not_assessed", "candidate_roles": "not_assessed",
+                "false_verification_flags_mean": "collector_has_not_verified_not_a_negative_verdict",
+                "pairing_is": "retrieval_proximity_not_semantic_relationship",
+                "model_task": "assess_supplied_code_and_advisory_not_presence_of_prior_approval",
+            },
         }
 
     def _generate(

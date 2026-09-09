@@ -83,7 +83,7 @@ class ReflectionDeferTests(unittest.TestCase):
         self.assertIsNotNone(outcome.report)
         wire = ds.build_chat_request(backend.requests[-1], ds.DeepSeekSettings())
         self.assertIn(b'"defer_details"', wire.replace(b'\\"', b'"'))
-        self.assertEqual(ds.PROMPT_VERSION, "t2-json-v4")
+        self.assertEqual(ds.PROMPT_VERSION, "t2-json-v5")
 
     def test_repair_self_report_uses_this_attempt_and_retained_schema_evidence(self):
         task = self.f._task()
