@@ -81,4 +81,10 @@ Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
 
 已修正版本的两份同输入诊断复测：`scripts/run_t2_context_retest_v1.py`。它只适用于当前开发机的已固定输入，复用原有六请求限制和独占运行标记，不是通用安装入口。`check` 不收费；`run` 还要求新 key、平台上限确认和脚本已提交。
 
-本轮获准上限20元、最多6请求、每题3次、零自动重试/repair。用户确认新key平台限额后已实际执行：plan成功、semantic_judge请求超时，第二题在本地被阻止，实际发送2次。无新的完整候选或语义判断，详见[诊断回执](docs/t2_context_retest_receipt.md)。key使用已结束，不要再次运行同一目录或复用该key；最新失败不改写已有成功/弃答分组。最终还需真实产出质量复核和演示成片。
+本轮获准上限20元、最多6请求、每题3次、零自动重试/repair。用户确认新key平台限额后已实际执行：plan成功、semantic_judge请求超时，第二题在本地被阻止，实际发送2次。无新的完整候选或语义判断，详见[诊断回执](docs/t2_context_retest_receipt.md)。key使用已结束，不要再次运行同一目录或复用该key；最新失败不改写已有成功/弃答分组。真实产出质量仍待复核；后续已有[结果讲解成片](docs/t2_results_video_receipt.md)，它不是现场模型生成。
+
+## 6. 下一轮诊断及交付分流
+
+已另存300秒受限入口`scripts/run_t2_context_retest_v2.py`，原两份输入及源码已离线核验；不修改上述旧120秒运行。`prepare/check`不读取key、不发送请求；`run`必须同时确认新的费用授权、平台20元硬上限以及具体清单摘要，才隐藏读取新的临时key。操作与验收见[下一步说明](docs/t2_disposition_and_next_run.md)。
+
+已有数据按[候选分流](evidence/t2-submission-disposition-20260909-v1/README.md)明确处理：12条含反证的历史候选暂不采用，28条未评候选不作质量承诺，1条单列模型候选带两项限制保留。所有原始数据及评价分母保持不变，不能把分流解释为本轮修复了21个错误字段。
