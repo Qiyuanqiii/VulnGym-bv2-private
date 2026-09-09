@@ -2,6 +2,8 @@
 
 当前仓库已更新到 [上下文投递v2 / prompt t2-json-v5](docs/t2_context_delivery_v2.md)，并完成[真实同输入诊断](docs/t2_context_retest_v3_receipt.md)：5请求、1份完整候选/T1、1次输出截断，生产退出1；两题均manual_review、verify=0、零重试。完整候选已作九维AI开发自评（5支持/4待定），非独立人审。以下旧包保持其固定版本，不含本次代码和结果。
 
+本轮另有13文件、25,184字节的`t2-context-diagnostic-20260909-v3.zip`增量结果包，解压后用`python -I -B verify_bundle.py`离线校验；[包核验记录](evidence/t2-context-handoff-20260909-v1/package_receipt.json)含真实摘要。它仅补交本轮结果和复核说明，不是最新完整源码或最终验收包。
+
 2026-09-09新增：已有含201秒中文讲解视频的168文件v2候选包，约15.40 MB；独立导出环境66项构造测试通过。见[视频及包核验记录](docs/t2_results_video_receipt.md)。视频基于已有真实结果，不是操作系统录屏或现场生成；源码/材料可交接，不代表主质量缺口已消失。旧149文件v1保留不变。
 
 2026-09-09。主产品是报告到 VulnGym Entry 的 CLI，T1 为辅助检查。当前可交接代码与真实结果，但尚未证明新输入上的稳定完整产出；不要将本文件当作全部验收通过声明。
