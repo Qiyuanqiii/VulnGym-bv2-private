@@ -265,6 +265,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     from vulngym_agent.agents.deepseek_backend import DeepSeekV4ProBackend
     if type(backend) is DeepSeekV4ProBackend:
         result["last_transport_failure"] = backend.last_transport_failure()
+        completion_failure = backend.last_completion_failure()
+        if completion_failure is not None:
+            result["last_completion_failure"] = completion_failure
     result["exit_code"] = exit_code
     _print_summary(result, stream=sys.stdout)
     return exit_code

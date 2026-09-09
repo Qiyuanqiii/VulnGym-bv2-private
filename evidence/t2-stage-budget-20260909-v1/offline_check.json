@@ -1,0 +1,37 @@
+{
+  "schema": "t2.stage-budget-offline-check.v1",
+  "baseline_commit": "a7df33b82a7e2830163c446c0bbb3d03d4e253b8",
+  "token_budget_profile": "t2-balanced-v1",
+  "stage_max_tokens": {"plan": 2048, "semantic_judge": 16384, "reflection": 4096, "repair": 4096},
+  "initial_three_stage_output_cap": 22528,
+  "two_task_three_stage_output_cap": 45056,
+  "previous_six_uniform_requests_output_cap": 49152,
+  "aggregate_cap_assumptions": "two tasks; exactly one plan, semantic_judge and reflection per task; no repair or retry",
+  "aggregate_cap_is_general_budget_enforcement": false,
+  "currency_cost_measured": false,
+  "prompt_version": "t2-json-v5",
+  "prompt_sha256": "36e7c74a989f5869ae015cee7a01d506181510a11375910a574949585ea3eb12",
+  "new_real_provider_requests": 0,
+  "live_truncation_fix_verified": false,
+  "semantic_quality_improvement_measured": false,
+  "uniform_backend_id_unchanged": "deepseek:t2-json-v5:e51cfb6d694bbdfda1fbee0d",
+  "uniform_request_sha256": {
+    "plan": "c4bca9a1ce087c292e5c212dbceac5db8589bdbe29767394de759aa34dac7540",
+    "semantic_judge": "aae2f22bbe1ee6e94c6d613e5446493de4ee94d97c80f24f8cbf4e484c808167",
+    "reflection": "7097f90c44d7ee7b7eedc95443627adf95ba0719368ac10cd269399587482377",
+    "repair": "e695a7beb18fb2247f9f5911f03418eb1fcb6bac8bbc9563d56b3deb68f658bd"
+  },
+  "offline_tests": {"adapter_and_production_cli": 73, "receipt_and_fixed_runner_regression": 63, "total": 136, "failed": 0, "new_tests": 21},
+  "non_secret_configuration_check": {
+    "processes": 2, "exit_codes": [0, 0], "stdout_byte_identical": true,
+    "stdout_bytes": 637, "stdout_sha256": "46358b76c0774de5ab377f515a9a36e91d412525c4bb936611ec129076d731ce",
+    "network_calls": 0, "credential_lookup": false, "timeout_seconds": 300
+  },
+  "historical_runtime_files_unchanged": {"current_run": 23, "baseline_run": 23},
+  "historical_receipt_manifest_sha256": "49761c39287d0956e322637a0af188f031ea10057bbf1f43605785d5908e24b5",
+  "historical_readback_four_checks_two_processes_each_identical": true,
+  "historical_production_exit_code_unchanged": 1,
+  "historical_complete_candidates_unchanged": 1,
+  "historical_t1_reports_unchanged": 1,
+  "human_verification_claimed": false
+}

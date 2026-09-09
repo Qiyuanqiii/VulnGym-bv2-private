@@ -31,6 +31,8 @@ API_PATH = "/chat/completions"
 PROMPT_VERSION = "t2-json-v5"
 MAX_REQUEST_BYTES = 2 * 1024 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_T2_STAGE_TOKEN_LIMITS = (("plan", 2048), ("semantic_judge", 16384),
+                        ("reflection", 4096), ("repair", 4096))
 
 _COMMON_PROMPT = """You produce structured VulnGym data from supplied evidence.
 Return exactly one JSON object matching the current stage contract, without
@@ -128,12 +130,18 @@ class DeepSeekSettings:
     reasoning_effort: str = "high"
     max_tokens: int = 8192
     timeout_seconds: float = 120.0
+    token_budget_profile: str = "uniform"
 
     def __post_init__(self) -> None:
         if self.reasoning_effort not in ("low", "high", "max"):
             raise ValueError("deepseek_reasoning_effort_invalid")
         if type(self.max_tokens) is not int or not 256 <= self.max_tokens <= 32768:
             raise ValueError("deepseek_max_tokens_invalid")
+        if self.token_budget_profile not in ("uniform", "t2-balanced-v1"):
+            raise ValueError("deepseek_token_budget_profile_invalid")
+        # A named fixed profile cannot silently override a custom uniform cap.
+        if self.token_budget_profile != "uniform" and self.max_tokens != 8192:
+            raise ValueError("deepseek_token_budget_profile_conflict")
         if (isinstance(self.timeout_seconds, bool)
                 or not isinstance(self.timeout_seconds, (float, int))
                 or not math.isfinite(self.timeout_seconds)
@@ -141,13 +149,28 @@ class DeepSeekSettings:
             raise ValueError("deepseek_timeout_invalid")
         object.__setattr__(self, "timeout_seconds", float(self.timeout_seconds))
 
+    def max_tokens_for_stage(self, stage: str) -> int:
+        if stage not in _STAGE_PROMPTS:
+            raise ValueError("deepseek_token_stage_invalid")
+        if self.token_budget_profile == "uniform":
+            return self.max_tokens
+        return dict(_T2_STAGE_TOKEN_LIMITS)[stage]
+
     def profile(self) -> dict[str, Any]:
-        return {"model": MODEL_ID, "endpoint": f"https://{API_HOST}{API_PATH}",
+        profile = {"model": MODEL_ID, "endpoint": f"https://{API_HOST}{API_PATH}",
                 "prompt_version": PROMPT_VERSION, "prompt_sha256": PROMPT_SHA256,
                 "thinking": "enabled", "reasoning_effort": self.reasoning_effort,
                 "max_tokens": self.max_tokens, "timeout_seconds": self.timeout_seconds,
                 "max_request_bytes": MAX_REQUEST_BYTES, "max_response_bytes": MAX_RESPONSE_BYTES,
                 "stream": False, "response_format": "json_object", "automatic_retries": 0}
+        # Keep the default profile byte-for-byte compatible with frozen runs.
+        if self.token_budget_profile != "uniform":
+            limits = dict(_T2_STAGE_TOKEN_LIMITS)
+            profile.update(token_budget_profile=self.token_budget_profile,
+                           stage_max_tokens=limits, max_tokens=max(limits.values()),
+                           initial_three_stage_output_cap=sum(limits[s] for s in
+                               ("plan", "semantic_judge", "reflection")))
+        return profile
 
 
 def build_chat_request(request: ModelRequest, settings: DeepSeekSettings) -> bytes:
@@ -171,7 +194,7 @@ def build_chat_request(request: ModelRequest, settings: DeepSeekSettings) -> byt
             {"role": "user", "content": _json_bytes(request.to_dict()).decode("utf-8")},
         ],
         "thinking": {"type": "enabled"}, "reasoning_effort": settings.reasoning_effort,
-        "response_format": {"type": "json_object"}, "max_tokens": settings.max_tokens,
+        "response_format": {"type": "json_object"}, "max_tokens": settings.max_tokens_for_stage(request.stage),
         "stream": False,
     })
     if len(body) > MAX_REQUEST_BYTES:
@@ -321,6 +344,38 @@ def _strict_object(raw: bytes) -> dict[str, Any]:
     return value
 
 
+class _CompletionBlocked(ModelBlocked):
+    """Completion metadata only; never retain answer or reasoning text."""
+
+    __slots__ = ("diagnostic",)
+
+    def __init__(self, diagnostic: dict[str, Any]) -> None:
+        super().__init__("deepseek_output_truncated")
+        self.diagnostic = diagnostic
+
+
+def _truncation_metadata(envelope: dict[str, Any], choice: dict[str, Any], size: int) -> dict[str, Any]:
+    message = choice.get("message")
+    message = message if isinstance(message, dict) else {}
+    usage = envelope.get("usage")
+    usage = usage if isinstance(usage, dict) else {}
+
+    def token_count(name: str) -> int | None:
+        value = usage.get(name)
+        return value if type(value) is int and 0 <= value <= 1_000_000_000 else None
+
+    prompt, completion, total = (token_count(k) for k in ("prompt_tokens", "completion_tokens", "total_tokens"))
+    return {"error_code": "deepseek_output_truncated", "phase": "parse_completion",
+            "finish_reason": "length", "response_bytes": size,
+            "answer_characters": len(message["content"]) if isinstance(message.get("content"), str) else None,
+            "provider_reasoning_characters": len(message["reasoning_content"])
+                if isinstance(message.get("reasoning_content"), str) else None,
+            "prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": total,
+            "usage_consistent": (prompt is not None and completion is not None and total is not None
+                                 and prompt + completion == total),
+            "currency_cost_measured": False}
+
+
 def parse_chat_response(raw: bytes) -> Mapping[str, Any]:
     if not isinstance(raw, bytes) or len(raw) > MAX_RESPONSE_BYTES:
         raise ModelBlocked("deepseek_response_too_large")
@@ -337,7 +392,9 @@ def parse_chat_response(raw: bytes) -> Mapping[str, Any]:
         raise ModelBlocked("deepseek_response_invalid")
     finish = choice.get("finish_reason")
     if finish != "stop":
-        raise ModelBlocked({"length": "deepseek_output_truncated", "content_filter": "deepseek_content_filtered",
+        if finish == "length":
+            raise _CompletionBlocked(_truncation_metadata(envelope, choice, len(raw)))
+        raise ModelBlocked({"content_filter": "deepseek_content_filtered",
                             "insufficient_system_resource": "deepseek_resource_unavailable"}.get(
                                 finish if isinstance(finish, str) else "", "deepseek_completion_incomplete"))
     message = choice.get("message")
@@ -357,7 +414,7 @@ def parse_chat_response(raw: bytes) -> Mapping[str, Any]:
 
 
 class DeepSeekV4ProBackend:
-    __slots__ = ("_api_key", "_settings", "_backend_id", "_halt_code", "_last_transport_failure")
+    __slots__ = ("_api_key", "_settings", "_backend_id", "_halt_code", "_last_transport_failure", "_last_completion_failure")
 
     def __init__(self, *, api_key: str, settings: DeepSeekSettings | None = None) -> None:
         if (not isinstance(api_key, str) or not 1 <= len(api_key) <= 4096
@@ -371,6 +428,7 @@ class DeepSeekV4ProBackend:
         self._backend_id = f"deepseek:{PROMPT_VERSION}:{digest[:24]}"
         self._halt_code: str | None = None
         self._last_transport_failure: dict[str, Any] | None = None
+        self._last_completion_failure: dict[str, Any] | None = None
 
     @property
     def backend_id(self) -> str:
@@ -387,6 +445,10 @@ class DeepSeekV4ProBackend:
         """A copy of bounded local timing/phase metadata, never request content."""
         return None if self._last_transport_failure is None else dict(self._last_transport_failure)
 
+    def last_completion_failure(self) -> dict[str, Any] | None:
+        """Latest truncation counters, including its own task/stage identity."""
+        return None if self._last_completion_failure is None else dict(self._last_completion_failure)
+
     def invoke(self, request: ModelRequest) -> Mapping[str, Any]:
         if type(request) is not ModelRequest or (request.backend_id, request.model_id) != (
                 self.backend_id, self.model_id):
@@ -399,36 +461,49 @@ class DeepSeekV4ProBackend:
         except ModelBlocked as error:
             if isinstance(error, _TransportBlocked):
                 self._last_transport_failure = dict(error.diagnostic)
+            if isinstance(error, _CompletionBlocked):
+                self._last_completion_failure = dict(error.diagnostic, task_id=request.task_id,
+                    stage=request.stage, model_call_id=request.model_call_id,
+                    configured_max_tokens=self._settings.max_tokens_for_stage(request.stage),
+                    request_bytes=len(body), request_sha256=sha256(body).hexdigest())
             if error.error_code in {"deepseek_authentication_failed", "deepseek_balance_insufficient",
                                     "deepseek_access_denied", "deepseek_rate_limited"}:
                 self._halt_code = error.error_code
             raise
 
 
-def create_backend() -> DeepSeekV4ProBackend:
-    """Read only task-specific settings/DEEPSEEK_API_KEY, without a network probe."""
-
+def settings_from_environment() -> DeepSeekSettings:
+    """Read only named non-secret settings. No key lookup or connection test."""
     try:
-        settings = DeepSeekSettings(
+        return DeepSeekSettings(
             reasoning_effort=os.environ.get("VULNGYM_DEEPSEEK_REASONING_EFFORT", "high"),
             max_tokens=int(os.environ.get("VULNGYM_DEEPSEEK_MAX_TOKENS", "8192")),
             timeout_seconds=float(os.environ.get("VULNGYM_DEEPSEEK_TIMEOUT_SECONDS", "120")),
+            token_budget_profile=os.environ.get("VULNGYM_DEEPSEEK_TOKEN_BUDGET_PROFILE", "uniform"),
         )
     except (TypeError, ValueError, OverflowError):
         raise ValueError("deepseek_settings_invalid") from None
+
+
+def create_backend() -> DeepSeekV4ProBackend:
+    """Read only task-specific settings/DEEPSEEK_API_KEY, without a network probe."""
+    settings = settings_from_environment()
     return DeepSeekV4ProBackend(api_key=os.environ.get("DEEPSEEK_API_KEY", ""), settings=settings)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check DeepSeek configuration locally; no API calls.")
-    parser.add_argument("--check-config", required=True, action="store_true")
-    parser.parse_args(argv)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--check-config", action="store_true")
+    mode.add_argument("--check-settings", action="store_true", help="Inspect non-secret settings without reading a key.")
+    args = parser.parse_args(argv)
     try:
-        profile = create_backend().configuration()
+        profile = settings_from_environment().profile() if args.check_settings else create_backend().configuration()
     except ValueError:
         print('{"status":"invalid","error_code":"deepseek_configuration_missing_or_invalid","network_calls":0}')
         return 2
-    print(_json_bytes({"status": "configured_not_connected", "network_calls": 0, **profile}).decode("utf-8"))
+    status = "settings_only_not_connected" if args.check_settings else "configured_not_connected"
+    print(_json_bytes({"status": status, "network_calls": 0, **profile}).decode("utf-8"))
     return 0
 
 

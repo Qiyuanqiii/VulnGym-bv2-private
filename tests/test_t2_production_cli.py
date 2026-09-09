@@ -258,6 +258,29 @@ class ProductionCompositionTests(unittest.TestCase):
         self.assertEqual(summary["execution_counts"]["model_problem_tasks"], 0)
         self.assertEqual(summary["execution_status"], "processed_not_quality_verified")
 
+    def test_cli_truncation_adds_only_metadata_and_keeps_exit_one(self):
+        from tests.test_deepseek_backend import KEY, envelope, wire
+        from vulngym_agent.agents import deepseek_backend as ds
+        backend = ds.DeepSeekV4ProBackend(api_key=KEY,
+            settings=ds.DeepSeekSettings(token_budget_profile="t2-balanced-v1"))
+        plan = envelope('{"action":"analyze","critical_mode":"sink"}')
+        truncated = envelope("do-not-log-answer", finish="length")
+        truncated["usage"] = {"prompt_tokens": 100, "completion_tokens": 16384, "total_tokens": 16484}
+        stdout = io.StringIO()
+        with patch.object(production, "load_backend_factory", return_value=backend), \
+                patch.object(ds, "_post_official", side_effect=[wire(plan), wire(truncated)]) as post, redirect_stdout(stdout):
+            code = production.main(self.cli_arguments() + ["--max-llm-calls", "3", "--max-repair-iterations", "0"])
+        summary = json.loads(stdout.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(summary["model_error_counts"], {"deepseek_output_truncated": 1})
+        self.assertEqual(summary["execution_counts"]["model_declared_defer_tasks"], 0)
+        self.assertEqual(summary["last_completion_failure"]["stage"], "semantic_judge")
+        self.assertEqual(summary["last_completion_failure"]["configured_max_tokens"], 16384)
+        self.assertNotIn("do-not-log-answer", stdout.getvalue())
+        self.assertNotIn("private-provider-reasoning", stdout.getvalue())
+        self.assertNotIn(KEY, stdout.getvalue())
+
     def test_cli_complete_candidate_count_does_not_require_finalized(self):
         stdout = io.StringIO()
         with patch.object(production, "load_backend_factory", return_value=self.backend), redirect_stdout(stdout):

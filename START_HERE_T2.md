@@ -1,5 +1,7 @@
 # T2 工具：先从这里运行
 
+新增可选[分阶段输出预算](docs/t2_stage_budget_receipt.md)和无需key的`--check-settings`；136项相关离线测试通过，尚无此profile的新实跑结果。默认配置不变，旧冻结启动器及下方历史包不包含本次更新，不能直接用于新profile付费重跑。
+
 当前仓库已更新到 [上下文投递v2 / prompt t2-json-v5](docs/t2_context_delivery_v2.md)，并完成[真实同输入诊断](docs/t2_context_retest_v3_receipt.md)：5请求、1份完整候选/T1、1次输出截断，生产退出1；两题均manual_review、verify=0、零重试。完整候选已作九维AI开发自评（5支持/4待定），非独立人审。以下旧包保持其固定版本，不含本次代码和结果。
 
 本轮另有13文件、25,184字节的`t2-context-diagnostic-20260909-v3.zip`增量结果包，解压后用`python -I -B verify_bundle.py`离线校验；[包核验记录](evidence/t2-context-handoff-20260909-v1/package_receipt.json)含真实摘要。它仅补交本轮结果和复核说明，不是最新完整源码或最终验收包。
