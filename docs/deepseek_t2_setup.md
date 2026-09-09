@@ -1,6 +1,6 @@
 # DeepSeek V4 Pro：T2 模型配置与实跑前检查
 
-**输出预算后续（2026-09-09）**：[分阶段预算配置](t2_stage_budget_receipt.md)已实现并离线通过136项相关测试。显式`t2-balanced-v1`为plan 2048、semantic 16384、reflection 4096；默认uniform与prompt保持原样。新增`--check-settings`无需key且不联网。尚未真实验证新profile，不声称截断已解决，也不修改下面真实运行计数。
+**输出预算后续（2026-09-09）**：[分阶段预算配置](t2_stage_budget_receipt.md)已完成[真实复测](t2_stage_budget_retest_receipt.md)：6请求、1候选/T1+1自检弃答、退出0、无截断；产出仍1/2，不能认定预算变化已带来稳定质量改善。显式`t2-balanced-v1`为plan 2048、semantic 16384、reflection 4096；默认uniform与prompt保持原样，`--check-settings`无需key且不联网。183项相关离线测试通过，旧运行计数及文件不改写，key使用已结束。
 
 **最新状态（2026-09-09）**：当前提示词`t2-json-v5`已完成[独立授权的真实诊断](t2_context_retest_v3_receipt.md)：5次HTTP返回，1份完整候选/T1，另1题达到8,192输出上限被拒收；整批退出1，不是网络超时或全部成功。零重试，key使用已结束；不得重跑原目录或复用已结束授权。下文历史“当前/最新”仅指各段日期阶段。
 
