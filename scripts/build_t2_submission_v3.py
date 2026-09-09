@@ -5,6 +5,7 @@ video. Output is new-only. Runtime tree equality binds the source to the latest
 real diagnostic without claiming it is a fresh run or a quality pass.
 """
 from hashlib import sha256
+import ast
 import io
 import json
 import os
@@ -81,6 +82,34 @@ def archive_bytes(members):
     return out.getvalue()
 
 
+def with_local_dependencies(blobs, catalog, fetch):
+    """Parse static local imports, including test functions, without execution."""
+    blobs = dict(blobs)
+    pending = {n for n in blobs if n.endswith(".py")}
+    while pending:
+        discovered = set()
+        for name in sorted(pending):
+            for node in ast.walk(ast.parse(blobs[name], filename=name)):
+                modules = []
+                if isinstance(node, ast.Import):
+                    modules = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                    modules = [node.module] + [node.module + "." + alias.name for alias in node.names]
+                for module in modules:
+                    if module.split(".")[0] not in {"scripts", "tests", "vulngym_agent"}:
+                        continue
+                    stem = module.replace(".", "/")
+                    discovered.update(n for n in (stem + ".py", stem + "/__init__.py") if n in catalog and n not in blobs)
+        if len(blobs) + len(discovered) > 400:
+            raise ValueError("dependency_inventory_limit")
+        loaded = fetch(sorted(discovered)) if discovered else {}
+        if set(loaded) != discovered:
+            raise ValueError("local_dependency_missing")
+        blobs.update(loaded)
+        pending = discovered
+    return blobs
+
+
 def exclusive(path, raw):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("xb") as f:
@@ -111,7 +140,8 @@ def main():
     assert out.resolve().is_relative_to(Path(r"D:\VulnGym-bv2-runtime\delivery").resolve())
     scoped = git("ls-tree", "-r", "--name-only", commit, "--", "vulngym_agent", "schemas", *PUBLIC_DIRS).decode().splitlines()
     names = set(scoped) | set(DOCS) | set(SCRIPTS) | {t.replace(".", "/") + ".py" for t in TESTS}
-    blobs = blobs_at(commit, names)
+    catalog = set(git("ls-tree", "-r", "--name-only", commit, "--", "scripts", "tests", "vulngym_agent").decode().splitlines())
+    blobs = with_local_dependencies(blobs_at(commit, names), catalog, lambda extra: blobs_at(commit, extra))
     # Compare the authored PDF's source pin to the committed brief, not a later worktree.
     pdf_receipt = json.loads(args.pdf.with_suffix(".json").read_bytes())
     pdf = args.pdf.read_bytes()
@@ -172,9 +202,12 @@ def main():
     for module in ("t2_production_cli", "submission_prediction_cli"):
         run(module + "-help", ["-m", "vulngym_agent." + module, "--help"], out / "source")
     clean = run("clean-environment", ["-I", "-c", "import importlib.util,json,sys; names=('pip','jsonschema','cryptography'); missing={n:importlib.util.find_spec(n) is None for n in names}; assert all(missing.values()); print(json.dumps({'python':sys.version.split()[0],'missing':missing},sort_keys=True))"])
-    tests = run("exported-tests", ["-m", "unittest", *TESTS, "-q"], out / "source", timeout=600)
+    tests = run("exported-tests", ["-m", "unittest", *TESTS, "-v"], out / "source", timeout=600)
     match = re.search(rb"Ran (\d+) tests in ([0-9.]+)s", tests.stderr)
-    assert match and tests.stderr.rstrip().endswith(b"OK")
+    assert match and re.search(rb"\nOK(?: \(skipped=1\))?\s*$", tests.stderr)
+    skips = [line.decode() for line in tests.stderr.splitlines() if b" ... skipped " in line]
+    assert len(skips) == 1 and "test_full_entry_lane_runs_real_t2_into_real_t1_with_in_memory_sidecars" in skips[0]
+    assert "jsonschema is not installed" in skips[0], "unexpected_test_skip"
     final_verify = run("verify-after-tests", ["-I", "verify_delivery.py"])
     assert final_verify.stdout == verifies[0].stdout
     raw = archive_bytes(members)
@@ -188,7 +221,8 @@ def main():
         "files": len(members), "source_files": len(blobs), "source_commit": commit,
         "runtime_tree": RUNTIME, "execution_commit": EXECUTION,
         "uncompressed_bytes": sum(map(len, members.values())), "manifest_sha256": sha256(members["MANIFEST.json"]).hexdigest(),
-        "exported_tests": {"modules": TESTS, "count": int(match[1]), "seconds": float(match[2]), "exit_code": 0},
+        "exported_tests": {"modules": TESTS, "count": int(match[1]), "passed": int(match[1]) - len(skips),
+                           "skipped": len(skips), "skip_details": skips, "seconds": float(match[2]), "exit_code": 0},
         "clean_environment": json.loads(clean.stdout), "verify_two_processes_byte_equal": True,
         "demo_two_processes_byte_equal": True, "runtime_matches_actual_run": True,
         "zip_reproducible_byte_equal": True, "zip_readback_byte_equal": True,

@@ -43,6 +43,8 @@ python -B -m vulngym_agent.submission_prediction_cli --help
 
 ## 运行回归测试
 
+干净标准库环境中，唯一预期跳过是附加jsonschema库检查；它需要requirements-dev.txt中的可选开发依赖。其余测试必须成功，不将跳过计作通过。打包器包含静态导入的本地辅助模块，不依赖作者原工作区补文件。
+
 核心CLI和以下选定测试使用Python标准库；测试需要本机Git，部分以本地回环服务模拟响应，无外部模型调用。不要直接把全部测试发现当作本包支持的安装验收；可选开发依赖另见`source/requirements-dev.txt`。
 
 在自己的工作盘创建临时目录，将TEMP/TMP指向它。在Windows的D盘示例（如无D盘自行换到可用工作盘）：

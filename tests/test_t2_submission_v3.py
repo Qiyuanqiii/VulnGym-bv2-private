@@ -10,7 +10,7 @@ from unittest.mock import patch
 import zipfile
 
 from scripts import verify_t2_submission_v3 as v
-from scripts.build_t2_submission_v3 import archive_bytes
+from scripts.build_t2_submission_v3 import archive_bytes, with_local_dependencies
 from scripts.demo_t2_submission_v3 import explain
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -75,6 +75,22 @@ class SubmissionV3Tests(unittest.TestCase):
         self.assertEqual(result["new_model_calls"], 0)
         self.assertFalse(result["complete_T2_quality_acceptance"])
         self.assertIsNone(result["semantic_accuracy"])
+
+    def test_dependency_closure_includes_function_local_and_transitive_imports(self):
+        available = {"tests/a.py": b"def check():\n from scripts.b import value\n",
+                     "scripts/b.py": b"from scripts import c\nvalue=1\n",
+                     "scripts/c.py": b"import os\n"}
+        result = with_local_dependencies({"tests/a.py": available["tests/a.py"]}, set(available),
+                                         lambda names: {n: available[n] for n in names})
+        self.assertEqual(result, available)
+
+    def test_dependency_closure_does_not_execute_source(self):
+        source = {"scripts/a.py": b"raise RuntimeError('must not execute')\nimport subprocess\n"}
+        self.assertEqual(with_local_dependencies(source, set(source), lambda names: {}), source)
+
+    def test_dependency_fetch_cannot_silently_omit_module(self):
+        with self.assertRaisesRegex(ValueError, "local_dependency_missing"):
+            with_local_dependencies({"tests/a.py": b"import scripts.b\n"}, {"scripts/b.py"}, lambda names: {})
 
     def test_zip_reproducible_and_readback(self):
         raw = archive_bytes(self.members)

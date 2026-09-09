@@ -5,6 +5,8 @@
 
 ## 2026-09-10：连续完成内容复核、可运行交验与同版打包
 
+首次导出在干净环境实际跑170项：3项因遗漏probe辅助模块报错，另1项因未安装可选jsonschema跳过；没有生成ZIP。随后把打包清单扩为静态本地import闭包（包括函数内导入及传递依赖），新增3项构造回归，包检查测试达到30项。原失败目录保留，r1另建；不删除失败记录或修改这些测试的功能断言来绕过问题。导出回执明确列出唯一预期jsonschema跳过，不把它算通过。
+
 用户实际要求：“你现在干活就不能一次性干多点吗？天天分段”。本次先明确一个连续交付批次，不再追加付费调用或等待新key；保留所有旧运行和旧ZIP。
 
 实际模型反馈来自最新第1题reflection原件，关键句为“Source shows line 297 is an unchanged resolveDiscordMemberAccessState assignment; the diff inserts the guild/channel policy guard later”。对照已获准固定源码，发现旧297对应新332，而新增检查在309-330，若later指代码顺序则不符；若指后续版本则含混。原defer不改，新解释另存。没有把所有context候选排除，也没有补造Entry。
