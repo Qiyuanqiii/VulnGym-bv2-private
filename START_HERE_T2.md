@@ -85,6 +85,6 @@ Remove-Item Env:DEEPSEEK_API_KEY -ErrorAction SilentlyContinue
 
 ## 6. 下一轮诊断及交付分流
 
-已另存300秒受限入口`scripts/run_t2_context_retest_v2.py`，原两份输入及源码已离线核验；不修改上述旧120秒运行。`prepare/check`不读取key、不发送请求；`run`必须同时确认新的费用授权、平台20元硬上限以及具体清单摘要，才隐藏读取新的临时key。操作与验收见[下一步说明](docs/t2_disposition_and_next_run.md)。
+300秒受限入口`scripts/run_t2_context_retest_v2.py`现已实际运行结束：5次请求全部返回、67,693 tokens，两条分别在语义/自检阶段弃答，完整Entry/T1均0；见[v2回执](docs/t2_context_retest_v2_receipt.md)。不要再次对同一目录执行`run`，也不复用已结束授权。`check`仅核验冻结配置，不能当作新实跑；旧120秒运行及原始数据不改写。
 
 已有数据按[候选分流](evidence/t2-submission-disposition-20260909-v1/README.md)明确处理：12条含反证的历史候选暂不采用，28条未评候选不作质量承诺，1条单列模型候选带两项限制保留。所有原始数据及评价分母保持不变，不能把分流解释为本轮修复了21个错误字段。

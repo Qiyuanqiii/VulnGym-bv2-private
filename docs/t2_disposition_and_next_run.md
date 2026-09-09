@@ -1,6 +1,6 @@
 # 当前交付选择与下一次受限诊断
 
-2026-09-09。本轮只做离线数据分流、入口准备及回归；新增模型请求为0，未读取或复用历史key。T2为主、T1辅助。
+2026-09-09。本文件原为离线数据分流和入口准备记录；准备阶段新增模型请求为0。用户随后重新提供凭证并授权，最新[300秒诊断](t2_context_retest_v2_receipt.md)已经结束：5次成功请求、两条弃答、无完整候选。下面保留准备依据，不能再次对已完成目录启动运行。T2为主、T1辅助。
 
 ## 1. 现在怎样交已有数据
 
@@ -26,18 +26,18 @@
 python -B scripts/prepare_t2_submission_disposition.py --output-dir evidence/t2-submission-disposition-20260909-v1 --check
 ```
 
-## 2. 下次模型运行准备到了哪里
+## 2. 300秒诊断配置与结束状态
 
 新入口：`scripts/run_t2_context_retest_v2.py`。开发机上的新目录为`D:\VulnGym-bv2-runtime\t2-context-retest-20260909-v2-longwait`；这是本机复测脚本，不是通用安装路径。
 
-- 状态：**已准备且离线预检通过，未获本轮新凭证/费用确认，未启动。**
+- 状态：**已获本轮授权且运行结束；5次请求返回、退出0，但两条弃答。key使用已结束并通知撤销，禁止对同一目录重跑。**
 - 本次实际清单摘要：`ca37cb9bb7661c5ad000e381665bd374fb9c6a6ed3b6f81a4265d2152be93533`。仅供与离线`check`输出比较，不是运行许可。
 - 原两份输入、允许资料及固定源码保持不变；两题都是已见的诊断样本，不重新记为新输入。
 - 运行树：`5d8cfbc7f0bc0c50190310a25d56f6524375251e`；来自`1f48e5ed937596dc5ad1995a30eaf50f8f58f7ac`，包括失败状态与阶段诊断改进。
 - 模型/prompt仍为DeepSeek V4 Pro/t2-json-v4；high、8192输出上限、不启用stream。
 - 此脚本显式选择单请求300秒，产品默认仍120秒。它并不能保证服务端按时返回；DNS解析等系统环节也不因此获得严格整进程时限。
 - 全批最多6次发送尝试、每题3次、零自动重试/repair。失败停止后续发送；开始标记独占创建，不重启同一输出目录。
-- 拟议预算仍20元，真正金额上限依赖用户设置的平台硬限额；不能把token数换算成已知账单。
+- 本轮获准预算20元，真正金额上限依赖用户确认的平台硬限额；不能把token数换算成已知账单。用户明确重新授权所提供的同一枚凭证，不是agent自行沿用旧授权。
 - 仅记录请求摘要、长度、阶段、耗时和可用usage；超时用量未知，禁止记录key/原始模型回复到公开回执。
 
 离线预检：
@@ -46,15 +46,9 @@ python -B scripts/prepare_t2_submission_disposition.py --output-dir evidence/t2-
 python -B scripts/run_t2_context_retest_v2.py check
 ```
 
-预检打印实际`input_manifest_sha256`。真正运行前，用户需要提供新的有效临时key并明确授权该范围及平台20元硬限额。只在获准后使用下列命令，将占位摘要替换成当次已核对的完整摘要；脚本通过终端隐藏输入读取key，不使用历史对话或环境中的旧key。
+预检打印实际`input_manifest_sha256`。本次正式执行前核对完整摘要并传入`--confirm-paid-retest`、`--confirm-platform-cap`，再由终端隐藏输入取得用户本次明确提供的凭证。正式运行命令已执行完毕，不再提供可误点重跑的命令；三个确认参数不是授权本身。平台余额、限额及撤销情况均不冒称已由程序查询。不得改写输入清单、旧运行/输出或已发布ZIP来复用授权。
 
-```powershell
-python -B scripts/run_t2_context_retest_v2.py run --confirm-paid-retest --confirm-platform-cap --expected-manifest-sha256 <已核对的64位摘要>
-```
-
-三个确认参数不是授权本身，不能由agent在用户尚未确认时自行代填。平台余额、限额及撤销情况均不冒称已由程序查询。结束后明确通知用户撤销key。不得改写v1输入清单、旧运行/输出或已发布ZIP来复用授权。
-
-## 3. 下次结束后的验收顺序
+## 3. 结束后的验收顺序
 
 1. 记录真实退出码和传输日志。正常语义defer、完整候选、传输失败分开计数；退出0不是质量通过。
 2. 若有完整候选，按原九维协议给出具体证据/反证/待定项；模型自述、T1和格式通过不能替代内容评价。
@@ -68,6 +62,6 @@ python -B scripts/run_t2_context_retest_v2.py run --confirm-paid-retest --confir
 
 127项离线相关测试通过，涵盖既有质量协议、分流器、旧/新受限传输、DeepSeek适配器及生产CLI。测试验证分母不丢、反证不变成不确定、机器verify不提升、300秒选择不改默认、最多6/每题3、零重试、日志失败先停、旧目录保全和未经确认不读取key。
 
-实际命令为`python -B -m unittest tests.test_t2_submission_disposition tests.test_t2_quality_review tests.test_t2_context_retest_v2 tests.test_t2_context_retest_run tests.test_t2_new_input_run tests.test_deepseek_backend tests.test_t2_production_cli -q`，127项、38.085秒、退出0。分流`--check`和诊断`check`各用两个独立进程读回，均退出0且输出相同；分流4个公共文件共69,861字节，未发现密钥格式、绝对本机路径或禁用私有数据标记。新诊断目录没有`run-start.json`或`output`，不会将准备成功计为运行成功。
+准备阶段实际命令为`python -B -m unittest tests.test_t2_submission_disposition tests.test_t2_quality_review tests.test_t2_context_retest_v2 tests.test_t2_context_retest_run tests.test_t2_new_input_run tests.test_deepseek_backend tests.test_t2_production_cli -q`，127项、38.085秒、退出0。分流`--check`和诊断`check`各用两个独立进程读回，均退出0且输出相同；分流4个公共文件共69,861字节，未发现密钥格式、绝对本机路径或禁用私有数据标记。预检当时尚无`run-start.json`或`output`；正式运行后这些文件存在，应保全，不能把这句历史状态用于再次启动。
 
 这是代码/契约测试，不是127个真实生产样本。仍缺成功的修正后语义复测、有效新输入数据和独立或明确标为自评的质量验收。#12/#97保留开放，#90/#94不作为主交验阻塞且不关闭。
