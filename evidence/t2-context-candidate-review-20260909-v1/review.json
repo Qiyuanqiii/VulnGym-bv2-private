@@ -1,0 +1,36 @@
+{
+  "schema": "t2.single-candidate-content-self-review.v1",
+  "sample_group": "seen_input_diagnostic_retest_not_new_input_evaluation",
+  "task_id": "VG-NEW-20260908-002",
+  "report_id": "GHSA-CM35-V4VP-5XVX",
+  "candidate_sha256": "2b1e946892889632aa5389afd81f8fbc4d7ab04bd746351cf1d14d8e90fcf19d",
+  "validation_sha256": "db7955888a931a08c1dc94f129e67d05e798a4590c4c6a61563fcb7a56dd9d67",
+  "run_dataset_sha256": "7075988865c27a8998d0576f98fa6279006cf13e93934b97f767d274ed8e1b37",
+  "reviewer": {"name": "current AI assistant", "kind": "ai_assisted_self_review", "independence": "self", "assessed_at": "2026-09-09"},
+  "reviewer_identity_and_independence_verified": false,
+  "independent_human_review_completed": false,
+  "target_execution_performed": false,
+  "source_evidence": {
+    "A": {"kind": "approved_excerpted_advisory", "path": "input/package/advisory-GHSA-CM35-V4VP-5XVX.json", "sha256": "efb7800590ad90eed014627628e1bdcfe8d8a5b5a207f51182806ba4e4255e63"},
+    "P": {"kind": "approved_patch", "path": "input/package/patch-GHSA-CM35-V4VP-5XVX.diff", "sha256": "a090cb846d99ae73afbbcac6da48db90a67c014b2befcca16fb688b9313ce6e5"},
+    "S": {"kind": "fixed_git_blob", "repo_url": "https://github.com/open-webui/open-webui", "commit": "9762ef3ef6f230bfed8d550dde69df6187f6267d", "path": "backend/open_webui/utils/middleware.py", "sha256": "880678b204190100f014b580ba6c2b1ecc13dda1acfc48d1068d44b9863ca724"}
+  },
+  "fields": {
+    "source_identity": {"level": "fact", "status": "supported", "evidence_refs": ["A", "P", "S"], "reason": "Candidate GHSA/CVE, repository and report links agree with the approved advisory package and fixed task.", "next_action": null},
+    "version_basis": {"level": "fact", "status": "uncertain", "evidence_refs": ["A", "P", "S"], "reason": "The candidate is the direct parent of the supplied fix and the patch is relevant. Advisory prose says 0.6.33 and below while its version range includes 0.6.34; release/tag mapping was not established.", "next_action": "Resolve the advisory version discrepancy and connect the chosen commit to affected release/code semantics; do not substitute Git parenthood for that decision."},
+    "entry_location": {"level": "fact", "status": "supported", "evidence_refs": ["S:2291-2341"], "reason": "The candidate snippet and its starting line match this fixed source interval; this is a location judgment only.", "next_action": null},
+    "operation_location": {"level": "fact", "status": "supported", "evidence_refs": ["S:2352", "P"], "reason": "The candidate condition exists at the claimed line on the old side and is changed by the approved patch.", "next_action": null},
+    "entry_role": {"level": "semantic", "status": "uncertain", "evidence_refs": ["A", "S:2291-2353"], "reason": "The local function processes response events, but the external/request/frontend path has not been fully checked. A function definition is not by itself a verified entry role.", "next_action": "Check the declared entry boundary against permitted caller/consumer evidence, or retain explicit uncertainty."},
+    "operation_role": {"level": "semantic", "status": "uncertain", "evidence_refs": ["P", "S:2351-2353"], "reason": "The candidate names the condition at 2352 rather than the following forwarding call at 2353. Patch relevance supports investigation, not an automatic decision that this is the appropriate critical role.", "next_action": "Explain condition versus call as a defensible role choice and its connection to the advisory's client behavior; do not infer it from a missing guard alone."},
+    "trace": {"level": "semantic", "status": "uncertain", "evidence_refs": ["S:2338-2353"], "reason": "The empty trace invents no nodes, but omission of visible local relationships and the unverified cross-component connection is not explained.", "next_action": "Determine what the trace should include from evidenced relationships; record unresolved scope rather than fabricate links."},
+    "title_and_project": {"level": "semantic", "status": "supported", "evidence_refs": ["A", "S"], "reason": "The title preserves the report's stated topic and the project agrees with the approved repository identity.", "next_action": null},
+    "classification": {"level": "semantic", "status": "supported", "evidence_refs": ["A"], "reason": "The advisory explicitly describes JavaScript code injection through SSE events, consistent with the candidate's two classification levels. This does not establish end-to-end reachability.", "next_action": null}
+  },
+  "counts": {"supported": 5, "reasonable_alternative": 0, "contradicted": 0, "uncertain": 4, "not_reviewed": 0},
+  "all_nine_dimensions_considered": true,
+  "semantic_accuracy": null,
+  "workflow_status_unchanged": "manual_review",
+  "verify_unchanged": 0,
+  "disposition": "pending_review_not_certified_correct",
+  "original_candidate_modified": false
+}
