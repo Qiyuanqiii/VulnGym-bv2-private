@@ -1,0 +1,212 @@
+{
+  "schema": "t2.current-diagnostic-review.v1",
+  "assessed_at": "2026-09-10",
+  "reviewer": {
+    "kind": "ai_assisted_self_review",
+    "independence": "self",
+    "name": "current AI assistant"
+  },
+  "scope": "existing_two_input_diagnostic_not_new_blind_evaluation",
+  "independent_human_review_completed": false,
+  "original_outputs_modified": false,
+  "semantic_accuracy": null,
+  "new_model_calls": 0,
+  "source_evidence": {
+    "A1": {
+      "kind": "approved_excerpted_advisory",
+      "path": "input/package/advisory-GHSA-JP4J-Q5FC-58GV.json",
+      "sha256": "ce8847343d7f46d7becb24715dec5a15d0b1e299964ea0072a5c46d0fc5d87b5"
+    },
+    "P1": {
+      "kind": "approved_patch",
+      "path": "input/package/patch-GHSA-JP4J-Q5FC-58GV.diff",
+      "sha256": "e00c3b111b1e6c9ae7749cd1c315638d656169a4429dfc5bf4c0f7c4eddbd1be"
+    },
+    "S1": {
+      "kind": "fixed_git_blob",
+      "repo_url": "https://github.com/openclaw/openclaw",
+      "commit": "e403decb6e20091b5402780a7ccd2085f98aa3cd",
+      "path": "extensions/discord/src/monitor/agent-components-helpers.ts",
+      "git_blob": "e9e8a5220cb2e9583987cc9c307a2790f465b2eb"
+    },
+    "F1": {
+      "kind": "fixed_git_blob",
+      "repo_url": "https://github.com/openclaw/openclaw",
+      "commit": "511093d4b37c0831c778fabd25ec3020834983c3",
+      "path": "extensions/discord/src/monitor/agent-components-helpers.ts",
+      "git_blob": "f6c5f9f5cbe5ae3fad2508006e6073413415f3b4"
+    },
+    "A2": {
+      "kind": "approved_excerpted_advisory",
+      "path": "input/package/advisory-GHSA-CM35-V4VP-5XVX.json",
+      "sha256": "efb7800590ad90eed014627628e1bdcfe8d8a5b5a207f51182806ba4e4255e63"
+    },
+    "P2": {
+      "kind": "approved_patch",
+      "path": "input/package/patch-GHSA-CM35-V4VP-5XVX.diff",
+      "sha256": "a090cb846d99ae73afbbcac6da48db90a67c014b2befcca16fb688b9313ce6e5"
+    },
+    "S2": {
+      "kind": "fixed_git_blob",
+      "repo_url": "https://github.com/open-webui/open-webui",
+      "commit": "9762ef3ef6f230bfed8d550dde69df6187f6267d",
+      "path": "backend/open_webui/utils/middleware.py",
+      "sha256": "880678b204190100f014b580ba6c2b1ecc13dda1acfc48d1068d44b9863ca724"
+    }
+  },
+  "defer_review": {
+    "task_id": "VG-NEW-20260908-001",
+    "deferred_sha256": "da910968d9bb07a7109d70de2a0df41a6c83ac945c13cf0644d1826567f37c9c",
+    "original_reason_code": "ambiguous_candidate_roles",
+    "original_stage": "reflection",
+    "complete_candidate_exists": false,
+    "disposition": "retain_defer_correct_source_order_explanation",
+    "findings": [
+      {
+        "claim": "The selected old line 297 is an unchanged assignment.",
+        "status": "supported",
+        "evidence_refs": [
+          "S1:297-307",
+          "F1:332-342",
+          "P1"
+        ],
+        "reason": "The assignment to memberAllowed is retained; its old coordinate 297 maps to new coordinate 332."
+      },
+      {
+        "claim": "The policy checks are inserted later than the assignment in source order.",
+        "status": "contradicted",
+        "evidence_refs": [
+          "F1:309-332",
+          "P1"
+        ],
+        "reason": "New checks occupy lines 309-330, before the assignment at 332. If 'later' meant a later revision rather than source order, the wording is ambiguous; neither reading proves the selected role."
+      },
+      {
+        "claim": "An unchanged context line cannot be a legitimate critical-operation anchor.",
+        "status": "not_established",
+        "evidence_refs": [
+          "S1:297-310",
+          "F1:309-344",
+          "P1"
+        ],
+        "reason": "Unchanged context can anchor a missing-check hypothesis. Neither adjacency nor the assignment alone proves the role. Do not turn this into a universal candidate exclusion rule."
+      }
+    ],
+    "next_action": "Review the chosen entry boundary and its relation to the missing policy checks using permitted source evidence. Keep the original defer; correcting its rationale does not create a complete Entry or authorize finalization.",
+    "production_status_unchanged": "manual_review"
+  },
+  "candidate_review": {
+    "task_id": "VG-NEW-20260908-002",
+    "candidate_sha256": "922cb175c2607ba6bd38372bb26eb943d2ec13939667a4b7a5bda0ecafe0c6b3",
+    "validation_sha256": "db7955888a931a08c1dc94f129e67d05e798a4590c4c6a61563fcb7a56dd9d67",
+    "baseline_candidate_sha256": "2b1e946892889632aa5389afd81f8fbc4d7ab04bd746351cf1d14d8e90fcf19d",
+    "changed_fields": [
+      "vuln_category_l2"
+    ],
+    "category_current": "Cross-Site Scripting (XSS)",
+    "category_baseline": "JavaScript Injection via Server-Sent Events",
+    "fields": {
+      "source_identity": {
+        "level": "fact",
+        "status": "supported",
+        "evidence_refs": [
+          "A2",
+          "P2",
+          "S2"
+        ],
+        "reason": "The report, approved patch, repository identity and pinned source file refer to the recorded task; this does not establish an affected release.",
+        "next_action": null
+      },
+      "version_basis": {
+        "level": "fact",
+        "status": "uncertain",
+        "evidence_refs": [
+          "A2",
+          "P2",
+          "S2"
+        ],
+        "reason": "Advisory prose says v0.6.33 and below, while structured ranges say <=0.6.34 and first patched 0.6.35. Parenthood alone is not release/affected-code proof.",
+        "next_action": "Reconcile the version discrepancy and map the pinned source to affected code/releases without inferring from Git ancestry alone."
+      },
+      "entry_location": {
+        "level": "fact",
+        "status": "supported",
+        "evidence_refs": [
+          "S2:2291-2341"
+        ],
+        "reason": "The candidate's complete-line snippet and start coordinate match the fixed source. This judges location, not external reachability.",
+        "next_action": null
+      },
+      "operation_location": {
+        "level": "fact",
+        "status": "supported",
+        "evidence_refs": [
+          "S2:2352",
+          "P2"
+        ],
+        "reason": "The selected old-side condition exists at line 2352 and is changed by the approved patch.",
+        "next_action": null
+      },
+      "entry_role": {
+        "level": "semantic",
+        "status": "uncertain",
+        "evidence_refs": [
+          "A2",
+          "S2:2291-2353"
+        ],
+        "reason": "The function processes response events; the relevant request/caller/client-consumer path is not fully established by the permitted excerpt.",
+        "next_action": "Supply permitted caller/consumer evidence for the declared entry boundary, or retain this field as unresolved."
+      },
+      "operation_role": {
+        "level": "semantic",
+        "status": "uncertain",
+        "evidence_refs": [
+          "S2:2351-2353",
+          "P2"
+        ],
+        "reason": "The candidate chooses the condition at 2352 rather than the following event-forwarding call. Patch relevance does not alone settle the role.",
+        "next_action": "Explain why the conditional gate or forwarding call is the intended critical operation and relate it to the report; preserve uncertainty until evidenced."
+      },
+      "trace": {
+        "level": "semantic",
+        "status": "uncertain",
+        "evidence_refs": [
+          "S2:2338-2353",
+          "A2"
+        ],
+        "reason": "An empty trace is structurally valid but does not explain the visible local processing relationship or unverified cross-component boundary.",
+        "next_action": "Describe the trace scope and add only evidenced relationships; do not fabricate a complete chain."
+      },
+      "title_and_project": {
+        "level": "semantic",
+        "status": "supported",
+        "evidence_refs": [
+          "A2",
+          "S2"
+        ],
+        "reason": "The title accurately retains the report's stated subject; the project agrees with the approved repository.",
+        "next_action": null
+      },
+      "classification": {
+        "level": "semantic",
+        "status": "reasonable_alternative",
+        "evidence_refs": [
+          "A2",
+          "P2",
+          "S2"
+        ],
+        "reason": "The advisory explicitly describes JavaScript execution in victim browsers, so XSS is a plausible broader classification alongside the previous SSE-specific wording. The backend snippet alone does not prove client behavior, and no authoritative project taxonomy equivalence was established.",
+        "next_action": "Retain both labels and the advisory basis for reviewer choice; confirm the intended taxonomy granularity. Do not treat the new label as an automatic correction or inherit the old supported score."
+      }
+    },
+    "counts": {
+      "supported": 4,
+      "reasonable_alternative": 1,
+      "uncertain": 4
+    },
+    "all_nine_dimensions_considered": true,
+    "workflow_status_unchanged": "manual_review",
+    "verify_unchanged": 0,
+    "disposition": "pending_review_not_certified_correct"
+  }
+}
